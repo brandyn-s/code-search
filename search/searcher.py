@@ -250,7 +250,7 @@ class IntelligentSearcher:
         vector_pairs = [(chunk_id, sim) for chunk_id, sim, _meta in vector_raw]
 
         # BM25 search (with optional query expansion)
-        bm25_query = expand_code_query(query) if os.environ.get("QUERY_EXPANSION", "off") == "on" else query
+        bm25_query = expand_code_query(query) if os.environ.get("QUERY_EXPANSION", "on") == "on" else query
         bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k)
         bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
 
