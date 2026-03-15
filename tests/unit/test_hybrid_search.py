@@ -97,3 +97,20 @@ def test_chunk_type_boosts_docs_mode():
     boosts = CHUNK_TYPE_BOOSTS["docs"]
     assert boosts["section"] > boosts["function"]
     assert boosts["section"] > boosts["method"]
+
+
+def test_expand_query_adds_synonyms():
+    """Query expansion should add known code-domain synonyms."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("authentication logic")
+    assert "auth" in expanded.lower()
+    assert "oauth" in expanded.lower() or "jwt" in expanded.lower()
+
+
+def test_expand_query_passthrough_unknown():
+    """Queries with no known synonyms should pass through unchanged."""
+    from search.searcher import expand_code_query
+
+    result = expand_code_query("foobar baz")
+    assert result == "foobar baz"

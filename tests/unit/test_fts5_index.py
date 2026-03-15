@@ -15,6 +15,7 @@ def _make_result(chunk_id: str, content: str, file_path: str = "test.py") -> Emb
             "file_path": file_path,
             "relative_path": file_path,
             "content_preview": content,
+            "full_content": content,
             "chunk_type": "function",
             "start_line": 1,
             "end_line": 10,
@@ -84,3 +85,19 @@ def test_fts5_cleared_on_clear_index():
         mgr2 = CodeIndexManager(tmpdir)
         assert mgr2.search_bm25("redis", k=5) == []
         _close_manager(mgr2)
+
+
+def test_fts5_finds_keyword_deep_in_content():
+    """FTS5 should find keywords that appear past the 200-char preview cutoff."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mgr = CodeIndexManager(tmpdir)
+        # Content with "authentication" at position 300+
+        deep_content = "def setup():\n" + "    x = 1\n" * 30 + "    # authentication logic here\n"
+        mgr.add_embeddings([
+            _make_result("a.py:1-35:func:setup", deep_content),
+        ])
+
+        results = mgr.search_bm25("authentication", k=5)
+        assert len(results) >= 1
+        assert results[0][0] == "a.py:1-35:func:setup"
+        _close_manager(mgr)

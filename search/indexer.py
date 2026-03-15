@@ -197,7 +197,7 @@ class CodeIndexManager:
 
         # Add to FTS5 index
         for result in embedding_results:
-            content = result.metadata.get("content_preview", "")
+            content = result.metadata.get("full_content", result.metadata.get("content_preview", ""))
             file_path = result.metadata.get("relative_path", result.metadata.get("file_path", ""))
             name = result.metadata.get("name", "") or ""
             self._fts_conn.execute(

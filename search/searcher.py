@@ -56,6 +56,37 @@ CHUNK_TYPE_BOOSTS = {
     "all": {},
 }
 
+# Code-domain synonym map for BM25 query expansion
+CODE_SYNONYMS = {
+    "auth": ["authentication", "oauth", "jwt", "token", "credential", "login", "entra"],
+    "authentication": ["auth", "oauth", "jwt", "token", "credential", "login", "entra"],
+    "error": ["exception", "raise", "ToolError", "HTTPException", "error_handling"],
+    "retry": ["backoff", "retryable", "retry_delay", "429", "529"],
+    "rate": ["rate_limit", "throttle", "RPM", "TPM"],
+    "middleware": ["ASGI", "middleware", "intercept"],
+    "route": ["Route", "endpoint", "path", "handler", "Starlette"],
+}
+
+
+def expand_code_query(query: str) -> str:
+    """Expand a query with code-domain synonyms for better BM25 recall."""
+    tokens = query.lower().split()
+    expanded_tokens = list(tokens)
+
+    for token in tokens:
+        stem = token.rstrip("s").rstrip("ing").rstrip("tion").rstrip("ed")
+        for key, synonyms in CODE_SYNONYMS.items():
+            if token == key or stem == key or token in synonyms:
+                for syn in synonyms:
+                    if syn.lower() not in [t.lower() for t in expanded_tokens]:
+                        expanded_tokens.append(syn)
+                break
+
+    if expanded_tokens == tokens:
+        return query  # No expansion happened, return original
+
+    return " ".join(expanded_tokens)
+
 
 @dataclass
 class SearchResult:
@@ -218,8 +249,9 @@ class IntelligentSearcher:
         vector_raw = self.index_manager.search(query_embedding, candidate_k, filters)
         vector_pairs = [(chunk_id, sim) for chunk_id, sim, _meta in vector_raw]
 
-        # BM25 search
-        bm25_raw = self.index_manager.search_bm25(query, k=candidate_k)
+        # BM25 search (with optional query expansion)
+        bm25_query = expand_code_query(query) if os.environ.get("QUERY_EXPANSION", "off") == "on" else query
+        bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k)
         bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
 
         # Weighted RRF fusion
@@ -245,15 +277,24 @@ class IntelligentSearcher:
                 result = self._create_search_result(chunk_id, rrf_score, metadata, context_depth)
                 candidates.append(result)
 
-        # Apply chunk type boosts based on content mode
+        # Apply chunk type boosts and name-match boost based on content mode
         boosts = CHUNK_TYPE_BOOSTS.get(content_mode, {})
-        if boosts:
-            for result in candidates:
-                multiplier = boosts.get(result.chunk_type, 1.0)
-                result.similarity_score *= multiplier
+        query_tokens = self._normalize_to_tokens(query.lower())
 
-            candidates.sort(key=lambda r: r.similarity_score, reverse=True)
+        for result in candidates:
+            # Chunk type boost
+            if boosts:
+                result.similarity_score *= boosts.get(result.chunk_type, 1.0)
 
+            # Name-match boost (ported from _rank_results)
+            name_boost = self._calculate_name_boost(result.name, query, query_tokens)
+            result.similarity_score *= name_boost
+
+            # Path relevance boost
+            path_boost = self._calculate_path_boost(result.relative_path, query_tokens)
+            result.similarity_score *= path_boost
+
+        candidates.sort(key=lambda r: r.similarity_score, reverse=True)
         return candidates[:k]
 
     def _optimize_query(self, query: str) -> str:

@@ -155,7 +155,8 @@ class CodeEmbedder:
             'imports': chunk.imports,
             'complexity_score': chunk.complexity_score,
             'tags': chunk.tags,
-            'content_preview': chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content
+            'content_preview': chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content,
+            'full_content': chunk.content
         }
 
         return EmbeddingResult(
@@ -210,7 +211,8 @@ class CodeEmbedder:
                     'imports': chunk.imports,
                     'complexity_score': chunk.complexity_score,
                     'tags': chunk.tags,
-                    'content_preview': chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content
+                    'content_preview': chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content,
+                    'full_content': chunk.content
                 }
 
                 results.append(EmbeddingResult(
