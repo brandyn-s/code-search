@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from chunking.code_chunk import CodeChunk
-from embeddings.embedding_models_register import AVAILIABLE_MODELS
 from common_utils import get_storage_dir
 
 
@@ -48,9 +47,9 @@ class CodeEmbedder:
             model_name = model_name or os.environ.get("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
             self._model = SentenceTransformerModel(model_name=model_name, cache_dir=cache_dir, device=device)
         elif provider == "gemma":
+            from embeddings.gemma import GemmaEmbeddingModel
             model_name = model_name or "google/embeddinggemma-300m"
-            model_class = AVAILIABLE_MODELS[model_name]
-            self._model = model_class(cache_dir=cache_dir, device=device)
+            self._model = GemmaEmbeddingModel(cache_dir=cache_dir, device=device)
         else:
             raise ValueError(f"Unknown EMBEDDING_PROVIDER: {provider}. Use 'openai', 'local', or 'gemma'.")
 

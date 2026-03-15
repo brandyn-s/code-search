@@ -1,15 +1,12 @@
-"""Embedding models registry."""
-from embeddings.gemma import GemmaEmbeddingModel
-from embeddings.sentence_transformer import SentenceTransformerModel
-from embeddings.openai_embedder import OpenAIEmbeddingModel
+"""Embedding models registry. Lazy imports to avoid loading torch at module load time."""
 
-AVAILIABLE_MODELS = {
-    "google/embeddinggemma-300m": GemmaEmbeddingModel,
-}
+# Only GemmaEmbeddingModel is registered here for legacy conftest patching.
+# Actual provider selection happens in embedder.py via conditional imports.
+AVAILIABLE_MODELS = {}
 
-# Provider -> (model_class, default_model_name, requires_api_key)
-PROVIDERS = {
-    "openai": (OpenAIEmbeddingModel, "text-embedding-3-small", True),
-    "local": (SentenceTransformerModel, "sentence-transformers/all-MiniLM-L6-v2", False),
-    "gemma": (GemmaEmbeddingModel, "google/embeddinggemma-300m", False),
-}
+
+def _load_models():
+    """Load model classes on demand."""
+    if not AVAILIABLE_MODELS:
+        from embeddings.gemma import GemmaEmbeddingModel
+        AVAILIABLE_MODELS["google/embeddinggemma-300m"] = GemmaEmbeddingModel
