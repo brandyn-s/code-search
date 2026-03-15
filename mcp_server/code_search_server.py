@@ -91,7 +91,11 @@ class CodeSearchServer:
 
     @lru_cache(maxsize=1)
     def _maybe_start_model_preload(self) -> None:
-        """Preload the embedding model in the background."""
+        """Preload the embedding model in the background (local models only)."""
+        # OpenAI provider uses httpx - no heavy model to preload
+        if os.environ.get("EMBEDDING_PROVIDER", "openai") == "openai":
+            return None
+
         async def _preload():
             try:
                 logger.info("Starting background model preload")
@@ -101,13 +105,10 @@ class CodeSearchServer:
                 logger.warning(f"Background model preload failed: {e}")
 
         try:
-            # Try to get the current event loop, handling the case where none exists
             try:
                 loop = asyncio.get_running_loop()
-                # If we're already in an event loop, create a task
                 loop.create_task(_preload())
             except RuntimeError:
-                # No running loop, so create one and run the coroutine
                 asyncio.run(_preload())
         except Exception as e:
             logger.debug(f"Model preload scheduling skipped: {e}")
