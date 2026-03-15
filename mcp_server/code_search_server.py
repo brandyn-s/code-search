@@ -119,7 +119,7 @@ class CodeSearchServer:
             if self._current_project is None:
                 project_path = os.getcwd()
                 logger.info(f"No active project. Using cwd: {project_path}")
-                self.ensure_project_indexed(project_path)
+                # Skip auto-indexing - let the user explicitly index via index_directory
             else:
                 project_path = self._current_project
 
@@ -353,7 +353,13 @@ class CodeSearchServer:
             index_manager = self.get_index_manager()
             stats = index_manager.get_stats()
 
-            model_info = self.embedder().get_model_info()
+            # Return model info without triggering API calls or heavy imports
+            provider = os.environ.get("EMBEDDING_PROVIDER", "openai")
+            model_info = {
+                "provider": provider,
+                "model_name": os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small") if provider == "openai" else os.environ.get("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
+                "status": "configured",
+            }
 
             response = {
                 "index_statistics": stats,
