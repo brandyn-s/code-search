@@ -5,14 +5,27 @@ import logging
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 import yaml
 from mcp_server.code_search_server import CodeSearchServer
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Tool annotations for read/write/destructive classification
+TOOL_ANNOTATIONS = {
+    "search_code": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "index_directory": ToolAnnotations(readOnlyHint=False),
+    "find_similar_code": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "get_index_status": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "list_projects": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "switch_project": ToolAnnotations(readOnlyHint=False),
+    "index_test_project": ToolAnnotations(readOnlyHint=False),
+    "clear_index": ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+}
 
-class CodeSearchMCP(FastMCP if FastMCP else object):
+
+class CodeSearchMCP(FastMCP):
     """MCP server that manages FastMCP instance and tool registration."""
 
     def __init__(self, server: "CodeSearchServer"):
@@ -25,7 +38,7 @@ class CodeSearchMCP(FastMCP if FastMCP else object):
     def _load_strings(self) -> dict:
         """Load all strings (tool descriptions and help text) from strings.yaml file."""
         strings_file = Path(__file__).parent / "strings.yaml"
-        with open(strings_file, 'r') as f:
+        with open(strings_file, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
             assert isinstance(data, dict), "Expected a dict"
             return {
@@ -36,10 +49,11 @@ class CodeSearchMCP(FastMCP if FastMCP else object):
     def _setup(self):
         """Setup all MCP tools, resources, and prompts."""
 
-        # Register tools using getattr
+        # Register tools with descriptions and annotations
         for tool_name, description in self._strings["tools"].items():
             server_method = getattr(self.server, tool_name)
-            self.tool(description=description)(server_method)
+            annotations = TOOL_ANNOTATIONS.get(tool_name)
+            self.tool(description=description, annotations=annotations)(server_method)
 
         # Register resources
         @self.resource("search://stats")
