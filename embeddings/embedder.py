@@ -1,5 +1,6 @@
 """Code embedding wrapper using EmbeddingGemma model."""
 
+import os
 import logging
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -19,31 +20,41 @@ class EmbeddingResult:
 
 
 class CodeEmbedder:
-    """Wrapper for embedding code chunks using EmbeddingGemma model."""
+    """Wrapper for embedding code chunks."""
 
     def __init__(
         self,
-        model_name: str = "google/embeddinggemma-300m",
+        model_name: str = "",
         cache_dir: Optional[str] = None,
         device: str = "auto"
     ):
-        """Initialize code embedder.
-
-        Args:
-            model_name: Name of the embedding model to use
-            cache_dir: Directory to cache the model
-            device: Device to load model on
-        """
-        if not cache_dir: # if not provided, use default
+        if not cache_dir:
             cache_dir = str(get_storage_dir() / "models")
         self.device = device
-
-        # Get model class from available models
-        model_class = AVAILIABLE_MODELS[model_name]
-        self._model = model_class(cache_dir=cache_dir, device=device)
-
         self._logger = logging.getLogger(__name__)
-        logging.basicConfig(level=logging.INFO)
+
+        # Determine provider from env
+        provider = os.environ.get("EMBEDDING_PROVIDER", "").lower()
+        if not provider:
+            # Default: openai if key exists, else local
+            provider = "openai" if os.environ.get("OPENAI_API_KEY") else "local"
+
+        if provider == "openai":
+            from embeddings.openai_embedder import OpenAIEmbeddingModel
+            model_name = model_name or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+            self._model = OpenAIEmbeddingModel(model_name=model_name)
+        elif provider == "local":
+            from embeddings.sentence_transformer import SentenceTransformerModel
+            model_name = model_name or os.environ.get("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+            self._model = SentenceTransformerModel(model_name=model_name, cache_dir=cache_dir, device=device)
+        elif provider == "gemma":
+            model_name = model_name or "google/embeddinggemma-300m"
+            model_class = AVAILIABLE_MODELS[model_name]
+            self._model = model_class(cache_dir=cache_dir, device=device)
+        else:
+            raise ValueError(f"Unknown EMBEDDING_PROVIDER: {provider}. Use 'openai', 'local', or 'gemma'.")
+
+        self._logger.info(f"Embedding provider: {provider}, model: {model_name}")
 
     @property
     def model(self):

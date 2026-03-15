@@ -9,6 +9,29 @@ from search.indexer import CodeIndexManager
 from embeddings.embedder import CodeEmbedder
 
 
+def reciprocal_rank_fusion(
+    vector_results: List[Tuple[str, float]],
+    bm25_results: List[Tuple[str, float]],
+    k: int = 60,
+) -> List[Tuple[str, float]]:
+    """Fuse two ranked lists using Reciprocal Rank Fusion.
+
+    Args:
+        vector_results: List of (chunk_id, score) from vector search, ordered by relevance.
+        bm25_results: List of (chunk_id, score) from BM25 search, ordered by relevance.
+        k: Smoothing parameter (default 60, industry standard).
+
+    Returns:
+        List of (chunk_id, rrf_score) sorted by fused relevance.
+    """
+    scores: Dict[str, float] = {}
+    for rank, (chunk_id, _score) in enumerate(vector_results):
+        scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+    for rank, (chunk_id, _score) in enumerate(bm25_results):
+        scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
 @dataclass
 class SearchResult:
     """Enhanced search result with rich metadata."""
@@ -68,27 +91,28 @@ class IntelligentSearcher:
         self,
         query: str,
         k: int = 5,
-        search_mode: str = "semantic",
+        search_mode: str = "",
         context_depth: int = 1,
         filters: Optional[Dict[str, Any]] = None
     ) -> List[SearchResult]:
-        """Semantic search for code understanding.
-        
-        This provides semantic search capabilities. For complete search coverage:
-        - Use this tool for conceptual/functionality queries
-        - Use Claude Code's Grep for exact term matching
-        - Combine both for comprehensive results
-        
+        """Search for code using semantic, keyword, or hybrid mode.
+
         Args:
             query: Natural language query
             k: Number of results
-            search_mode: Currently "semantic" only
+            search_mode: "hybrid", "semantic", or "keyword" (default from SEARCH_MODE env)
             context_depth: Include related chunks
             filters: Optional filters
         """
-        
-        # Focus on semantic search - our specialty
-        return self._semantic_search(query, k, context_depth, filters)
+        import os
+        mode = search_mode or os.environ.get("SEARCH_MODE", "hybrid")
+
+        if mode == "keyword":
+            return self._keyword_search(query, k)
+        elif mode == "semantic":
+            return self._semantic_search(query, k, context_depth, filters)
+        else:  # hybrid
+            return self._hybrid_search(query, k, context_depth, filters)
     
     def _semantic_search(
         self,
@@ -133,7 +157,57 @@ class IntelligentSearcher:
         ranked_results = self._rank_results(search_results, query, intent_tags)
         
         return ranked_results[:k]
-    
+
+    def _keyword_search(self, query: str, k: int = 5) -> List[SearchResult]:
+        """Pure BM25 keyword search."""
+        raw_results = self.index_manager.search_bm25(query, k=k)
+        return [
+            self._create_search_result(chunk_id, abs(rank), metadata, 0)
+            for chunk_id, rank, metadata in raw_results
+        ][:k]
+
+    def _hybrid_search(
+        self,
+        query: str,
+        k: int = 5,
+        context_depth: int = 1,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[SearchResult]:
+        """Hybrid BM25 + vector search with RRF fusion."""
+        import os
+        fusion_k = int(os.environ.get("FUSION_K", "60"))
+        candidate_k = 50  # Retrieve 50 from each source
+
+        # Vector search
+        optimized_query = self._optimize_query(query)
+        query_embedding = self.embedder.embed_query(optimized_query)
+        vector_raw = self.index_manager.search(query_embedding, candidate_k, filters)
+        vector_pairs = [(chunk_id, sim) for chunk_id, sim, _meta in vector_raw]
+
+        # BM25 search
+        bm25_raw = self.index_manager.search_bm25(query, k=candidate_k)
+        bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
+
+        # Fuse
+        fused = reciprocal_rank_fusion(vector_pairs, bm25_pairs, k=fusion_k)
+
+        # Build SearchResult objects for top-k fused results
+        metadata_lookup = {}
+        for chunk_id, _sim, metadata in vector_raw:
+            metadata_lookup[chunk_id] = metadata
+        for chunk_id, _rank, metadata in bm25_raw:
+            if chunk_id not in metadata_lookup:
+                metadata_lookup[chunk_id] = metadata
+
+        results = []
+        for chunk_id, rrf_score in fused[:k]:
+            metadata = metadata_lookup.get(chunk_id)
+            if metadata:
+                result = self._create_search_result(chunk_id, rrf_score, metadata, context_depth)
+                results.append(result)
+
+        return results
+
     def _optimize_query(self, query: str) -> str:
         """Optimize query for better embedding generation."""
         # Basic query cleaning only - avoid expanding technical terms

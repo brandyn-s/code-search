@@ -33,7 +33,69 @@ class CodeIndexManager:
         self._chunk_ids = []
         self._logger = logging.getLogger(__name__)
         self._on_gpu = False
+
+        # Initialize FTS5
+        self._init_fts5()
         
+    def _init_fts5(self):
+        """Initialize FTS5 full-text search table."""
+        import sqlite3
+        self._fts_db_path = self.storage_dir / "fts5.db"
+        self._fts_conn = sqlite3.connect(
+            str(self._fts_db_path),
+            check_same_thread=False,
+        )
+        self._fts_conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+                chunk_id,
+                content,
+                file_path,
+                name,
+                tokenize='porter unicode61'
+            )
+        """)
+        self._fts_conn.commit()
+
+    @staticmethod
+    def _sanitize_fts5_query(query: str) -> str:
+        """Sanitize a natural-language query for FTS5 MATCH syntax.
+
+        Strips FTS5 operators and special chars, quotes each token,
+        and joins with OR so any keyword match counts.
+        """
+        import re
+        # Remove characters that are FTS5 operators or cause syntax errors
+        cleaned = re.sub(r'[?"*/\\(){}^~:+\-]', ' ', query)
+        tokens = [t for t in cleaned.split() if t and len(t) > 1]
+        if not tokens:
+            return ""
+        # Quote each token to prevent column-name interpretation
+        return " OR ".join(f'"{t}"' for t in tokens)
+
+    def search_bm25(self, query: str, k: int = 50) -> List[Tuple[str, float, Dict[str, Any]]]:
+        """Search using BM25 full-text search. Returns (chunk_id, rank, metadata)."""
+        if not hasattr(self, "_fts_conn") or self._fts_conn is None:
+            return []
+
+        fts_query = self._sanitize_fts5_query(query)
+        if not fts_query:
+            return []
+
+        try:
+            cursor = self._fts_conn.execute(
+                "SELECT chunk_id, rank FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?",
+                (fts_query, k),
+            )
+            results = []
+            for chunk_id, rank in cursor.fetchall():
+                metadata_entry = self.metadata_db.get(chunk_id)
+                if metadata_entry:
+                    results.append((chunk_id, float(rank), metadata_entry["metadata"]))
+            return results
+        except Exception as e:
+            self._logger.warning(f"FTS5 search failed for '{fts_query}': {e}")
+            return []
+
     @property
     def index(self):
         """Lazy loading of FAISS index."""
@@ -132,7 +194,18 @@ class CodeIndexManager:
         except Exception:
             # If commit is unavailable for some reason, continue without failing
             pass
-        
+
+        # Add to FTS5 index
+        for result in embedding_results:
+            content = result.metadata.get("content_preview", "")
+            file_path = result.metadata.get("relative_path", result.metadata.get("file_path", ""))
+            name = result.metadata.get("name", "") or ""
+            self._fts_conn.execute(
+                "INSERT INTO chunk_fts (chunk_id, content, file_path, name) VALUES (?, ?, ?, ?)",
+                (result.chunk_id, content, file_path, name),
+            )
+        self._fts_conn.commit()
+
         # Update statistics
         self._update_stats()
 
@@ -413,19 +486,29 @@ class CodeIndexManager:
         if self._metadata_db is not None:
             self._metadata_db.close()
             self._metadata_db = None
-        
+
+        # Close and remove FTS5 database
+        if hasattr(self, "_fts_conn") and self._fts_conn is not None:
+            self._fts_conn.close()
+            self._fts_conn = None
+        fts_path = self.storage_dir / "fts5.db"
+        if fts_path.exists():
+            fts_path.unlink()
+
         # Remove files
         for file_path in [self.index_path, self.metadata_path, self.chunk_id_path, self.stats_path]:
             if file_path.exists():
                 file_path.unlink()
-        
+
         # Reset in-memory state
         self._index = None
         self._chunk_ids = []
-        
+
         self._logger.info("Index cleared")
     
     def __del__(self):
         """Cleanup when object is destroyed."""
         if self._metadata_db is not None:
             self._metadata_db.close()
+        if hasattr(self, "_fts_conn") and self._fts_conn is not None:
+            self._fts_conn.close()
