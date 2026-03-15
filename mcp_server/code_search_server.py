@@ -32,6 +32,8 @@ class CodeSearchServer:
         self._index_manager: Optional[CodeIndexManager] = None
         self._searcher: Optional[IntelligentSearcher] = None
         self._current_project: Optional[str] = None
+        self._indexing_job = None  # {job_id, status, phase, current, total, errors, result}
+        self._indexing_thread = None
 
     def get_project_storage_dir(self, project_path: str) -> Path:
         """Get or create project-specific storage directory."""
@@ -168,6 +170,17 @@ class CodeSearchServer:
         try:
             logger.info(f"🔍 MCP REQUEST: search_code(query='{query}', k={k}, mode='{search_mode}', file_pattern={file_pattern}, chunk_type={chunk_type})")
 
+            # If indexing is in progress, report that instead of returning empty
+            if self._indexing_job and self._indexing_job["status"] == "indexing":
+                job = self._indexing_job
+                pct = round(100 * job["current"] / job["total"], 1) if job["total"] > 0 else 0
+                return json.dumps({
+                    "query": query,
+                    "results": [],
+                    "indexing_in_progress": True,
+                    "message": f"Indexing in progress ({job['phase']}: {pct}% - {job['current']}/{job['total']} chunks). Results will be available when complete.",
+                })
+
             if auto_reindex and self._current_project:
                 from search.incremental_indexer import IncrementalIndexer
 
@@ -261,63 +274,130 @@ class CodeSearchServer:
         file_patterns: List[str] = None,
         incremental: bool = True
     ) -> str:
-        """Implementation of index_directory tool."""
-        try:
-            from search.incremental_indexer import IncrementalIndexer
+        """Start indexing a directory. Returns immediately with job status."""
+        import threading
+        import uuid
 
-            self._maybe_start_model_preload()
+        # If already indexing, return current status
+        if self._indexing_job and self._indexing_job["status"] == "indexing":
+            return json.dumps({
+                "status": "indexing",
+                "message": "Indexing already in progress",
+                "job_id": self._indexing_job["job_id"],
+                "phase": self._indexing_job.get("phase", "unknown"),
+                "chunks_done": self._indexing_job.get("current", 0),
+                "chunks_total": self._indexing_job.get("total", 0),
+            })
 
-            directory_path = Path(directory_path).resolve()
-            if not directory_path.exists():
-                return json.dumps({"error": f"Directory does not exist: {directory_path}"})
+        directory_path_obj = Path(directory_path).resolve()
+        if not directory_path_obj.exists():
+            return json.dumps({"error": f"Directory does not exist: {directory_path_obj}"})
+        if not directory_path_obj.is_dir():
+            return json.dumps({"error": f"Path is not a directory: {directory_path_obj}"})
 
-            if not directory_path.is_dir():
-                return json.dumps({"error": f"Path is not a directory: {directory_path}"})
+        project_name = project_name or directory_path_obj.name
+        job_id = uuid.uuid4().hex[:8]
 
-            project_name = project_name or directory_path.name
-            logger.info(f"Indexing directory: {directory_path} (incremental={incremental})")
+        self._indexing_job = {
+            "job_id": job_id,
+            "status": "indexing",
+            "phase": "starting",
+            "current": 0,
+            "total": 0,
+            "errors": [],
+            "directory": str(directory_path_obj),
+            "project_name": project_name,
+            "result": None,
+        }
 
-            index_manager = self.get_index_manager(str(directory_path))
-            embedder = self.embedder()
-            chunker = MultiLanguageChunker(str(directory_path))
+        def _progress_callback(phase, current, total):
+            if self._indexing_job and self._indexing_job["job_id"] == job_id:
+                self._indexing_job["phase"] = phase
+                self._indexing_job["current"] = current
+                self._indexing_job["total"] = total
 
-            incremental_indexer = IncrementalIndexer(
-                indexer=index_manager,
-                embedder=embedder,
-                chunker=chunker
-            )
+        def _run_indexing():
+            try:
+                from search.incremental_indexer import IncrementalIndexer
 
-            result = incremental_indexer.incremental_index(
-                str(directory_path),
-                project_name,
-                force_full=not incremental
-            )
+                self._maybe_start_model_preload()
 
-            stats = incremental_indexer.get_indexing_stats(str(directory_path))
+                index_manager = self.get_index_manager(str(directory_path_obj))
+                embedder = self.embedder()
+                chunker = MultiLanguageChunker(str(directory_path_obj))
 
-            response = {
-                "success": result.success,
-                "directory": str(directory_path),
-                "project_name": project_name,
-                "incremental": incremental and result.files_modified > 0,
-                "files_added": result.files_added,
-                "files_removed": result.files_removed,
-                "files_modified": result.files_modified,
-                "chunks_added": result.chunks_added,
-                "chunks_removed": result.chunks_removed,
-                "time_taken": round(result.time_taken, 2),
-                "index_stats": stats
-            }
+                incremental_indexer = IncrementalIndexer(
+                    indexer=index_manager,
+                    embedder=embedder,
+                    chunker=chunker,
+                    progress_fn=_progress_callback,
+                )
 
-            if result.error:
-                response["error"] = result.error
+                result = incremental_indexer.incremental_index(
+                    str(directory_path_obj),
+                    project_name,
+                    force_full=not incremental
+                )
 
-            logger.info(f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s")
-            return json.dumps(response, indent=2)
-        except Exception as e:
-            error_msg = f"Indexing failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return json.dumps({"error": error_msg})
+                stats = incremental_indexer.get_indexing_stats(str(directory_path_obj))
+
+                self._indexing_job["status"] = "completed"
+                self._indexing_job["phase"] = "done"
+                self._indexing_job["result"] = {
+                    "success": result.success,
+                    "directory": str(directory_path_obj),
+                    "project_name": project_name,
+                    "files_added": result.files_added,
+                    "files_removed": result.files_removed,
+                    "files_modified": result.files_modified,
+                    "chunks_added": result.chunks_added,
+                    "chunks_removed": result.chunks_removed,
+                    "time_taken": round(result.time_taken, 2),
+                    "index_stats": stats,
+                    "error": result.error,
+                }
+                logger.info(f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s")
+            except Exception as e:
+                logger.error(f"Background indexing failed: {e}", exc_info=True)
+                self._indexing_job["status"] = "failed"
+                self._indexing_job["phase"] = "error"
+                self._indexing_job["result"] = {"error": str(e)}
+
+        logger.info(f"Starting background indexing: {directory_path_obj} (incremental={incremental})")
+        self._indexing_thread = threading.Thread(target=_run_indexing, daemon=True)
+        self._indexing_thread.start()
+
+        return json.dumps({
+            "status": "indexing",
+            "job_id": job_id,
+            "directory": str(directory_path_obj),
+            "project_name": project_name,
+            "message": "Indexing started in background. Use get_indexing_progress to check status.",
+        })
+
+    def get_indexing_progress(self) -> str:
+        """Get current indexing job progress."""
+        if not self._indexing_job:
+            return json.dumps({"status": "idle", "message": "No indexing job running"})
+
+        job = self._indexing_job
+        response = {
+            "job_id": job["job_id"],
+            "status": job["status"],
+            "phase": job["phase"],
+            "directory": job.get("directory", ""),
+            "project_name": job.get("project_name", ""),
+        }
+
+        if job["total"] > 0:
+            response["chunks_done"] = job["current"]
+            response["chunks_total"] = job["total"]
+            response["percent"] = round(100 * job["current"] / job["total"], 1)
+
+        if job["status"] in ("completed", "failed") and job.get("result"):
+            response["result"] = job["result"]
+
+        return json.dumps(response)
 
     def find_similar_code(self, chunk_id: str, k: int = 5) -> str:
         """Implementation of find_similar_code tool."""

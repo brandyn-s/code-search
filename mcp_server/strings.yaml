@@ -3,7 +3,10 @@ tools:
     Perform semantic similarity search across an indexed codebase using natural language queries. Returns ranked JSON with file paths, line ranges, chunk types (function/class/module), similarity scores, and snippets. Supports file_pattern and chunk_type filters. Auto-reindexes stale projects (default 5min). Best for conceptual queries like "where is auth handled". For structural queries (call graphs, blast radius), use codebase-memory-mcp instead.
 
   index_directory: |
-    Build a semantic search index for a codebase directory. Parses source files into AST chunks (functions, classes, modules across Python, JS, TS, Go, Java, Rust), generates 768-dim embeddings via EmbeddingGemma, and stores in FAISS with SQLite metadata. Supports incremental mode via Merkle tree change detection - only reprocesses added/modified files. Returns JSON with success, file counts (added/removed/modified), chunk counts, and timing. First run downloads the model (~300MB).
+    Start indexing a codebase directory in the background. Returns immediately with a job_id and status. Parses source files into AST chunks (functions, classes, modules across Python, JS, TS, Go, Java, Rust), generates embeddings via OpenAI, and stores in FAISS with SQLite metadata. Use get_indexing_progress to poll progress (chunks_done/chunks_total/percent). Supports incremental mode via Merkle tree change detection.
+
+  get_indexing_progress: |
+    Check the progress of a running index_directory operation. Returns JSON with job_id, status (indexing/completed/failed/idle), current phase (chunking/embedding/saving/done), chunks_done, chunks_total, and percent complete. Call after index_directory returns a job_id. When status is "completed", the result field contains the final indexing stats. Poll every 15-30 seconds for updates.
 
   find_similar_code: |
     Locate code chunks functionally similar to a reference chunk by embedding distance. Takes a chunk_id from a previous search_code result and returns the k nearest neighbors. Each result includes file path, line range, chunk type, name, similarity score, content preview, and semantic tags. Returns JSON with reference chunk ID and similar_chunks array. Useful for detecting duplication, finding alternative implementations, or identifying refactoring candidates.

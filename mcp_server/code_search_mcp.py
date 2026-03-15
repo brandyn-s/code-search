@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 TOOL_ANNOTATIONS = {
     "search_code": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "index_directory": ToolAnnotations(readOnlyHint=False),
+    "get_indexing_progress": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "find_similar_code": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "get_index_status": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "list_projects": ToolAnnotations(readOnlyHint=True, idempotentHint=True),

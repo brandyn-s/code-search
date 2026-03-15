@@ -51,21 +51,24 @@ class IncrementalIndexer:
         indexer: Optional[Indexer] = None,
         embedder: Optional[CodeEmbedder] = None,
         chunker: Optional[MultiLanguageChunker] = None,
-        snapshot_manager: Optional[SnapshotManager] = None
+        snapshot_manager: Optional[SnapshotManager] = None,
+        progress_fn=None
     ):
         """Initialize incremental indexer.
-        
+
         Args:
             indexer: Indexer instance
             embedder: Embedder instance
             chunker: Code chunker instance
             snapshot_manager: Snapshot manager instance
+            progress_fn: Optional callback(phase, current, total) for progress reporting
         """
         self.indexer = indexer or Indexer()
         self.embedder = embedder or CodeEmbedder()
         self.chunker = chunker or MultiLanguageChunker()
         self.snapshot_manager = snapshot_manager or SnapshotManager()
         self.change_detector = ChangeDetector(self.snapshot_manager)
+        self._progress_fn = progress_fn or (lambda phase, current, total: None)
     
     def detect_changes(self, project_path: str) -> Tuple[FileChanges, MerkleDAG]:
         """Detect changes in project since last snapshot.
@@ -194,10 +197,11 @@ class IncrementalIndexer:
             
             # Filter supported files
             supported_files = [f for f in all_files if self.chunker.is_supported(f)]
-            
+
             # Collect all chunks first, then embed in a single pass for efficiency
             all_chunks = []
-            for file_path in supported_files:
+            self._progress_fn("chunking", 0, len(supported_files))
+            for idx, file_path in enumerate(supported_files):
                 full_path = Path(project_path) / file_path
                 try:
                     chunks = self.chunker.chunk_file(str(full_path))
@@ -205,10 +209,12 @@ class IncrementalIndexer:
                         all_chunks.extend(chunks)
                 except Exception as e:
                     logger.warning(f"Failed to chunk {file_path}: {e}")
+                self._progress_fn("chunking", idx + 1, len(supported_files))
 
             # Embed chunks in batches with per-batch error recovery
             all_embedding_results = []
             embed_batch_size = 64
+            self._progress_fn("embedding", 0, len(all_chunks))
             if all_chunks:
                 for batch_start in range(0, len(all_chunks), embed_batch_size):
                     batch = all_chunks[batch_start:batch_start + embed_batch_size]
@@ -218,15 +224,17 @@ class IncrementalIndexer:
                             embedding_result.metadata['project_name'] = project_name
                             embedding_result.metadata['content'] = chunk.content
                         all_embedding_results.extend(batch_results)
+                        self._progress_fn("embedding", len(all_embedding_results), len(all_chunks))
                         logger.info(f"Embedded {batch_start + len(batch)}/{len(all_chunks)} chunks")
                     except Exception as e:
                         logger.warning(f"Embedding batch {batch_start}-{batch_start+len(batch)} failed: {e}")
                         # Continue with next batch instead of losing everything
             
             # Add all embeddings to index at once
+            self._progress_fn("saving", 0, 0)
             if all_embedding_results:
                 self.indexer.add_embeddings(all_embedding_results)
-            
+
             chunks_added = len(all_embedding_results)
             
             # Save snapshot
