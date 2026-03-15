@@ -72,7 +72,7 @@ class CodeIndexManager:
         # Quote each token to prevent column-name interpretation
         return " OR ".join(f'"{t}"' for t in tokens)
 
-    def search_bm25(self, query: str, k: int = 50) -> List[Tuple[str, float, Dict[str, Any]]]:
+    def search_bm25(self, query: str, k: int = 50, name_weight: float = 5.0) -> List[Tuple[str, float, Dict[str, Any]]]:
         """Search using BM25 full-text search. Returns (chunk_id, rank, metadata)."""
         if not hasattr(self, "_fts_conn") or self._fts_conn is None:
             return []
@@ -83,7 +83,8 @@ class CodeIndexManager:
 
         try:
             cursor = self._fts_conn.execute(
-                "SELECT chunk_id, rank FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?",
+                f"SELECT chunk_id, bm25(chunk_fts, 0.0, 1.0, 0.5, {float(name_weight)}) as rank "
+                "FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?",
                 (fts_query, k),
             )
             results = []

@@ -101,3 +101,20 @@ def test_fts5_finds_keyword_deep_in_content():
         assert len(results) >= 1
         assert results[0][0] == "a.py:1-35:func:setup"
         _close_manager(mgr)
+
+
+def test_fts5_name_match_ranks_higher():
+    """A chunk whose name matches the query should rank above one where only content matches."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mgr = CodeIndexManager(tmpdir)
+        mgr.add_embeddings([
+            _make_result("a.py:1-10:func:unrelated", "def unrelated(): redis_client = redis.Redis()"),
+            _make_result("b.py:1-10:func:get_redis", "def get_redis(): return client"),
+        ])
+
+        results = mgr.search_bm25("redis", k=5)
+        assert len(results) >= 2
+        # get_redis (name match) should rank above unrelated (content-only match)
+        ids = [r[0] for r in results]
+        assert ids.index("b.py:1-10:func:get_redis") < ids.index("a.py:1-10:func:unrelated")
+        _close_manager(mgr)
