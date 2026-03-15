@@ -13,23 +13,48 @@ def reciprocal_rank_fusion(
     vector_results: List[Tuple[str, float]],
     bm25_results: List[Tuple[str, float]],
     k: int = 60,
+    vector_weight: float = 0.5,
+    bm25_weight: float = 0.5,
 ) -> List[Tuple[str, float]]:
-    """Fuse two ranked lists using Reciprocal Rank Fusion.
+    """Fuse two ranked lists using Weighted Reciprocal Rank Fusion.
 
     Args:
         vector_results: List of (chunk_id, score) from vector search, ordered by relevance.
         bm25_results: List of (chunk_id, score) from BM25 search, ordered by relevance.
         k: Smoothing parameter (default 60, industry standard).
+        vector_weight: Weight for vector search contributions (default 0.5).
+        bm25_weight: Weight for BM25 search contributions (default 0.5).
 
     Returns:
         List of (chunk_id, rrf_score) sorted by fused relevance.
     """
     scores: Dict[str, float] = {}
     for rank, (chunk_id, _score) in enumerate(vector_results):
-        scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+        scores[chunk_id] = scores.get(chunk_id, 0.0) + vector_weight * (1.0 / (k + rank + 1))
     for rank, (chunk_id, _score) in enumerate(bm25_results):
-        scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
+        scores[chunk_id] = scores.get(chunk_id, 0.0) + bm25_weight * (1.0 / (k + rank + 1))
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
+# Content mode configurations: (vector_weight, bm25_weight)
+CONTENT_MODE_WEIGHTS = {
+    "code": (0.4, 0.6),
+    "docs": (0.7, 0.3),
+    "all":  (0.5, 0.5),
+}
+
+# Chunk type boost multipliers per content mode
+CHUNK_TYPE_BOOSTS = {
+    "code": {
+        "function": 1.3, "method": 1.3, "class": 1.3, "decorated_definition": 1.3,
+        "section": 0.7, "document": 0.7, "module": 0.9,
+    },
+    "docs": {
+        "function": 0.8, "method": 0.8, "class": 0.8, "decorated_definition": 0.8,
+        "section": 1.3, "document": 1.3, "module": 0.9,
+    },
+    "all": {},
+}
 
 
 @dataclass
@@ -173,10 +198,19 @@ class IntelligentSearcher:
         context_depth: int = 1,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[SearchResult]:
-        """Hybrid BM25 + vector search with RRF fusion."""
+        """Hybrid BM25 + vector search with weighted RRF fusion and content mode boosting."""
         import os
         fusion_k = int(os.environ.get("FUSION_K", "60"))
         candidate_k = 50  # Retrieve 50 from each source
+
+        # Determine content mode and weights
+        content_mode = os.environ.get("CONTENT_MODE", "code").lower()
+        vw = float(os.environ.get("VECTOR_WEIGHT", "0"))
+        bw = float(os.environ.get("BM25_WEIGHT", "0"))
+        if vw > 0 or bw > 0:
+            vector_weight, bm25_weight = vw or 0.5, bw or 0.5
+        else:
+            vector_weight, bm25_weight = CONTENT_MODE_WEIGHTS.get(content_mode, (0.5, 0.5))
 
         # Vector search
         optimized_query = self._optimize_query(query)
@@ -188,8 +222,11 @@ class IntelligentSearcher:
         bm25_raw = self.index_manager.search_bm25(query, k=candidate_k)
         bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
 
-        # Fuse
-        fused = reciprocal_rank_fusion(vector_pairs, bm25_pairs, k=fusion_k)
+        # Weighted RRF fusion
+        fused = reciprocal_rank_fusion(
+            vector_pairs, bm25_pairs, k=fusion_k,
+            vector_weight=vector_weight, bm25_weight=bm25_weight,
+        )
 
         # Build SearchResult objects for top-k fused results
         metadata_lookup = {}
@@ -199,14 +236,25 @@ class IntelligentSearcher:
             if chunk_id not in metadata_lookup:
                 metadata_lookup[chunk_id] = metadata
 
-        results = []
-        for chunk_id, rrf_score in fused[:k]:
+        # Collect more candidates than k so chunk type boosting can re-order
+        over_fetch = min(k * 3, len(fused))
+        candidates = []
+        for chunk_id, rrf_score in fused[:over_fetch]:
             metadata = metadata_lookup.get(chunk_id)
             if metadata:
                 result = self._create_search_result(chunk_id, rrf_score, metadata, context_depth)
-                results.append(result)
+                candidates.append(result)
 
-        return results
+        # Apply chunk type boosts based on content mode
+        boosts = CHUNK_TYPE_BOOSTS.get(content_mode, {})
+        if boosts:
+            for result in candidates:
+                multiplier = boosts.get(result.chunk_type, 1.0)
+                result.similarity_score *= multiplier
+
+            candidates.sort(key=lambda r: r.similarity_score, reverse=True)
+
+        return candidates[:k]
 
     def _optimize_query(self, query: str) -> str:
         """Optimize query for better embedding generation."""

@@ -41,3 +41,59 @@ def test_rrf_fusion_handles_empty_bm25():
     fused = reciprocal_rank_fusion(vector_results, bm25_results, k=60)
     assert len(fused) == 2
     assert fused[0][0] == "doc_a"
+
+
+def test_weighted_rrf_bm25_heavy():
+    """Higher BM25 weight should boost BM25-only docs over vector-only docs."""
+    from search.searcher import reciprocal_rank_fusion
+
+    # doc_a only in vector, doc_b only in bm25, both at rank 0
+    vector_results = [("doc_a", 0.9)]
+    bm25_results = [("doc_b", -1.0)]
+
+    fused = reciprocal_rank_fusion(
+        vector_results, bm25_results, k=60,
+        vector_weight=0.3, bm25_weight=0.7,
+    )
+    fused_ids = [chunk_id for chunk_id, score in fused]
+
+    # With bm25 weight 0.7 vs vector 0.3, doc_b should rank first
+    assert fused_ids[0] == "doc_b"
+    assert fused_ids[1] == "doc_a"
+
+
+def test_weighted_rrf_vector_heavy():
+    """Higher vector weight should boost vector-only docs over BM25-only docs."""
+    from search.searcher import reciprocal_rank_fusion
+
+    vector_results = [("doc_a", 0.9)]
+    bm25_results = [("doc_b", -1.0)]
+
+    fused = reciprocal_rank_fusion(
+        vector_results, bm25_results, k=60,
+        vector_weight=0.7, bm25_weight=0.3,
+    )
+    fused_ids = [chunk_id for chunk_id, score in fused]
+
+    assert fused_ids[0] == "doc_a"
+    assert fused_ids[1] == "doc_b"
+
+
+def test_chunk_type_boosts_code_mode():
+    """In code mode, function chunks should rank above section chunks at same RRF score."""
+    from search.searcher import CHUNK_TYPE_BOOSTS
+
+    boosts = CHUNK_TYPE_BOOSTS["code"]
+    assert boosts["function"] > boosts["section"]
+    assert boosts["method"] > boosts["section"]
+    assert boosts["class"] > boosts["section"]
+    assert boosts["decorated_definition"] > boosts["section"]
+
+
+def test_chunk_type_boosts_docs_mode():
+    """In docs mode, section chunks should rank above function chunks."""
+    from search.searcher import CHUNK_TYPE_BOOSTS
+
+    boosts = CHUNK_TYPE_BOOSTS["docs"]
+    assert boosts["section"] > boosts["function"]
+    assert boosts["section"] > boosts["method"]
