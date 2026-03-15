@@ -1,29 +1,27 @@
 tools:
   search_code: |
-    Search code by natural language query using semantic similarity. Returns ranked results with file paths, line numbers, similarity scores, and code snippets. Use for understanding functionality, finding patterns, or discovering related code.
-    Minimal usage: search_code("authentication")
-    Full usage: search_code("authentication", k=10, file_pattern="*.py")
+    Perform semantic similarity search across an indexed codebase using natural language queries. Returns ranked JSON results with file paths, line ranges, chunk types (function/class/module), similarity scores, and code snippets. Supports filtering by file_pattern and chunk_type. Auto-reindexes stale projects (default 5min threshold). Best for conceptual queries like "where is authentication handled" or "error handling patterns". For structural queries (call graphs, blast radius), use codebase-memory-mcp instead.
 
   index_directory: |
-    Index a codebase using semantic embeddings.
-    Minimal usage: index_directory("/path/to/project")
-    Full usage: index_directory("/path/to/project", project_name="project", file_pattern="*.py", incremental=False)
+    Build a semantic search index for a codebase directory. Parses source files into AST-based chunks (functions, classes, modules across Python, JS, TS, Go, Java, Rust), generates 768-dim embeddings via EmbeddingGemma, and stores vectors in a FAISS index with SQLite metadata. Supports incremental indexing via Merkle tree change detection so only added/modified files are reprocessed. Returns JSON with success status, file counts (added/removed/modified), chunk counts, and timing. First run downloads the embedding model (~300MB).
 
   find_similar_code: |
-    Find code chunks functionally similar to a reference chunk. Useful for finding alternative implementations, code duplication, or refactoring related code.
-    Usage: find_similar_code(chunk_id from search_code, k=5)
+    Locate code chunks that are functionally similar to a given reference chunk by embedding distance. Takes a chunk_id from a previous search_code result and returns the k nearest neighbors. Each result includes file path, line range, chunk type, name, similarity score, content preview, and semantic tags. Returns JSON with the reference chunk ID and a similar_chunks array. Useful for detecting duplication, finding alternative implementations, or identifying refactoring candidates across the indexed project.
 
-  get_index_status: Get current index statistics and model status.
+  get_index_status: |
+    Returns detailed statistics about the current project's search index and embedding model. Index stats include total chunks indexed, unique file count, chunk type distribution, and index byte size. Model info includes name (EmbeddingGemma-300m), embedding dimension (768), and local cache directory path. Also reports the base storage directory (~/.claude_code_search or CODE_SEARCH_STORAGE env override). Returns JSON. Requires an active or auto-detected project.
 
-  list_projects: List all indexed projects with their metadata.
+  list_projects: |
+    Returns all previously indexed projects with their metadata and index statistics as a JSON array. Each project entry includes name, filesystem path, content hash, creation timestamp, and index stats (chunk count, file count) when available. Also reports which project is currently active via current_project field. Typically returns under 20 entries. Use switch_project to change the active project context before running searches against a different codebase.
 
   switch_project: |
-    Switch to a different indexed project for searching.
-    Usage: switch_project("/path/to/project")
+    Change the active project context for subsequent search and similarity operations. Resolves the given filesystem path, verifies it has been previously indexed (FAISS index file must exist), and resets the internal index manager and searcher to load the target project's data. Returns JSON with success status and project metadata (name, path, hash, creation date). If the project has not been indexed, returns an error with a suggestion to run index_directory first. No data is modified on disk.
 
-  index_test_project: Index test project
+  index_test_project: |
+    Index the built-in sample Python project for testing and demonstration purposes. The sample project includes authentication (login, password hashing), database (connections, queries), API handlers (HTTP, validation), and utility modules. Returns the standard indexing result JSON (file/chunk counts, timing) plus a demo_info block with project description and sample search queries to try. Useful for verifying the server works before indexing your own codebase.
 
-  clear_index: Clear the search index and metadata for the current project.
+  clear_index: |
+    Permanently delete the FAISS vector index and SQLite metadata for the currently active project. This operation is irreversible - all indexed chunks, embeddings, and file metadata are destroyed. You must re-run index_directory to rebuild the search index after clearing. Only affects the current project; other indexed projects are not touched. Returns JSON with success status. Fails with an error if no project is currently active. Use list_projects to verify which project is active before clearing.
 
 help: |
   # Find similar code
