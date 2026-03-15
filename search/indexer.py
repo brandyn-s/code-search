@@ -196,7 +196,9 @@ class CodeIndexManager:
             # If commit is unavailable for some reason, continue without failing
             pass
 
-        # Add to FTS5 index
+        # Add to FTS5 index (re-init if connection was lost)
+        if not hasattr(self, "_fts_conn") or self._fts_conn is None:
+            self._init_fts5()
         for result in embedding_results:
             content = result.metadata.get("full_content", result.metadata.get("content_preview", ""))
             file_path = result.metadata.get("relative_path", result.metadata.get("file_path", ""))
