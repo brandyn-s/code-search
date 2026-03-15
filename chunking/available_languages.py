@@ -86,4 +86,10 @@ def get_availiable_language():
     except ImportError:
         logger.debug("tree-sitter-markdown not installed")
 
+    try:
+        import tree_sitter_nix as tsnix
+        res['nix'] = Language(tsnix.language())
+    except ImportError:
+        logger.debug("tree-sitter-nix not installed")
+
     return res

@@ -133,6 +133,8 @@ class MultiLanguageChunker:
                 'section': 'section',  # Markdown
                 'preamble': 'preamble',  # Markdown
                 'document': 'document',  # Markdown
+                'binding': 'binding',  # Nix
+                'let_expression': 'let',  # Nix
             }
             
             chunk_type = chunk_type_map.get(tchunk.node_type, tchunk.node_type)

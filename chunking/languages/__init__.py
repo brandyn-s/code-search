@@ -14,6 +14,7 @@ from chunking.languages.markdown_chunker import MarkdownChunker
 from chunking.languages.c_chunker import CChunker
 from chunking.languages.cpp_chunker import CppChunker
 from chunking.languages.csharp_chunker import CSharpChunker
+from chunking.languages.nix_chunker import NixChunker
 
 # Cached factory function for C++ chunker (shared across multiple extensions)
 @lru_cache(maxsize=1)
@@ -39,4 +40,5 @@ LANGUAGE_MAP = {
     '.cxx': ('cpp', _get_cpp_chunker),
     '.c++': ('cpp', _get_cpp_chunker),
     '.cs': ('csharp', CSharpChunker),
+    '.nix': ('nix', NixChunker),
 }

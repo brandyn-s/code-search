@@ -47,6 +47,7 @@ dependencies = [
     "tree-sitter-java>=0.23.5",
     "tree-sitter-javascript>=0.25.0",
     "tree-sitter-markdown>=0.3.2",
+    "tree-sitter-nix>=0.1.0",
     "tree-sitter-python>=0.23.6",
     "tree-sitter-rust>=0.24.0",
     "tree-sitter-svelte>=1.0.2",
