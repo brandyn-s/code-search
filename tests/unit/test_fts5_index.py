@@ -80,6 +80,7 @@ def test_fts5_cleared_on_clear_index():
         assert len(mgr.search_bm25("redis", k=5)) >= 1
 
         mgr.clear_index()
+        _close_manager(mgr)
 
         # Re-initialize after clear
         mgr2 = CodeIndexManager(tmpdir)

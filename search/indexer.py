@@ -505,6 +505,9 @@ class CodeIndexManager:
         self._index = None
         self._chunk_ids = []
 
+        # Re-initialize FTS5 for new inserts
+        self._init_fts5()
+
         self._logger.info("Index cleared")
     
     def __del__(self):
