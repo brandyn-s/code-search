@@ -26,7 +26,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         api_key: str = "",
         model_name: str = "text-embedding-3-small",
         base_url: str = "https://api.openai.com/v1",
-        batch_size: int = 2048,
+        batch_size: int = 256,
         **kwargs,
     ):
         # Skip device resolution - not needed for API model
@@ -40,7 +40,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         self._model_name = model_name
         self._base_url = base_url.rstrip("/")
         self._batch_size = batch_size
-        self._client = httpx.Client(timeout=60.0)
+        self._client = httpx.Client(timeout=300.0)
         self._dimension = MODEL_DIMENSIONS.get(model_name, 1536)
         logger.info(f"OpenAI embedder initialized: model={model_name}, dim={self._dimension}")
 

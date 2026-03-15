@@ -206,17 +206,22 @@ class IncrementalIndexer:
                 except Exception as e:
                     logger.warning(f"Failed to chunk {file_path}: {e}")
 
-            # Embed all chunks in one batched call
+            # Embed chunks in batches with per-batch error recovery
             all_embedding_results = []
+            embed_batch_size = 64
             if all_chunks:
-                try:
-                    all_embedding_results = self.embedder.embed_chunks(all_chunks)
-                    # Update metadata
-                    for chunk, embedding_result in zip(all_chunks, all_embedding_results):
-                        embedding_result.metadata['project_name'] = project_name
-                        embedding_result.metadata['content'] = chunk.content
-                except Exception as e:
-                    logger.warning(f"Embedding failed: {e}")
+                for batch_start in range(0, len(all_chunks), embed_batch_size):
+                    batch = all_chunks[batch_start:batch_start + embed_batch_size]
+                    try:
+                        batch_results = self.embedder.embed_chunks(batch, batch_size=len(batch))
+                        for chunk, embedding_result in zip(batch, batch_results):
+                            embedding_result.metadata['project_name'] = project_name
+                            embedding_result.metadata['content'] = chunk.content
+                        all_embedding_results.extend(batch_results)
+                        logger.info(f"Embedded {batch_start + len(batch)}/{len(all_chunks)} chunks")
+                    except Exception as e:
+                        logger.warning(f"Embedding batch {batch_start}-{batch_start+len(batch)} failed: {e}")
+                        # Continue with next batch instead of losing everything
             
             # Add all embeddings to index at once
             if all_embedding_results:
