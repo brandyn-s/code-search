@@ -32,7 +32,9 @@ class CodeSearchServer:
         self._index_manager: Optional[CodeIndexManager] = None
         self._searcher: Optional[IntelligentSearcher] = None
         self._current_project: Optional[str] = None
-        self._indexing_job = None  # {job_id, status, phase, current, total, errors, result}
+        self._indexing_job = (
+            None  # {job_id, status, phase, current, total, errors, result}
+        )
         self._indexing_thread = None
 
     def get_project_storage_dir(self, project_path: str) -> Path:
@@ -41,6 +43,7 @@ class CodeSearchServer:
         project_path_obj = Path(project_path).resolve()
         project_name = project_path_obj.name
         import hashlib
+
         project_hash = hashlib.md5(str(project_path_obj).encode()).hexdigest()[:8]
 
         # Use common utils for base directory
@@ -54,9 +57,11 @@ class CodeSearchServer:
                 "project_name": project_name,
                 "project_path": str(project_path_obj),
                 "project_hash": project_hash,
-                "created_at": datetime.now().isoformat()
+                "created_at": datetime.now().isoformat(),
+                "embedding_provider": os.environ.get("EMBEDDING_PROVIDER", "voyage"),
+                "embedding_model": os.environ.get("EMBEDDING_MODEL", ""),
             }
-            with open(project_info_file, 'w') as f:
+            with open(project_info_file, "w") as f:
                 json.dump(project_info, f, indent=2)
 
         return project_dir
@@ -71,7 +76,9 @@ class CodeSearchServer:
                 return True
 
             project_path_obj = Path(project_path)
-            if project_path_obj == Path.cwd() and list(project_path_obj.glob("**/*.py")):
+            if project_path_obj == Path.cwd() and list(
+                project_path_obj.glob("**/*.py")
+            ):
                 logger.info(f"Auto-indexing current directory: {project_path}")
                 result = self.index_directory(project_path)
                 result_data = json.loads(result)
@@ -148,10 +155,11 @@ class CodeSearchServer:
 
         if self._current_project != project_path or self._searcher is None:
             self._searcher = IntelligentSearcher(
-                self.get_index_manager(project_path),
-                self.embedder()
+                self.get_index_manager(project_path), self.embedder()
             )
-            logger.info(f"Searcher initialized for: {Path(self._current_project).name if self._current_project else 'unknown'}")
+            logger.info(
+                f"Searcher initialized for: {Path(self._current_project).name if self._current_project else 'unknown'}"
+            )
 
         return self._searcher
 
@@ -164,45 +172,54 @@ class CodeSearchServer:
         chunk_type: str = None,
         include_context: bool = True,
         auto_reindex: bool = True,
-        max_age_minutes: float = 5
+        max_age_minutes: float = 5,
     ) -> str:
         """Implementation of search_code tool."""
         try:
-            logger.info(f"🔍 MCP REQUEST: search_code(query='{query}', k={k}, mode='{search_mode}', file_pattern={file_pattern}, chunk_type={chunk_type})")
+            logger.info(
+                f"🔍 MCP REQUEST: search_code(query='{query}', k={k}, mode='{search_mode}', file_pattern={file_pattern}, chunk_type={chunk_type})"
+            )
 
             # If indexing is in progress, report that instead of returning empty
             if self._indexing_job and self._indexing_job["status"] == "indexing":
                 job = self._indexing_job
-                pct = round(100 * job["current"] / job["total"], 1) if job["total"] > 0 else 0
-                return json.dumps({
-                    "query": query,
-                    "results": [],
-                    "indexing_in_progress": True,
-                    "message": f"Indexing in progress ({job['phase']}: {pct}% - {job['current']}/{job['total']} chunks). Results will be available when complete.",
-                })
+                pct = (
+                    round(100 * job["current"] / job["total"], 1)
+                    if job["total"] > 0
+                    else 0
+                )
+                return json.dumps(
+                    {
+                        "query": query,
+                        "results": [],
+                        "indexing_in_progress": True,
+                        "message": f"Indexing in progress ({job['phase']}: {pct}% - {job['current']}/{job['total']} chunks). Results will be available when complete.",
+                    }
+                )
 
             if auto_reindex and self._current_project:
                 from search.incremental_indexer import IncrementalIndexer
 
-                logger.info(f"Checking if index needs refresh (max age: {max_age_minutes} minutes)")
+                logger.info(
+                    f"Checking if index needs refresh (max age: {max_age_minutes} minutes)"
+                )
 
                 index_manager = self.get_index_manager(self._current_project)
                 embedder = self.embedder()
                 chunker = MultiLanguageChunker(self._current_project)
 
                 incremental_indexer = IncrementalIndexer(
-                    indexer=index_manager,
-                    embedder=embedder,
-                    chunker=chunker
+                    indexer=index_manager, embedder=embedder, chunker=chunker
                 )
 
                 reindex_result = incremental_indexer.auto_reindex_if_needed(
-                    self._current_project,
-                    max_age_minutes=max_age_minutes
+                    self._current_project, max_age_minutes=max_age_minutes
                 )
 
                 if reindex_result.files_modified > 0 or reindex_result.files_added > 0:
-                    logger.info(f"Auto-reindexed: {reindex_result.files_added} added, {reindex_result.files_modified} modified, took {reindex_result.time_taken:.2f}s")
+                    logger.info(
+                        f"Auto-reindexed: {reindex_result.files_added} added, {reindex_result.files_modified} modified, took {reindex_result.time_taken:.2f}s"
+                    )
                     self._searcher = None  # Reset to force reload
 
             searcher = self.get_searcher()
@@ -213,53 +230,54 @@ class CodeSearchServer:
 
             filters = {}
             if file_pattern:
-                filters['file_pattern'] = [file_pattern]
+                filters["file_pattern"] = [file_pattern]
             if chunk_type:
-                filters['chunk_type'] = chunk_type
+                filters["chunk_type"] = chunk_type
 
             logger.info(f"Search filters: {filters}")
 
             context_depth = 1 if include_context else 0
-            logger.info(f"Calling searcher.search with query='{query}', k={k}, mode={search_mode}")
+            logger.info(
+                f"Calling searcher.search with query='{query}', k={k}, mode={search_mode}"
+            )
             results = searcher.search(
                 query=query,
                 k=k,
                 search_mode=search_mode,
                 context_depth=context_depth,
-                filters=filters if filters else None
+                filters=filters if filters else None,
             )
             logger.info(f"Search returned {len(results)} results")
 
             def make_snippet(preview: Optional[str]) -> str:
                 if not preview:
                     return ""
-                for line in preview.split('\n'):
+                for line in preview.split("\n"):
                     s = line.strip()
                     if s:
-                        snippet = ' '.join(s.split())
-                        return (snippet[:157] + '...') if len(snippet) > 160 else snippet
+                        snippet = " ".join(s.split())
+                        return (
+                            (snippet[:157] + "...") if len(snippet) > 160 else snippet
+                        )
                 return ""
 
             formatted_results = []
             for result in results:
                 item = {
-                    'file': result.relative_path,
-                    'lines': f"{result.start_line}-{result.end_line}",
-                    'kind': result.chunk_type,
-                    'score': round(result.similarity_score, 2),
-                    'chunk_id': result.chunk_id
+                    "file": result.relative_path,
+                    "lines": f"{result.start_line}-{result.end_line}",
+                    "kind": result.chunk_type,
+                    "score": round(result.similarity_score, 2),
+                    "chunk_id": result.chunk_id,
                 }
                 if result.name:
-                    item['name'] = result.name
+                    item["name"] = result.name
                 snippet = make_snippet(result.content_preview)
                 if snippet:
-                    item['snippet'] = snippet
+                    item["snippet"] = snippet
                 formatted_results.append(item)
 
-            response = {
-                'query': query,
-                'results': formatted_results
-            }
+            response = {"query": query, "results": formatted_results}
 
             return json.dumps(response, separators=(",", ":"))
         except Exception as e:
@@ -272,7 +290,7 @@ class CodeSearchServer:
         directory_path: str,
         project_name: str = None,
         file_patterns: List[str] = None,
-        incremental: bool = True
+        incremental: bool = True,
     ) -> str:
         """Start indexing a directory. Returns immediately with job status."""
         import threading
@@ -280,20 +298,26 @@ class CodeSearchServer:
 
         # If already indexing, return current status
         if self._indexing_job and self._indexing_job["status"] == "indexing":
-            return json.dumps({
-                "status": "indexing",
-                "message": "Indexing already in progress",
-                "job_id": self._indexing_job["job_id"],
-                "phase": self._indexing_job.get("phase", "unknown"),
-                "chunks_done": self._indexing_job.get("current", 0),
-                "chunks_total": self._indexing_job.get("total", 0),
-            })
+            return json.dumps(
+                {
+                    "status": "indexing",
+                    "message": "Indexing already in progress",
+                    "job_id": self._indexing_job["job_id"],
+                    "phase": self._indexing_job.get("phase", "unknown"),
+                    "chunks_done": self._indexing_job.get("current", 0),
+                    "chunks_total": self._indexing_job.get("total", 0),
+                }
+            )
 
         directory_path_obj = Path(directory_path).resolve()
         if not directory_path_obj.exists():
-            return json.dumps({"error": f"Directory does not exist: {directory_path_obj}"})
+            return json.dumps(
+                {"error": f"Directory does not exist: {directory_path_obj}"}
+            )
         if not directory_path_obj.is_dir():
-            return json.dumps({"error": f"Path is not a directory: {directory_path_obj}"})
+            return json.dumps(
+                {"error": f"Path is not a directory: {directory_path_obj}"}
+            )
 
         project_name = project_name or directory_path_obj.name
         job_id = uuid.uuid4().hex[:8]
@@ -334,9 +358,7 @@ class CodeSearchServer:
                 )
 
                 result = incremental_indexer.incremental_index(
-                    str(directory_path_obj),
-                    project_name,
-                    force_full=not incremental
+                    str(directory_path_obj), project_name, force_full=not incremental
                 )
 
                 stats = incremental_indexer.get_indexing_stats(str(directory_path_obj))
@@ -356,24 +378,30 @@ class CodeSearchServer:
                     "index_stats": stats,
                     "error": result.error,
                 }
-                logger.info(f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s")
+                logger.info(
+                    f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s"
+                )
             except Exception as e:
                 logger.error(f"Background indexing failed: {e}", exc_info=True)
                 self._indexing_job["status"] = "failed"
                 self._indexing_job["phase"] = "error"
                 self._indexing_job["result"] = {"error": str(e)}
 
-        logger.info(f"Starting background indexing: {directory_path_obj} (incremental={incremental})")
+        logger.info(
+            f"Starting background indexing: {directory_path_obj} (incremental={incremental})"
+        )
         self._indexing_thread = threading.Thread(target=_run_indexing, daemon=True)
         self._indexing_thread.start()
 
-        return json.dumps({
-            "status": "indexing",
-            "job_id": job_id,
-            "directory": str(directory_path_obj),
-            "project_name": project_name,
-            "message": "Indexing started in background. Use get_indexing_progress to check status.",
-        })
+        return json.dumps(
+            {
+                "status": "indexing",
+                "job_id": job_id,
+                "directory": str(directory_path_obj),
+                "project_name": project_name,
+                "message": "Indexing started in background. Use get_indexing_progress to check status.",
+            }
+        )
 
     def get_indexing_progress(self) -> str:
         """Get current indexing job progress."""
@@ -407,19 +435,21 @@ class CodeSearchServer:
 
             formatted_results = []
             for result in results:
-                formatted_results.append({
-                    'file_path': result.relative_path,
-                    'lines': f"{result.start_line}-{result.end_line}",
-                    'chunk_type': result.chunk_type,
-                    'name': result.name,
-                    'similarity_score': round(result.similarity_score, 3),
-                    'content_preview': result.content_preview,
-                    'tags': result.tags
-                })
+                formatted_results.append(
+                    {
+                        "file_path": result.relative_path,
+                        "lines": f"{result.start_line}-{result.end_line}",
+                        "chunk_type": result.chunk_type,
+                        "name": result.name,
+                        "similarity_score": round(result.similarity_score, 3),
+                        "content_preview": result.content_preview,
+                        "tags": result.tags,
+                    }
+                )
 
             response = {
-                'reference_chunk': chunk_id,
-                'similar_chunks': formatted_results
+                "reference_chunk": chunk_id,
+                "similar_chunks": formatted_results,
             }
 
             return json.dumps(response, indent=2)
@@ -438,14 +468,18 @@ class CodeSearchServer:
             provider = os.environ.get("EMBEDDING_PROVIDER", "openai")
             model_info = {
                 "provider": provider,
-                "model_name": os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small") if provider == "openai" else os.environ.get("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
+                "model_name": os.environ.get(
+                    "EMBEDDING_MODEL", "text-embedding-3-small"
+                )
+                if provider == "openai"
+                else os.environ.get("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
                 "status": "configured",
             }
 
             response = {
                 "index_statistics": stats,
                 "model_information": model_info,
-                "storage_directory": str(get_storage_dir())
+                "storage_directory": str(get_storage_dir()),
             }
 
             return json.dumps(response, indent=2)
@@ -461,11 +495,9 @@ class CodeSearchServer:
             projects_dir = base_dir / "projects"
 
             if not projects_dir.exists():
-                return json.dumps({
-                    "projects": [],
-                    "count": 0,
-                    "message": "No projects indexed yet"
-                })
+                return json.dumps(
+                    {"projects": [], "count": 0, "message": "No projects indexed yet"}
+                )
 
             projects = []
             for project_dir in projects_dir.iterdir():
@@ -483,11 +515,14 @@ class CodeSearchServer:
 
                         projects.append(project_info)
 
-            return json.dumps({
-                "projects": projects,
-                "count": len(projects),
-                "current_project": self._current_project
-            }, indent=2)
+            return json.dumps(
+                {
+                    "projects": projects,
+                    "count": len(projects),
+                    "current_project": self._current_project,
+                },
+                indent=2,
+            )
         except Exception as e:
             logger.error(f"Error listing projects: {e}")
             return json.dumps({"error": str(e)})
@@ -497,16 +532,20 @@ class CodeSearchServer:
         try:
             project_path = Path(project_path).resolve()
             if not project_path.exists():
-                return json.dumps({"error": f"Project path does not exist: {project_path}"})
+                return json.dumps(
+                    {"error": f"Project path does not exist: {project_path}"}
+                )
 
             project_dir = self.get_project_storage_dir(str(project_path))
             index_dir = project_dir / "index"
 
             if not index_dir.exists() or not (index_dir / "code.index").exists():
-                return json.dumps({
-                    "error": f"Project not indexed: {project_path}",
-                    "suggestion": f"Run index_directory('{project_path}') first"
-                })
+                return json.dumps(
+                    {
+                        "error": f"Project not indexed: {project_path}",
+                        "suggestion": f"Run index_directory('{project_path}') first",
+                    }
+                )
 
             self._current_project = str(project_path)
             self._index_manager = None
@@ -520,11 +559,13 @@ class CodeSearchServer:
 
             logger.info(f"Switched to project: {project_path.name}")
 
-            return json.dumps({
-                "success": True,
-                "message": f"Switched to project: {project_path.name}",
-                "project_info": project_info
-            })
+            return json.dumps(
+                {
+                    "success": True,
+                    "message": f"Switched to project: {project_path.name}",
+                    "project_info": project_info,
+                }
+            )
         except Exception as e:
             logger.error(f"Error switching project: {e}")
             return json.dumps({"error": str(e)})
@@ -535,13 +576,17 @@ class CodeSearchServer:
             logger.info("Indexing built-in test project")
 
             server_dir = Path(__file__).parent
-            test_project_path = server_dir.parent / "tests" / "test_data" / "python_project"
+            test_project_path = (
+                server_dir.parent / "tests" / "test_data" / "python_project"
+            )
 
             if not test_project_path.exists():
-                return json.dumps({
-                    "success": False,
-                    "error": "Test project not found. The sample project may not be available."
-                })
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "Test project not found. The sample project may not be available.",
+                    }
+                )
 
             result = self.index_directory(str(test_project_path))
             result_data = json.loads(result)
@@ -553,38 +598,36 @@ class CodeSearchServer:
                         "Authentication module (user login, password hashing)",
                         "Database module (connections, queries, transactions)",
                         "API module (HTTP handlers, request validation)",
-                        "Utilities (helpers, validation, configuration)"
+                        "Utilities (helpers, validation, configuration)",
                     ],
                     "sample_searches": [
                         "user authentication functions",
                         "database connection code",
                         "HTTP API handlers",
                         "input validation",
-                        "error handling patterns"
-                    ]
+                        "error handling patterns",
+                    ],
                 }
 
             return json.dumps(result_data, indent=2)
         except Exception as e:
             logger.error(f"Error indexing test project: {e}")
-            return json.dumps({
-                "success": False,
-                "error": str(e)
-            })
+            return json.dumps({"success": False, "error": str(e)})
 
     def clear_index(self) -> str:
         """Implementation of clear_index tool."""
         try:
             if self._current_project is None:
-                return json.dumps({"error": "No project is currently active. Use index_directory() to index a project first."})
+                return json.dumps(
+                    {
+                        "error": "No project is currently active. Use index_directory() to index a project first."
+                    }
+                )
 
             index_manager = self.get_index_manager()
             index_manager.clear_index()
 
-            response = {
-                "success": True,
-                "message": "Search index cleared successfully"
-            }
+            response = {"success": True, "message": "Search index cleared successfully"}
 
             logger.info("Search index cleared")
             return json.dumps(response, indent=2)

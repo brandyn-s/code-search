@@ -58,6 +58,17 @@ class CodeEmbedder:
                 model_name=model_name,
                 base_url="https://api.voyageai.com/v1",
             )
+        elif provider == "voyage-context":
+            from embeddings.voyage_context_embedder import VoyageContextEmbedder
+
+            model_name = model_name or os.environ.get(
+                "EMBEDDING_MODEL", "voyage-context-3"
+            )
+            api_key = os.environ.get("VOYAGE_API_KEY", "")
+            self._model = VoyageContextEmbedder(
+                api_key=api_key,
+                model_name=model_name,
+            )
         elif provider == "local":
             from embeddings.sentence_transformer import SentenceTransformerModel
 
@@ -74,7 +85,8 @@ class CodeEmbedder:
             self._model = GemmaEmbeddingModel(cache_dir=cache_dir, device=device)
         else:
             raise ValueError(
-                f"Unknown EMBEDDING_PROVIDER: {provider}. Use 'openai', 'local', or 'gemma'."
+                f"Unknown EMBEDDING_PROVIDER: {provider}. "
+                f"Use 'openai', 'voyage', 'voyage-context', 'local', or 'gemma'."
             )
 
         self._logger.info(f"Embedding provider: {provider}, model: {model_name}")
@@ -280,6 +292,87 @@ class CodeEmbedder:
                 self._logger.info(f"Processed {i + batch_size}/{len(chunks)} chunks")
 
         self._logger.info("Embedding generation completed")
+        return results
+
+    def embed_chunks_grouped(
+        self, chunks: List[CodeChunk], batch_size: int = 32
+    ) -> List[EmbeddingResult]:
+        """Generate embeddings with chunks grouped by source file.
+
+        Uses encode_grouped() if the model supports it (voyage-context-3),
+        otherwise falls back to flat embed_chunks().
+        """
+        if not hasattr(self._model, "encode_grouped"):
+            return self.embed_chunks(chunks, batch_size)
+
+        from collections import defaultdict
+
+        # Group chunks by source file
+        file_groups: Dict[str, List[CodeChunk]] = defaultdict(list)
+        for chunk in chunks:
+            file_groups[chunk.relative_path].append(chunk)
+
+        self._logger.info(
+            f"Grouped {len(chunks)} chunks into {len(file_groups)} files for contextualized embedding"
+        )
+
+        results = []
+        file_items = list(file_groups.items())
+
+        for batch_start in range(0, len(file_items), batch_size):
+            batch_files = file_items[batch_start : batch_start + batch_size]
+
+            # Build grouped texts and track chunk ordering
+            grouped_texts = []
+            batch_chunks = []
+            for _file_path, file_chunks in batch_files:
+                texts = [self.create_embedding_content(c) for c in file_chunks]
+                grouped_texts.append(texts)
+                batch_chunks.extend(file_chunks)
+
+            # Get grouped embeddings (flattened)
+            batch_embeddings = self._model.encode_grouped(
+                grouped_texts, input_type="document"
+            )
+
+            # Create results
+            for chunk, embedding in zip(batch_chunks, batch_embeddings):
+                chunk_id = f"{chunk.relative_path}:{chunk.start_line}-{chunk.end_line}:{chunk.chunk_type}"
+                if chunk.name:
+                    chunk_id += f":{chunk.name}"
+
+                metadata = {
+                    "file_path": chunk.file_path,
+                    "relative_path": chunk.relative_path,
+                    "folder_structure": chunk.folder_structure,
+                    "chunk_type": chunk.chunk_type,
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "name": chunk.name,
+                    "parent_name": chunk.parent_name,
+                    "docstring": chunk.docstring,
+                    "decorators": chunk.decorators,
+                    "imports": chunk.imports,
+                    "complexity_score": chunk.complexity_score,
+                    "tags": chunk.tags,
+                    "content_preview": chunk.content[:200] + "..."
+                    if len(chunk.content) > 200
+                    else chunk.content,
+                    "full_content": chunk.content,
+                }
+
+                results.append(
+                    EmbeddingResult(
+                        embedding=embedding, chunk_id=chunk_id, metadata=metadata
+                    )
+                )
+
+            if batch_start + batch_size < len(file_items):
+                self._logger.info(
+                    f"Processed {batch_start + batch_size}/{len(file_items)} files"
+                )
+
+        self._logger.info("Grouped embedding generation completed")
         return results
 
     def embed_query(self, query: str) -> np.ndarray:
