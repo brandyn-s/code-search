@@ -1,4 +1,4 @@
-name: Security Scan
+name: CI
 
 on:
   pull_request:
@@ -22,8 +22,7 @@ jobs:
       run_checkov: false
       run_trivy: true
       run_gitleaks: true
-      run_container_scan: true
-      run_hadolint: true
+      run_semgrep: true
 
   baseline-ci:
     uses: redacted-org/.github/.github/workflows/baseline-ci.yml@main
