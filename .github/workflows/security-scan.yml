@@ -1,0 +1,13 @@
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  security-scan:
+    uses: redacted-org/.github/.github/workflows/security-scan.yml@main
+    with:
+      run_checkov: false
+      run_trivy: true
+      run_gitleaks: true
