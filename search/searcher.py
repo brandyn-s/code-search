@@ -47,6 +47,7 @@ CONTENT_MODE_WEIGHTS = {
 CHUNK_TYPE_BOOSTS = {
     "code": {
         "function": 1.3, "method": 1.3, "class": 1.3, "decorated_definition": 1.3,
+        "let": 1.3, "binding": 1.3,
         "section": 0.7, "document": 0.7, "module": 0.9,
     },
     "docs": {
