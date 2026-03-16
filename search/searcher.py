@@ -1,5 +1,6 @@
 """Intelligent search functionality with query optimization."""
 
+import os
 import re
 import logging
 from typing import List, Dict, Any, Optional, Tuple
@@ -402,7 +403,29 @@ class IntelligentSearcher:
             path_boost = self._calculate_path_boost(result.relative_path, query_tokens)
             result.similarity_score *= path_boost
 
-        candidates.sort(key=lambda r: r.similarity_score, reverse=True)
+        # Optional cross-encoder reranking
+        if os.environ.get("RERANKER", "off") == "on" and candidates:
+            from search.reranker import rerank_results
+
+            rerank_input = [
+                {
+                    "chunk_id": r.chunk_id,
+                    "content": r.content_preview,
+                    "score": r.similarity_score,
+                    "result": r,
+                }
+                for r in candidates
+            ]
+            reranked = rerank_results(query, rerank_input, top_k=k)
+            candidates = [item["result"] for item in reranked]
+            # Update scores from reranker
+            for item, candidate in zip(reranked, candidates):
+                candidate.similarity_score = item.get(
+                    "rerank_score", candidate.similarity_score
+                )
+
+        if os.environ.get("RERANKER", "off") != "on":
+            candidates.sort(key=lambda r: r.similarity_score, reverse=True)
         return candidates[:k]
 
     def _optimize_query(self, query: str) -> str:
