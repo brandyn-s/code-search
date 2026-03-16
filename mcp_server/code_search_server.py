@@ -53,13 +53,19 @@ class CodeSearchServer:
         # Store project info
         project_info_file = project_dir / "project_info.json"
         if not project_info_file.exists():
+            # Auto-select embedding provider from CONTENT_MODE if not explicitly set
+            content_mode = os.environ.get("CONTENT_MODE", "code").lower()
+            default_provider = "voyage-context" if content_mode == "docs" else "voyage"
             project_info = {
                 "project_name": project_name,
                 "project_path": str(project_path_obj),
                 "project_hash": project_hash,
                 "created_at": datetime.now().isoformat(),
-                "embedding_provider": os.environ.get("EMBEDDING_PROVIDER", "voyage"),
+                "embedding_provider": os.environ.get(
+                    "EMBEDDING_PROVIDER", default_provider
+                ),
                 "embedding_model": os.environ.get("EMBEDDING_MODEL", ""),
+                "content_mode": content_mode,
             }
             with open(project_info_file, "w") as f:
                 json.dump(project_info, f, indent=2)
