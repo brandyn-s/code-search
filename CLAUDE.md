@@ -1,206 +1,52 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-Claude Embedding Search is an intelligent code search system that uses Google's EmbeddingGemma model and AST-based chunking to provide semantic search capabilities for Python codebases, integrated with Claude Code via MCP (Model Context Protocol).
+redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP server.
 
 ## Key Commands
 
-### Development Setup
-
 ```bash
-# Install dependencies
-uv sync
+# Run tests
+.venv/Scripts/python.exe -m pytest tests/unit/ -v
 
-# Install in development mode
-uv sync --dev
-```
+# Run MCP server
+.venv/Scripts/python.exe -m mcp_server.server
 
-### Testing
-
-```bash
-# Run all tests
-python tests/run_tests.py
-
-# Run specific test categories
-python tests/run_tests.py --unit          # Unit tests only
-python tests/run_tests.py --integration   # Integration tests only
-python tests/run_tests.py --chunking      # Chunking tests only
-python tests/run_tests.py --embeddings    # Embedding tests only
-python tests/run_tests.py --search        # Search tests only
-python tests/run_tests.py --mcp           # MCP server tests only
-
-# Run tests with coverage
-python tests/run_tests.py --coverage
-
-# Run tests with verbose output
-python tests/run_tests.py --verbose
-
-# Run specific test files or patterns
-python tests/run_tests.py unit/test_chunking.py
-
-# Alternative: Direct pytest usage
-python -m pytest                          # All tests
-python -m pytest -m "unit"               # Unit tests only
-python -m pytest -m "not slow"           # Skip slow tests
-python -m pytest tests/unit/test_chunking.py -v  # Single test file
-```
-
-### Indexing & Usage
-
-```bash
-# Index a Python codebase
-./scripts/index_codebase.py /path/to/project
-
-# Index with custom storage location
-./scripts/index_codebase.py /path/to/project --storage-dir /custom/location
-
-# Clear existing index and reindex
-./scripts/index_codebase.py /path/to/project --clear
-
-# Enable verbose logging
-./scripts/index_codebase.py /path/to/project --verbose
-```
-
-### MCP Server
-
-```bash
-# Run MCP server directly
-uv run python mcp_server/server.py
-
-# Add to Claude Code (global)
-claude mcp add code-search --scope user -- uv run --directory /full/path/to/claude_embedding_search python mcp_server/server.py
-
-# Add to Claude Code (project-specific)
-claude mcp add code-search -- uv run --directory /full/path/to/claude_embedding_search python mcp_server/server.py
+# Index a repo (from MCP client)
+# mcp__code-search__index_directory(directory_path="...")
 ```
 
 ## Architecture
 
-The codebase is organized into distinct modules with clear separation of concerns:
+- **Embedding providers**: Voyage AI (`voyage-code-3` for code, `voyage-context-3` for docs), OpenAI, local sentence-transformers
+- **Search**: Weighted RRF fusion of FAISS vector + FTS5 BM25. Content mode boosts (code: function/method 1.3x, docs: section 1.3x)
+- **Chunking**: Tree-sitter AST for 12+ languages, regex-based for TOML/YAML/HCL/Markdown/Nix
+- **Per-project config**: `project_info.json` stores embedding provider, model, content mode. Server creates correct embedder on project switch.
+- **Contextual headers**: `# From <path> - <type> <name>` prepended before embedding (controlled by `CONTEXTUAL_HEADERS=on`)
 
-### Core Components
-
-- **`chunking/`**: AST-based code parsing and chunking
-  - `python_ast_chunker.py`: Breaks Python code into semantically meaningful chunks (functions, classes, modules)
-  - `multi_language_chunker.py`: Tree-sitter based chunking for JavaScript, TypeScript, Go, Java, Rust, and Svelte
-  - Preserves context and relationships between code elements
-- **`embeddings/`**: Embedding generation using EmbeddingGemma
-  - `embedder.py`: Handles model loading, caching, and batch embedding generation
-  - Uses `google/embeddinggemma-300m` model with 768-dimensional embeddings
-- **`search/`**: FAISS-based search and indexing
-  - `indexer.py`: Manages FAISS indices, metadata storage (SQLite), and index persistence
-  - `searcher.py`: Intelligent search with filtering, context-aware results, and similarity search
-- **`mcp_server/`**: Claude Code integration via MCP
-
-  - `server.py`: FastMCP server exposing search tools to Claude Code
-  - Provides `search_code`, `index_directory`, `find_similar_code`, etc.
-
-- **`merkle/`**: Incremental indexing support
-  - `merkle_dag.py`: Merkle tree implementation for efficient change detection
-  - `change_detector.py`: Detects file additions, modifications, and deletions
-  - `snapshot_manager.py`: Manages snapshots for incremental indexing
-- **`search/incremental_indexer.py`**: Orchestrates incremental indexing using Merkle tree change detection
-
-### Storage Structure
-
-Data is stored in `~/.claude_code_search/` (configurable via `CODE_SEARCH_STORAGE`):
-
-```
-~/.claude_code_search/
-├── models/          # Downloaded EmbeddingGemma models
-├── projects/        # Project-specific data
-│   └── {project_name}_{hash}/
-│       ├── project_info.json  # Project metadata
-│       ├── index/             # FAISS indices and metadata
-│       │   ├── code.index     # Vector index
-│       │   ├── metadata.db    # Chunk metadata (SQLite)
-│       │   └── stats.json     # Index statistics
-│       └── snapshots/         # Merkle tree snapshots for incremental indexing
-```
-
-### Chunking Strategy
-
-The system uses AST parsing to create semantically meaningful chunks:
-
-- Complete functions with docstrings and decorators
-- Full classes with methods as separate chunks
-- Module-level code blocks and constants
-- Rich metadata: file paths, semantic tags, complexity scores, relationships
-
-## Testing Strategy
-
-Tests are organized by component with pytest markers:
-
-- `unit`: Fast, isolated unit tests
-- `integration`: End-to-end workflow tests
-- `chunking`: AST chunking functionality
-- `embeddings`: Model loading and embedding generation
-- `search`: Indexing and search functionality
-- `mcp`: MCP server integration
-- `slow`: Time-intensive tests (excluded by default)
-
-## Development Notes
-
-### Key Dependencies
-
-- `sentence-transformers`: EmbeddingGemma model loading and inference
-- `faiss-cpu`: Efficient vector similarity search
-- `fastmcp`: MCP server implementation for Claude Code integration
-- `sqlitedict`: Persistent metadata storage
-- `tree-sitter` & `tree-sitter-languages`: Multi-language parsing support
-- `click`: Command-line interface utilities
-- `pytest`: Testing framework with async support
-
-### Performance Considerations
-
-- Model size: ~300MB (EmbeddingGemma-300m)
-- Embedding dimension: 768 (FAISS Flat index for small datasets, IVF for large)
-- Batch processing: Configurable batch sizes for memory management
-- Local processing: All embeddings computed locally, no API calls
-- Incremental indexing: Only reprocesses changed files using Merkle tree snapshots
-
-### Environment Variables
-
-- `CODE_SEARCH_STORAGE`: Custom storage directory (default: `~/.claude_code_search`)
-
-## Common Tasks
-
-### Adding New Chunk Types
-
-1. Extend `python_ast_chunker.py` to handle new AST node types
-2. Update metadata extraction in chunk creation
-3. Add corresponding tests in `tests/unit/test_chunking.py`
-
-### Modifying Search Behavior
-
-1. Update `searcher.py` for new filtering/ranking logic
-2. Modify MCP server tools in `server.py` if new parameters needed
-3. Add integration tests in `tests/integration/test_full_flow.py`
-
-### Testing Changes
-
-Always run the full test suite before commits:
+## Testing
 
 ```bash
-python tests/run_tests.py --coverage
+# All unit tests (34+)
+.venv/Scripts/python.exe -m pytest tests/unit/ -v
+
+# Specific test files
+.venv/Scripts/python.exe -m pytest tests/unit/test_openai_embedder.py -v
+.venv/Scripts/python.exe -m pytest tests/unit/test_voyage_context_embedder.py -v
+.venv/Scripts/python.exe -m pytest tests/unit/test_hybrid_search.py -v
 ```
 
-For quick iteration during development:
+## Environment Variables
 
-```bash
-python tests/run_tests.py --unit --verbose -x
-```
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `EMBEDDING_PROVIDER` | `voyage` | Provider: `voyage`, `voyage-context`, `openai`, `local` |
+| `VOYAGE_API_KEY` | - | Voyage AI API key |
+| `CONTENT_MODE` | `code` | `code` or `docs` - affects search weights and provider auto-select |
+| `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
+| `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
+| `RERANKER` | `off` | Cross-encoder reranker (experimental) |
+| `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |
 
-### Multi-Language Support
+## Protected Repo
 
-The system now supports chunking and indexing multiple languages:
-
-- Python (AST-based chunking)
-- JavaScript/TypeScript (tree-sitter)
-- JSX/TSX (React components)
-- Go, Java, Rust (tree-sitter)
-- Svelte components
-- Markdown (section-based chunking by headers)
+PR required to merge to main. Use `--repo redacted-org/code-search` with `gh` CLI (bare `gh` resolves to upstream).
