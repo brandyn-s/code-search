@@ -9,7 +9,16 @@ def test_voyage_context_encode_flat():
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = {
-        "data": [{"embeddings": [[0.1] * 1024]}],
+        "object": "list",
+        "data": [
+            {
+                "object": "list",
+                "data": [
+                    {"object": "embedding", "embedding": [0.1] * 1024, "index": 0}
+                ],
+                "index": 0,
+            }
+        ],
         "usage": {"prompt_tokens": 5, "total_tokens": 5},
     }
 
@@ -28,9 +37,23 @@ def test_voyage_context_encode_grouped():
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = {
+        "object": "list",
         "data": [
-            {"embeddings": [[0.1] * 1024, [0.2] * 1024]},  # 2 chunks from file1
-            {"embeddings": [[0.3] * 1024]},  # 1 chunk from file2
+            {
+                "object": "list",
+                "data": [
+                    {"object": "embedding", "embedding": [0.1] * 1024, "index": 0},
+                    {"object": "embedding", "embedding": [0.2] * 1024, "index": 1},
+                ],
+                "index": 0,
+            },
+            {
+                "object": "list",
+                "data": [
+                    {"object": "embedding", "embedding": [0.3] * 1024, "index": 0},
+                ],
+                "index": 1,
+            },
         ],
         "usage": {"prompt_tokens": 20, "total_tokens": 20},
     }

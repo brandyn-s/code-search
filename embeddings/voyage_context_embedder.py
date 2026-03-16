@@ -104,9 +104,11 @@ class VoyageContextEmbedder(EmbeddingModel):
                     response.raise_for_status()
                     data = response.json()
 
-                    # Flatten: each item in data has "embeddings" (list of chunk embeddings)
+                    # Response is nested: data[i].data[j].embedding
+                    # Each doc in data has its own data array of chunk embeddings
                     for doc_result in data["data"]:
-                        all_embeddings.extend(doc_result["embeddings"])
+                        for chunk_emb in doc_result["data"]:
+                            all_embeddings.append(chunk_emb["embedding"])
                     break
                 except Exception as e:
                     status = getattr(getattr(e, "response", None), "status_code", 0)

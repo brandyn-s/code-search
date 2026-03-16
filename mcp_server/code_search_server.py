@@ -89,14 +89,50 @@ class CodeSearchServer:
             logger.warning(f"Failed to check/auto-index project {project_path}: {e}")
             return False
 
-    @lru_cache(maxsize=1)
-    def embedder(self) -> CodeEmbedder:
-        """Lazy initialization of embedder."""
+    def embedder(self, project_path: str = None) -> CodeEmbedder:
+        """Get embedder for a project, using its stored model config if available."""
         cache_dir = get_storage_dir() / "models"
         cache_dir.mkdir(exist_ok=True)
-        embedder = CodeEmbedder(cache_dir=str(cache_dir))
-        logger.info("Embedder initialized")
-        return embedder
+
+        # Read project's stored embedding config if project_path given
+        provider = ""
+        model_name = ""
+        if project_path:
+            project_dir = self.get_project_storage_dir(project_path)
+            info_file = project_dir / "project_info.json"
+            if info_file.exists():
+                try:
+                    with open(info_file, "r") as f:
+                        info = json.load(f)
+                    provider = info.get("embedding_provider", "")
+                    model_name = info.get("embedding_model", "")
+                except Exception:
+                    pass
+
+        # Override env vars temporarily if project has stored config
+        env_overrides = {}
+        if provider:
+            env_overrides["EMBEDDING_PROVIDER"] = provider
+        if model_name:
+            env_overrides["EMBEDDING_MODEL"] = model_name
+
+        old_env = {}
+        for k, v in env_overrides.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+
+        try:
+            embedder = CodeEmbedder(cache_dir=str(cache_dir))
+            logger.info(
+                f"Embedder initialized: provider={provider or 'default'}, model={model_name or 'default'}"
+            )
+            return embedder
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     @lru_cache(maxsize=1)
     def _maybe_start_model_preload(self) -> None:
@@ -155,7 +191,8 @@ class CodeSearchServer:
 
         if self._current_project != project_path or self._searcher is None:
             self._searcher = IntelligentSearcher(
-                self.get_index_manager(project_path), self.embedder()
+                self.get_index_manager(project_path),
+                self.embedder(self._current_project),
             )
             logger.info(
                 f"Searcher initialized for: {Path(self._current_project).name if self._current_project else 'unknown'}"
@@ -205,7 +242,7 @@ class CodeSearchServer:
                 )
 
                 index_manager = self.get_index_manager(self._current_project)
-                embedder = self.embedder()
+                embedder = self.embedder(self._current_project)
                 chunker = MultiLanguageChunker(self._current_project)
 
                 incremental_indexer = IncrementalIndexer(
@@ -347,7 +384,7 @@ class CodeSearchServer:
                 self._maybe_start_model_preload()
 
                 index_manager = self.get_index_manager(str(directory_path_obj))
-                embedder = self.embedder()
+                embedder = self.embedder(str(directory_path_obj))
                 chunker = MultiLanguageChunker(str(directory_path_obj))
 
                 incremental_indexer = IncrementalIndexer(
