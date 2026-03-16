@@ -4,10 +4,11 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from chunking.base_chunker import TreeSitterChunk, AVAILABLE_LANGUAGES
+from chunking.base_chunker import TreeSitterChunk
 from chunking.languages import LANGUAGE_MAP
 
 logger = logging.getLogger(__name__)
+
 
 class TreeSitterChunker:
     """Main tree-sitter chunker that delegates to language-specific implementations."""
@@ -32,19 +33,22 @@ class TreeSitterChunker:
 
         language_name, chunker_class = LANGUAGE_MAP[suffix]
 
-        # Check if language is available
-        if language_name not in AVAILABLE_LANGUAGES:
-            logger.debug(f"Language {language_name} not available. Install tree-sitter-{language_name}")
-            return None
-
         # Lazy initialization of chunkers
         if suffix not in self.chunkers:
-            assert callable(chunker_class), f"Chunker should be callable, got {type(chunker_class)}"
-            self.chunkers[suffix] = chunker_class()
+            assert callable(chunker_class), (
+                f"Chunker should be callable, got {type(chunker_class)}"
+            )
+            try:
+                self.chunkers[suffix] = chunker_class()
+            except (ValueError, ImportError) as e:
+                logger.debug(f"Chunker for {language_name} not available: {e}")
+                return None
 
         return self.chunkers[suffix]
 
-    def chunk_file(self, file_path: str, content: Optional[str] = None) -> List[TreeSitterChunk]:
+    def chunk_file(
+        self, file_path: str, content: Optional[str] = None
+    ) -> List[TreeSitterChunk]:
         """Chunk a file into semantic units.
 
         Args:
@@ -62,7 +66,7 @@ class TreeSitterChunker:
 
         if content is None:
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
             except Exception as e:
                 logger.error(f"Failed to read file {file_path}: {e}")
@@ -84,8 +88,4 @@ class TreeSitterChunker:
             True if file type is supported
         """
         suffix = Path(file_path).suffix.lower()
-        if suffix not in LANGUAGE_MAP:
-            return False
-
-        language_name, _ = LANGUAGE_MAP[suffix]
-        return language_name in AVAILABLE_LANGUAGES
+        return suffix in LANGUAGE_MAP

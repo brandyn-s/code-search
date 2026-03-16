@@ -1,4 +1,5 @@
 """Tests for Nix chunker granularity."""
+
 from chunking.languages.nix_chunker import NixChunker
 
 
@@ -40,11 +41,64 @@ in
 }
 """
     chunks = chunker.chunk_code(source)
-    names = [c.metadata.get('name', '') for c in chunks]
+    names = [c.metadata.get("name", "") for c in chunks]
 
-    assert len(chunks) > 2, f"Expected multiple chunks, got {len(chunks)}: {names}"
-    assert any('options' in n for n in names), f"No options binding found in {names}"
-    assert any('config' in n for n in names), f"No config binding found in {names}"
+    # Dedup skips parent bindings when children cover >50% of their lines,
+    # so we get leaf-level chunks rather than top-level parents
+    assert len(chunks) >= 2, f"Expected multiple chunks, got {len(chunks)}: {names}"
+    assert any("ip" in n for n in names), f"No ip binding found in {names}"
+    assert any("port" in n for n in names), f"No port binding found in {names}"
+    assert any("systemd" in n for n in names), f"No systemd binding found in {names}"
+
+
+def test_nix_chunker_skips_parent_when_children_cover_content():
+    """Parent binding should not emit when children cover >50% of its lines."""
+    chunker = NixChunker()
+    source = """
+{ config, lib, ... }:
+{
+  config = {
+    networking = {
+      firewall.enable = true;
+      firewall.allowedTCPPorts = [ 80 443 ];
+      interfaces.eth0 = {
+        useDHCP = true;
+      };
+    };
+    systemd.services.myapp = {
+      description = "My App";
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        ExecStart = "/bin/myapp";
+        Restart = "always";
+        Type = "simple";
+      };
+    };
+  };
+}
+"""
+    chunks = chunker.chunk_code(source)
+    names = [c.metadata.get("name", "") for c in chunks]
+
+    # Leaf children should be present (networking has no big children so it emits;
+    # systemd.services.myapp gets deduped because serviceConfig covers >50%)
+    assert any("networking" in n for n in names), f"No networking chunk in {names}"
+    assert any("serviceConfig" in n for n in names), (
+        f"No serviceConfig chunk in {names}"
+    )
+
+    # Parent 'config' should NOT be a separate chunk (children cover it)
+    config_chunks = [c for c in chunks if c.metadata.get("name") == "config"]
+    assert len(config_chunks) == 0, (
+        f"Parent 'config' should be skipped, got {len(config_chunks)} chunks"
+    )
+    # Intermediate 'systemd.services.myapp' should also be skipped
+    systemd_chunks = [
+        c for c in chunks if c.metadata.get("name") == "systemd.services.myapp"
+    ]
+    assert len(systemd_chunks) == 0, (
+        f"Intermediate 'systemd.services.myapp' should be skipped, got {len(systemd_chunks)} chunks"
+    )
 
 
 def test_nix_chunker_small_bindings_stay_grouped():
