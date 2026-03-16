@@ -150,3 +150,30 @@ def test_expand_query_corsair_services():
 
     expanded4 = expand_code_query("communication radio mesh")
     assert "internal-svc-44" in expanded4.lower() or "internal-svc-41" in expanded4.lower()
+
+
+def test_expand_query_case_insensitive():
+    """Query expansion should work regardless of case."""
+    from search.searcher import expand_code_query
+
+    expanded_lower = expand_code_query("authentication")
+    expanded_upper = expand_code_query("Authentication")
+    assert "oauth" in expanded_lower.lower()
+    assert "oauth" in expanded_upper.lower()
+
+
+def test_expand_query_stemming():
+    """Query expansion should match stemmed forms."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("errors handling")
+    assert "exception" in expanded.lower() or "raise" in expanded.lower()
+
+
+def test_expand_query_no_double_expansion():
+    """Expanded synonyms should not trigger further expansion chains."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("auth")
+    tokens = expanded.lower().split()
+    assert tokens.count("auth") <= 1

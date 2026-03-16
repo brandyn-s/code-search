@@ -39,10 +39,17 @@ def test_openai_embedder_get_dimension():
 
 def test_openai_embedder_missing_api_key():
     """OpenAI embedder should raise if no API key provided."""
-    from embeddings.openai_embedder import OpenAIEmbeddingModel
+    import os
 
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        OpenAIEmbeddingModel(api_key="")
+    old_key = os.environ.pop("OPENAI_API_KEY", None)
+    try:
+        from embeddings.openai_embedder import OpenAIEmbeddingModel
+
+        with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+            OpenAIEmbeddingModel(api_key="")
+    finally:
+        if old_key is not None:
+            os.environ["OPENAI_API_KEY"] = old_key
 
 
 def test_openai_embedder_retries_on_500():
@@ -133,3 +140,33 @@ def test_voyage_context_provider_creates_embedder():
         embedder = CodeEmbedder()
         assert embedder._model._model_name == "voyage-context-3"
         assert hasattr(embedder._model, "encode_grouped")
+
+
+def test_voyage_embedder_missing_api_key():
+    """Voyage embedder should raise if VOYAGE_API_KEY not provided."""
+    import os
+
+    old_key = os.environ.pop("VOYAGE_API_KEY", None)
+    old_oai = os.environ.pop("OPENAI_API_KEY", None)
+    try:
+        from embeddings.openai_embedder import OpenAIEmbeddingModel
+
+        with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+            OpenAIEmbeddingModel(api_key="", base_url="https://api.voyageai.com/v1")
+    finally:
+        if old_key is not None:
+            os.environ["VOYAGE_API_KEY"] = old_key
+        if old_oai is not None:
+            os.environ["OPENAI_API_KEY"] = old_oai
+
+
+def test_voyage_model_has_smaller_batch_size():
+    """Voyage models should default to smaller batch size for rate limit compliance."""
+    from embeddings.openai_embedder import OpenAIEmbeddingModel
+
+    model = OpenAIEmbeddingModel(
+        api_key="test-key",
+        model_name="voyage-code-3",
+        base_url="https://api.voyageai.com/v1",
+    )
+    assert model._batch_size <= 128

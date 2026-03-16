@@ -63,3 +63,40 @@ def test_reranker_env_var_controls_activation():
 
     # Default is off
     assert os.environ.get("RERANKER", "off") == "off"
+
+
+def test_reranker_preserves_all_fields():
+    """Reranker should preserve chunk_id and other fields through reranking."""
+    from search.reranker import rerank_results
+
+    results = [
+        {
+            "chunk_id": "a.py:1:func:foo",
+            "content": "def foo(): return 42",
+            "score": 0.5,
+            "extra_field": "should_survive",
+        },
+    ]
+
+    reranked = rerank_results("foo function", results, top_k=1)
+    assert len(reranked) == 1
+    assert reranked[0]["chunk_id"] == "a.py:1:func:foo"
+    assert reranked[0]["extra_field"] == "should_survive"
+    assert "rerank_score" in reranked[0]
+
+
+def test_reranker_single_result():
+    """Reranker should handle a single result without error."""
+    from search.reranker import rerank_results
+
+    results = [
+        {
+            "chunk_id": "a.py:1:func:foo",
+            "content": "def foo(): return 42",
+            "score": 0.9,
+        },
+    ]
+
+    reranked = rerank_results("foo", results, top_k=5)
+    assert len(reranked) == 1
+    assert "rerank_score" in reranked[0]
