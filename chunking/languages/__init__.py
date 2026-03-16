@@ -45,8 +45,8 @@ LANGUAGE_MAP = {
     ".c++": ("cpp", _get_cpp_chunker),
     ".cs": ("csharp", CSharpChunker),
     ".nix": ("nix", NixChunker),
-    ".toml": ("toml", TomlChunker),
-    ".yml": ("yaml", YamlChunker),
-    ".yaml": ("yaml", YamlChunker),
-    ".tf": ("hcl", HclChunker),
+    ".toml": ("toml", lambda: TomlChunker(overlap_chars=100)),
+    ".yml": ("yaml", lambda: YamlChunker(overlap_chars=100)),
+    ".yaml": ("yaml", lambda: YamlChunker(overlap_chars=100)),
+    ".tf": ("hcl", lambda: HclChunker(overlap_chars=100)),
 }

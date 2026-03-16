@@ -46,6 +46,18 @@ class CodeEmbedder:
                 "EMBEDDING_MODEL", "text-embedding-3-small"
             )
             self._model = OpenAIEmbeddingModel(model_name=model_name)
+        elif provider == "voyage":
+            from embeddings.openai_embedder import OpenAIEmbeddingModel
+
+            model_name = model_name or os.environ.get(
+                "EMBEDDING_MODEL", "voyage-code-3"
+            )
+            api_key = os.environ.get("VOYAGE_API_KEY", "")
+            self._model = OpenAIEmbeddingModel(
+                api_key=api_key,
+                model_name=model_name,
+                base_url="https://api.voyageai.com/v1",
+            )
         elif provider == "local":
             from embeddings.sentence_transformer import SentenceTransformerModel
 

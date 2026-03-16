@@ -47,3 +47,23 @@ anyhow = "1"
 
     assert len(chunks) >= 2
     assert any("workspace" in n for n in names)
+
+
+def test_toml_chunker_overlap():
+    """Adjacent TOML chunks should overlap by the specified character count."""
+    chunker = TomlChunker(overlap_chars=50)
+    source = """[package]
+name = "internal-svc-12"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+"""
+    chunks = chunker.chunk_code(source)
+    assert len(chunks) >= 2
+
+    # The dependencies chunk should start with overlap from package section
+    dep_chunk = [c for c in chunks if c.metadata.get("name") == "dependencies"][0]
+    assert "edition" in dep_chunk.content  # Last line of previous section carried over

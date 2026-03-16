@@ -15,6 +15,9 @@ MODEL_DIMENSIONS = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
+    "voyage-code-3": 1024,
+    "voyage-3-large": 1024,
+    "voyage-3-lite": 512,
 }
 
 
@@ -42,17 +45,20 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         self._batch_size = batch_size
         self._client = httpx.Client(timeout=300.0)
         self._dimension = MODEL_DIMENSIONS.get(model_name, 1536)
-        logger.info(f"OpenAI embedder initialized: model={model_name}, dim={self._dimension}")
+        logger.info(
+            f"OpenAI embedder initialized: model={model_name}, dim={self._dimension}"
+        )
 
     def encode(self, texts: List[str], **kwargs) -> np.ndarray:
-        """Encode texts via OpenAI embeddings API with single retry on server errors."""
+        """Encode texts via embeddings API with retry on server/rate-limit errors."""
         import time
+
         all_embeddings = []
 
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
 
-            for attempt in range(2):
+            for attempt in range(4):
                 try:
                     response = self._client.post(
                         f"{self._base_url}/embeddings",
@@ -68,9 +74,14 @@ class OpenAIEmbeddingModel(EmbeddingModel):
                     all_embeddings.extend(batch_embeddings)
                     break
                 except Exception as e:
-                    if attempt == 0 and hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code >= 500:
-                        logger.warning(f"OpenAI server error ({e.response.status_code}), retrying in 5s...")
-                        time.sleep(5)
+                    status = getattr(getattr(e, "response", None), "status_code", 0)
+                    if attempt < 3 and status in (429, 500, 502, 503, 529):
+                        wait = 2**attempt  # 1s, 2s, 4s
+                        logger.warning(
+                            f"Embedding batch {i}-{i + len(batch)} error {status}, "
+                            f"retrying in {wait}s (attempt {attempt + 1}/3)..."
+                        )
+                        time.sleep(wait)
                         continue
                     raise
 

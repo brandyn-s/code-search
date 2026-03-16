@@ -15,6 +15,9 @@ class YamlChunker:
 
     language_name = "yaml"
 
+    def __init__(self, overlap_chars: int = 0):
+        self.overlap_chars = overlap_chars
+
     def chunk_code(self, source_code: str) -> List[TreeSitterChunk]:
         lines = source_code.split("\n")
         chunks = []
@@ -23,6 +26,7 @@ class YamlChunker:
         current_name = None
         current_start = 1
         current_lines = []
+        prev_overlap = ""
 
         for i, line in enumerate(lines, 1):
             # Skip YAML front matter delimiter
@@ -37,15 +41,23 @@ class YamlChunker:
                 if current_lines and current_name is not None:
                     content = "\n".join(current_lines)
                     if content.strip() and len(current_lines) >= 2:
+                        full_content = (
+                            prev_overlap + content if prev_overlap else content
+                        )
                         chunks.append(
                             TreeSitterChunk(
-                                content=content,
+                                content=full_content,
                                 start_line=current_start,
                                 end_line=i - 1,
                                 node_type="section",
                                 language=self.language_name,
                                 metadata={"name": current_name, "node_type": "section"},
                             )
+                        )
+                        prev_overlap = (
+                            content[-self.overlap_chars :] + "\n"
+                            if self.overlap_chars > 0
+                            else ""
                         )
                 current_name = match.group(1)
                 current_start = i
@@ -57,9 +69,10 @@ class YamlChunker:
         if current_lines and current_name is not None:
             content = "\n".join(current_lines)
             if content.strip() and len(current_lines) >= 2:
+                full_content = prev_overlap + content if prev_overlap else content
                 chunks.append(
                     TreeSitterChunk(
-                        content=content,
+                        content=full_content,
                         start_line=current_start,
                         end_line=len(lines),
                         node_type="section",

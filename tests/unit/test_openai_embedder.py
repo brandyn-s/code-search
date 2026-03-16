@@ -1,4 +1,5 @@
 """Tests for OpenAI embedding provider."""
+
 import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
@@ -18,6 +19,7 @@ def test_openai_embedder_encode_returns_correct_shape():
 
     with patch("httpx.Client.post", return_value=mock_response):
         from embeddings.openai_embedder import OpenAIEmbeddingModel
+
         model = OpenAIEmbeddingModel(api_key="test-key")
         result = model.encode(["hello world", "test query"])
 
@@ -28,13 +30,17 @@ def test_openai_embedder_encode_returns_correct_shape():
 def test_openai_embedder_get_dimension():
     """OpenAI embedder should report correct dimension for text-embedding-3-small."""
     from embeddings.openai_embedder import OpenAIEmbeddingModel
-    model = OpenAIEmbeddingModel(api_key="test-key", model_name="text-embedding-3-small")
+
+    model = OpenAIEmbeddingModel(
+        api_key="test-key", model_name="text-embedding-3-small"
+    )
     assert model.get_embedding_dimension() == 1536
 
 
 def test_openai_embedder_missing_api_key():
     """OpenAI embedder should raise if no API key provided."""
     from embeddings.openai_embedder import OpenAIEmbeddingModel
+
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         OpenAIEmbeddingModel(api_key="")
 
@@ -66,11 +72,14 @@ def test_openai_embedder_retries_on_500():
 
     with patch("httpx.Client.post", side_effect=mock_post):
         from embeddings.openai_embedder import OpenAIEmbeddingModel
+
         model = OpenAIEmbeddingModel(api_key="test-key")
         # Monkey-patch to skip the actual 5s sleep in tests
         import embeddings.openai_embedder as mod
+
         original_encode = model.encode
         import time
+
         _real_sleep = time.sleep
         time.sleep = lambda x: None
         try:
@@ -80,3 +89,29 @@ def test_openai_embedder_retries_on_500():
 
     assert call_count == 2
     assert result.shape == (1, 1536)
+
+
+def test_voyage_model_dimensions():
+    """Voyage AI models should have correct known dimensions."""
+    from embeddings.openai_embedder import MODEL_DIMENSIONS
+
+    assert "voyage-code-3" in MODEL_DIMENSIONS
+    assert MODEL_DIMENSIONS["voyage-code-3"] == 1024
+
+
+def test_voyage_provider_creates_embedder():
+    """EMBEDDING_PROVIDER=voyage should create OpenAI embedder with Voyage base URL."""
+    import os
+
+    with patch.dict(
+        os.environ,
+        {
+            "EMBEDDING_PROVIDER": "voyage",
+            "VOYAGE_API_KEY": "test-key",
+        },
+    ):
+        from embeddings.embedder import CodeEmbedder
+
+        embedder = CodeEmbedder()
+        assert embedder._model._base_url == "https://api.voyageai.com/v1"
+        assert embedder._model._model_name == "voyage-code-3"

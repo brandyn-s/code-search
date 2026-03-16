@@ -22,9 +22,13 @@ class HclChunker:
         re.MULTILINE,
     )
 
+    def __init__(self, overlap_chars: int = 0):
+        self.overlap_chars = overlap_chars
+
     def chunk_code(self, source_code: str) -> List[TreeSitterChunk]:
         lines = source_code.split("\n")
         chunks = []
+        prev_overlap = ""
 
         i = 0
         while i < len(lines):
@@ -50,15 +54,21 @@ class HclChunker:
                     j += 1
 
                 content = "\n".join(block_lines)
+                full_content = prev_overlap + content if prev_overlap else content
                 chunks.append(
                     TreeSitterChunk(
-                        content=content,
+                        content=full_content,
                         start_line=start_line,
                         end_line=j,
                         node_type=block_type,
                         language=self.language_name,
                         metadata={"name": block_name, "node_type": block_type},
                     )
+                )
+                prev_overlap = (
+                    content[-self.overlap_chars :] + "\n"
+                    if self.overlap_chars > 0
+                    else ""
                 )
                 i = j
             else:
