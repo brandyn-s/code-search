@@ -45,23 +45,34 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         logger.info(f"OpenAI embedder initialized: model={model_name}, dim={self._dimension}")
 
     def encode(self, texts: List[str], **kwargs) -> np.ndarray:
-        """Encode texts via OpenAI embeddings API. Ignores kwargs like prompt_name."""
+        """Encode texts via OpenAI embeddings API with single retry on server errors."""
+        import time
         all_embeddings = []
 
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
-            response = self._client.post(
-                f"{self._base_url}/embeddings",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"input": batch, "model": self._model_name},
-            )
-            response.raise_for_status()
-            data = response.json()
-            batch_embeddings = [item["embedding"] for item in data["data"]]
-            all_embeddings.extend(batch_embeddings)
+
+            for attempt in range(2):
+                try:
+                    response = self._client.post(
+                        f"{self._base_url}/embeddings",
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={"input": batch, "model": self._model_name},
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    batch_embeddings = [item["embedding"] for item in data["data"]]
+                    all_embeddings.extend(batch_embeddings)
+                    break
+                except Exception as e:
+                    if attempt == 0 and hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code >= 500:
+                        logger.warning(f"OpenAI server error ({e.response.status_code}), retrying in 5s...")
+                        time.sleep(5)
+                        continue
+                    raise
 
         return np.array(all_embeddings, dtype=np.float32)
 

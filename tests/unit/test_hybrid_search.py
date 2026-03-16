@@ -114,3 +114,15 @@ def test_expand_query_passthrough_unknown():
 
     result = expand_code_query("foobar baz")
     assert result == "foobar baz"
+
+
+def test_expand_query_nix_domain():
+    """Nix-domain synonyms should expand network/service queries."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("network configuration")
+    assert "networking" in expanded.lower()
+    assert "firewall" in expanded.lower() or "interface" in expanded.lower()
+
+    expanded2 = expand_code_query("service daemon")
+    assert "systemd" in expanded2.lower()

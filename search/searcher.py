@@ -66,6 +66,10 @@ CODE_SYNONYMS = {
     "rate": ["rate_limit", "throttle", "RPM", "TPM"],
     "middleware": ["ASGI", "middleware", "intercept"],
     "route": ["Route", "endpoint", "path", "handler", "Starlette"],
+    "network": ["networking", "internal-svc-19", "interface", "vlan", "firewall", "nftables"],
+    "service": ["systemd", "daemon", "enable", "wantedBy", "serviceConfig"],
+    "package": ["pkgs", "nix", "derivation", "buildInputs"],
+    "option": ["mkOption", "mkEnableOption", "types", "default", "description"],
 }
 
 
