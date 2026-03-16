@@ -29,7 +29,8 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         api_key: str = "",
         model_name: str = "text-embedding-3-small",
         base_url: str = "https://api.openai.com/v1",
-        batch_size: int = 256,
+        batch_size: int = 0,
+        batch_delay: float = 0.0,
         **kwargs,
     ):
         # Skip device resolution - not needed for API model
@@ -42,11 +43,17 @@ class OpenAIEmbeddingModel(EmbeddingModel):
             )
         self._model_name = model_name
         self._base_url = base_url.rstrip("/")
-        self._batch_size = batch_size
         self._client = httpx.Client(timeout=300.0)
         self._dimension = MODEL_DIMENSIONS.get(model_name, 1536)
+
+        # Voyage has stricter rate limits (6M TPM) - use smaller batches with delay
+        is_voyage = model_name.startswith("voyage-")
+        self._batch_size = batch_size or (16 if is_voyage else 256)
+        self._batch_delay = batch_delay or (1.0 if is_voyage else 0.0)
+
         logger.info(
-            f"OpenAI embedder initialized: model={model_name}, dim={self._dimension}"
+            f"OpenAI embedder initialized: model={model_name}, dim={self._dimension}, "
+            f"batch_size={self._batch_size}, batch_delay={self._batch_delay}s"
         )
 
     def encode(self, texts: List[str], **kwargs) -> np.ndarray:
@@ -57,6 +64,10 @@ class OpenAIEmbeddingModel(EmbeddingModel):
 
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
+
+            # Inter-batch delay to stay within TPM rate limits
+            if i > 0 and self._batch_delay > 0:
+                time.sleep(self._batch_delay)
 
             for attempt in range(4):
                 try:
@@ -76,7 +87,8 @@ class OpenAIEmbeddingModel(EmbeddingModel):
                 except Exception as e:
                     status = getattr(getattr(e, "response", None), "status_code", 0)
                     if attempt < 3 and status in (429, 500, 502, 503, 529):
-                        wait = 2**attempt  # 1s, 2s, 4s
+                        # 429: back off longer to let TPM window reset
+                        wait = (15 * (attempt + 1)) if status == 429 else 2**attempt
                         logger.warning(
                             f"Embedding batch {i}-{i + len(batch)} error {status}, "
                             f"retrying in {wait}s (attempt {attempt + 1}/3)..."
