@@ -1,4 +1,5 @@
 """Tests for RRF fusion and hybrid search."""
+
 import pytest
 
 
@@ -52,8 +53,11 @@ def test_weighted_rrf_bm25_heavy():
     bm25_results = [("doc_b", -1.0)]
 
     fused = reciprocal_rank_fusion(
-        vector_results, bm25_results, k=60,
-        vector_weight=0.3, bm25_weight=0.7,
+        vector_results,
+        bm25_results,
+        k=60,
+        vector_weight=0.3,
+        bm25_weight=0.7,
     )
     fused_ids = [chunk_id for chunk_id, score in fused]
 
@@ -70,8 +74,11 @@ def test_weighted_rrf_vector_heavy():
     bm25_results = [("doc_b", -1.0)]
 
     fused = reciprocal_rank_fusion(
-        vector_results, bm25_results, k=60,
-        vector_weight=0.7, bm25_weight=0.3,
+        vector_results,
+        bm25_results,
+        k=60,
+        vector_weight=0.7,
+        bm25_weight=0.3,
     )
     fused_ids = [chunk_id for chunk_id, score in fused]
 
@@ -126,3 +133,20 @@ def test_expand_query_nix_domain():
 
     expanded2 = expand_code_query("service daemon")
     assert "systemd" in expanded2.lower()
+
+
+def test_expand_query_corsair_services():
+    """Corsair service synonyms should expand domain queries to daemon names."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("sensor navigation GPS")
+    assert "internal-svc-62" in expanded.lower() or "internal-svc-51" in expanded.lower()
+
+    expanded2 = expand_code_query("motor propulsion engine")
+    assert "internal-svc-12" in expanded2.lower()
+
+    expanded3 = expand_code_query("camera video perception")
+    assert "internal-svc-26" in expanded3.lower() or "internal-svc-27" in expanded3.lower()
+
+    expanded4 = expand_code_query("communication radio mesh")
+    assert "internal-svc-44" in expanded4.lower() or "internal-svc-41" in expanded4.lower()

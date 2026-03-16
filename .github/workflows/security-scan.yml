@@ -1,8 +1,8 @@
-name: CI
+name: Security Scan
 
 on:
   pull_request:
-    branches: [main, master]
+    branches: [main]
   push:
     branches: [main]
 
@@ -23,8 +23,3 @@ jobs:
       run_trivy: true
       run_gitleaks: true
       run_semgrep: true
-
-  baseline-ci:
-    uses: redacted-org/.github/.github/workflows/baseline-ci.yml@main
-    permissions:
-      contents: read
