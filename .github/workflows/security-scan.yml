@@ -3,11 +3,29 @@ name: Security Scan
 on:
   pull_request:
     branches: [main, master]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
 
 jobs:
   security-scan:
     uses: redacted-org/.github/.github/workflows/security-scan.yml@main
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     with:
       run_checkov: false
       run_trivy: true
       run_gitleaks: true
+      run_container_scan: true
+      run_hadolint: true
+
+  baseline-ci:
+    uses: redacted-org/.github/.github/workflows/baseline-ci.yml@main
+    permissions:
+      contents: read
