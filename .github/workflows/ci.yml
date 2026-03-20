@@ -1,0 +1,11 @@
+# Auto-managed by redacted-org/.github — do not edit manually.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  baseline:
+    uses: redacted-org/.github/.github/workflows/baseline-ci.yml@main
