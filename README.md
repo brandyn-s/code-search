@@ -87,7 +87,7 @@ code-search/
 │   ├── indexer.py               # FAISS index + SQLite metadata
 │   ├── searcher.py              # Hybrid BM25+vector search with RRF fusion
 │   ├── incremental_indexer.py   # Merkle tree change detection
-│   └── reranker.py              # Cross-encoder reranker (optional, off by default)
+│   └── reranker.py              # Cross-encoder reranker (enabled by default)
 ├── mcp_server/
 │   └── code_search_server.py    # MCP server with per-project model switching
 └── tests/

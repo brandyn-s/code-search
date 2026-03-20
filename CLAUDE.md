@@ -44,7 +44,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 | `CONTENT_MODE` | `code` | `code` or `docs` - affects search weights and provider auto-select |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
-| `RERANKER` | `off` | Cross-encoder reranker (experimental) |
+| `RERANKER` | `on` | Cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`). Enabled in production 2026-03-20 after community benchmarks showed +5-10pp MRR improvement. |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |
 
 ## Protected Repo
