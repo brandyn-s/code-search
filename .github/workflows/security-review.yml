@@ -1,0 +1,40 @@
+# Auto-managed by redacted-org/.github — do not edit manually.
+name: PR Security Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  fast-ai-scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: redacted-org/pr-security-review/fast-gate@v0.7.0
+
+  analyze:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: redacted-org/pr-security-review@v0.7.0
+        with:
+          claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
+          approve-comment: "true"
+          severity-threshold: "low"
+          exclude-paths: "tests/fixtures/*,docs/*"
+          block-mode: "high"
