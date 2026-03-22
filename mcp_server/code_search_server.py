@@ -5,6 +5,8 @@ import sys
 import json
 import asyncio
 import logging
+import sqlite3
+import time
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
@@ -36,6 +38,50 @@ class CodeSearchServer:
             None  # {job_id, status, phase, current, total, errors, result}
         )
         self._indexing_thread = None
+
+        # Query logging (ported from memory-search)
+        self._query_log_db = self._init_query_log()
+
+    def _init_query_log(self) -> Optional[sqlite3.Connection]:
+        """Initialize query log database."""
+        try:
+            log_path = get_storage_dir() / "query_log.db"
+            db = sqlite3.connect(str(log_path), check_same_thread=False)
+            db.execute("PRAGMA journal_mode = WAL")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS query_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query TEXT NOT NULL,
+                    project TEXT DEFAULT '',
+                    search_mode TEXT DEFAULT 'auto',
+                    result_count INTEGER DEFAULT 0,
+                    top_score REAL DEFAULT 0.0,
+                    latency_ms REAL DEFAULT 0.0,
+                    cache_hit INTEGER DEFAULT 0,
+                    timestamp REAL NOT NULL
+                )
+            """)
+            db.commit()
+            return db
+        except Exception:
+            return None
+
+    def _log_query(self, query: str, project: str, mode: str,
+                   result_count: int, top_score: float, latency_ms: float,
+                   cache_hit: bool):
+        """Log a search query for offline analysis."""
+        if self._query_log_db is None:
+            return
+        try:
+            self._query_log_db.execute(
+                "INSERT INTO query_log (query, project, search_mode, result_count, "
+                "top_score, latency_ms, cache_hit, timestamp) VALUES (?,?,?,?,?,?,?,?)",
+                (query, project or "", mode, result_count, top_score,
+                 latency_ms, 1 if cache_hit else 0, time.time()),
+            )
+            self._query_log_db.commit()
+        except Exception:
+            pass
 
     def get_project_storage_dir(self, project_path: str) -> Path:
         """Get or create project-specific storage directory."""
@@ -218,6 +264,7 @@ class CodeSearchServer:
         max_age_minutes: float = 5,
     ) -> str:
         """Implementation of search_code tool."""
+        t_start = time.time()
         try:
             logger.info(
                 f"🔍 MCP REQUEST: search_code(query='{query}', k={k}, mode='{search_mode}', file_pattern={file_pattern}, chunk_type={chunk_type})"
@@ -264,6 +311,11 @@ class CodeSearchServer:
                         f"Auto-reindexed: {reindex_result.files_added} added, {reindex_result.files_modified} modified, took {reindex_result.time_taken:.2f}s"
                     )
                     self._searcher = None  # Reset to force reload
+                    # Clear embedding cache after reindex
+                    try:
+                        embedder.clear_query_cache()
+                    except AttributeError:
+                        pass
 
             searcher = self.get_searcher()
             logger.info(f"Current project: {self._current_project}")
@@ -321,6 +373,19 @@ class CodeSearchServer:
                 formatted_results.append(item)
 
             response = {"query": query, "results": formatted_results}
+
+            # Log query for offline analysis
+            latency_ms = (time.time() - t_start) * 1000
+            top_score = formatted_results[0]["score"] if formatted_results else 0.0
+            self._log_query(
+                query=query,
+                project=self._current_project or "",
+                mode=search_mode,
+                result_count=len(formatted_results),
+                top_score=top_score,
+                latency_ms=latency_ms,
+                cache_hit=False,  # TODO: detect from embedder cache
+            )
 
             return json.dumps(response, separators=(",", ":"))
         except Exception as e:

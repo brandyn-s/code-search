@@ -2,6 +2,7 @@
 
 import os
 import logging
+from collections import OrderedDict
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 import numpy as np
@@ -375,8 +376,12 @@ class CodeEmbedder:
         self._logger.info("Grouped embedding generation completed")
         return results
 
+    # LRU query embedding cache (ported from memory-search)
+    _query_cache: OrderedDict = OrderedDict()
+    _QUERY_CACHE_MAX: int = 256
+
     def embed_query(self, query: str) -> np.ndarray:
-        """Generate embedding for a search query.
+        """Generate embedding for a search query. Cached via LRU.
 
         Args:
             query: Search query text
@@ -384,10 +389,23 @@ class CodeEmbedder:
         Returns:
             Embedding vector
         """
+        cache_key = query.strip().lower()
+        if cache_key in self._query_cache:
+            self._query_cache.move_to_end(cache_key)
+            return self._query_cache[cache_key]
+
         embedding = self._model.encode(
             [query], prompt_name="InstructionRetrieval", show_progress_bar=False
         )[0]
+
+        self._query_cache[cache_key] = embedding
+        if len(self._query_cache) > self._QUERY_CACHE_MAX:
+            self._query_cache.popitem(last=False)
         return embedding
+
+    def clear_query_cache(self):
+        """Clear the query embedding cache (call after reindex)."""
+        self._query_cache.clear()
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the embedding model.
