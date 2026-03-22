@@ -25,7 +25,7 @@ def test_progress_callback_receives_updates():
 
         # Mock embedder that returns dummy embeddings
         mock_embedder = MagicMock()
-        mock_embedder.embed_chunks.return_value = [
+        mock_embedder.embed_chunks_grouped.return_value = mock_embedder.embed_chunks.return_value = [
             EmbeddingResult(
                 embedding=np.random.randn(384).astype(np.float32),
                 chunk_id=f"test:{i}:func:f{i}",

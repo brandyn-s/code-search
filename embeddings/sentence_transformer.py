@@ -66,6 +66,12 @@ class SentenceTransformerModel(EmbeddingModel):
             self._logger.error(f"Failed to load model: {e}")
             raise
 
+    # Map legacy EmbeddingGemma prompt names to standard sentence-transformers names
+    _PROMPT_ALIASES = {
+        "Retrieval-document": "document",
+        "InstructionRetrieval": "query",
+    }
+
     def encode(self, texts: list[str], **kwargs) -> np.ndarray:
         """Encode texts using SentenceTransformer.
 
@@ -76,6 +82,15 @@ class SentenceTransformerModel(EmbeddingModel):
         Returns:
             Array of embeddings
         """
+        prompt_name = kwargs.get("prompt_name")
+        if prompt_name is not None:
+            model_prompts = getattr(self.model, "prompts", {})
+            if prompt_name not in model_prompts:
+                mapped = self._PROMPT_ALIASES.get(prompt_name)
+                if mapped and mapped in model_prompts:
+                    kwargs["prompt_name"] = mapped
+                else:
+                    kwargs.pop("prompt_name")
         return self.model.encode(texts, **kwargs)
 
     def get_embedding_dimension(self) -> int:
