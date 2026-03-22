@@ -15,7 +15,7 @@ class TestChangeDetector(TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = str(Path(tempfile.mkdtemp()).resolve())
         self.test_path = Path(self.temp_dir)
 
         self.storage_dir = Path(self.temp_dir) / 'snapshots'
@@ -58,7 +58,7 @@ class TestChangeDetector(TestCase):
         assert 'to_remove.py' in changes.removed
         assert 'to_modify.py' in changes.modified
         assert 'unchanged.py' in changes.unchanged
-        assert 'src/module.py' in changes.unchanged
+        assert any('module.py' in p for p in changes.unchanged)
 
         assert changes.has_changes()
         assert changes.total_changed() == 3

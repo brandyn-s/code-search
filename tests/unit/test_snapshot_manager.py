@@ -14,7 +14,7 @@ class TestSnapshotManager(TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = str(Path(tempfile.mkdtemp()).resolve())
         self.test_path = Path(self.temp_dir) / 'project'
         self.test_path.mkdir()
 

@@ -13,7 +13,7 @@ class TestMerkleDAG(TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.temp_dir = tempfile.mkdtemp()
+        self.temp_dir = str(Path(tempfile.mkdtemp()).resolve())
         self.test_path = Path(self.temp_dir)
 
     def tearDown(self):
@@ -47,11 +47,12 @@ class TestMerkleDAG(TestCase):
         all_files = dag.get_all_files()
         assert len(all_files) == 4
 
-        # Check specific files
-        assert 'README.md' in all_files
-        assert 'src/main.py' in all_files
-        assert 'src/utils.py' in all_files
-        assert 'tests/test_main.py' in all_files
+        # Check specific files (normalize separators for Windows)
+        normalized = [f.replace('\\', '/') for f in all_files]
+        assert 'README.md' in normalized
+        assert 'src/main.py' in normalized
+        assert 'src/utils.py' in normalized
+        assert 'tests/test_main.py' in normalized
 
     def test_file_hashing(self):
         """Test file hash calculation."""
