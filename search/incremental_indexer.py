@@ -367,8 +367,10 @@ class IncrementalIndexer:
         if not metadata:
             return None
 
-        # Add current index stats
-        metadata["current_chunks"] = self.indexer.get_index_size()
+        # Add current index stats - prefer in-memory count, fall back to
+        # snapshot metadata when index hasn't been loaded (e.g. no-changes path)
+        in_memory_size = self.indexer.get_index_size()
+        metadata["current_chunks"] = in_memory_size if in_memory_size > 0 else metadata.get("chunks_indexed", 0)
         metadata["snapshot_age"] = self.snapshot_manager.get_snapshot_age(project_path)
 
         return metadata

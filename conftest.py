@@ -13,7 +13,10 @@ import tempfile
 import shutil
 from pathlib import Path
 from typing import Generator, Dict
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 # Add the package to Python path for testing
 project_root = Path(__file__).parent
@@ -68,13 +71,16 @@ class EmbeddingModelMock:
         self.cache_dir = cache_dir
         self.device = device
         self.model_name = "google/embeddinggemma-300m"
-        self.rng = np.random.RandomState(42)  # Deterministic seed for reproducible tests
+        if np is not None:
+            self.rng = np.random.RandomState(42)  # Deterministic seed for reproducible tests
 
     def encode(self, texts, **kwargs):
         """Return mock embeddings."""
         # Return 768-dimensional embeddings (matching EmbeddingGemma)
         # Use deterministic seed for reproducible tests
-        return self.rng.randn(len(texts), 768).astype(np.float32)
+        if np is not None:
+            return self.rng.randn(len(texts), 768).astype(np.float32)
+        return [[0.0] * 768 for _ in texts]
 
     def get_embedding_dimension(self):
         """Return embedding dimension."""
