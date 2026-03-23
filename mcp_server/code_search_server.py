@@ -310,12 +310,10 @@ class CodeSearchServer:
                     logger.info(
                         f"Auto-reindexed: {reindex_result.files_added} added, {reindex_result.files_modified} modified, took {reindex_result.time_taken:.2f}s"
                     )
+                    # Clear query embedding cache before resetting searcher
+                    if self._searcher:
+                        self._searcher.clear_cache()
                     self._searcher = None  # Reset to force reload
-                    # Clear embedding cache after reindex
-                    try:
-                        embedder.clear_query_cache()
-                    except AttributeError:
-                        pass
 
             searcher = self.get_searcher()
             logger.info(f"Current project: {self._current_project}")
@@ -384,7 +382,7 @@ class CodeSearchServer:
                 result_count=len(formatted_results),
                 top_score=top_score,
                 latency_ms=latency_ms,
-                cache_hit=False,  # TODO: detect from embedder cache
+                cache_hit=query.strip().lower() in searcher._query_embedding_cache if hasattr(searcher, '_query_embedding_cache') else False,
             )
 
             return json.dumps(response, separators=(",", ":"))
@@ -489,6 +487,9 @@ class CodeSearchServer:
                 logger.info(
                     f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s"
                 )
+                # Clear query embedding cache after reindex
+                if self._searcher:
+                    self._searcher.clear_cache()
             except Exception as e:
                 logger.error(f"Background indexing failed: {e}", exc_info=True)
                 self._indexing_job["status"] = "failed"

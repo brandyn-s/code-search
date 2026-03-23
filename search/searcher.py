@@ -182,6 +182,7 @@ class IntelligentSearcher:
         self.index_manager = index_manager
         self.embedder = embedder
         self._logger = logging.getLogger(__name__)
+        self._query_embedding_cache: Dict[str, Any] = {}  # normalized_query -> embedding
 
         # Query patterns for intent detection
         self.query_patterns = {
@@ -239,6 +240,20 @@ class IntelligentSearcher:
             ],
         }
 
+    def _get_query_embedding(self, query: str):
+        """Get embedding for a query, using cache for repeated queries."""
+        cache_key = query.strip().lower()
+        if cache_key in self._query_embedding_cache:
+            self._logger.debug(f"Query embedding cache hit for: '{cache_key}'")
+            return self._query_embedding_cache[cache_key]
+        embedding = self.embedder.embed_query(query)
+        self._query_embedding_cache[cache_key] = embedding
+        return embedding
+
+    def clear_cache(self):
+        """Clear query embedding cache. Call after reindex."""
+        self._query_embedding_cache.clear()
+
     def search(
         self,
         query: str,
@@ -284,8 +299,8 @@ class IntelligentSearcher:
             f"Searching for: '{optimized_query}' with intent: {intent_tags}"
         )
 
-        # Generate query embedding
-        query_embedding = self.embedder.embed_query(optimized_query)
+        # Generate query embedding (cached)
+        query_embedding = self._get_query_embedding(optimized_query)
 
         # Search with expanded result set for better filtering and recall
         search_k = min(k * 10, 200)  # Increased from k*3 to k*10 for better recall
@@ -345,7 +360,7 @@ class IntelligentSearcher:
 
         # Vector search
         optimized_query = self._optimize_query(query)
-        query_embedding = self.embedder.embed_query(optimized_query)
+        query_embedding = self._get_query_embedding(optimized_query)
         vector_raw = self.index_manager.search(query_embedding, candidate_k, filters)
         vector_pairs = [(chunk_id, sim) for chunk_id, sim, _meta in vector_raw]
 
