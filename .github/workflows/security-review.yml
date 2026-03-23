@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
       - uses: redacted-org/pr-security-review@v0.7.0
         with:
-          claude-api-key: ${ secrets.CLAUDE_API_KEY }
+          claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
           approve-comment: "true"
           severity-threshold: "low"
           exclude-paths: "tests/fixtures/*,docs/*"
