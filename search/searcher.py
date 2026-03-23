@@ -43,7 +43,7 @@ def reciprocal_rank_fusion(
 
 # Content mode configurations: (vector_weight, bm25_weight)
 CONTENT_MODE_WEIGHTS = {
-    "code": (0.4, 0.6),
+    "code": (0.5, 0.5),  # Tuned 2026-03-22: vw=0.5/k=20 wins over vw=0.4/k=60 (MRR +4.1%)
     "docs": (0.7, 0.3),
     "all": (0.5, 0.5),
 }
@@ -344,7 +344,7 @@ class IntelligentSearcher:
         """Hybrid BM25 + vector search with weighted RRF fusion and content mode boosting."""
         import os
 
-        fusion_k = int(os.environ.get("FUSION_K", "60"))
+        fusion_k = int(os.environ.get("FUSION_K", "20"))  # k=20 wins over k=60 (sharper rank fusion)
         candidate_k = 50  # Retrieve 50 from each source
 
         # Determine content mode and weights
