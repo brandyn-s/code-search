@@ -12,14 +12,23 @@ permissions:
   actions: read
 
 jobs:
-  security-scan:
-    uses: redacted-org/.github/.github/workflows/security-scan.yml@main
+  gitleaks:
+    uses: redacted-org/.github/.github/workflows/gitleaks.yml@main
     permissions:
       contents: read
       security-events: write
       actions: read
-    with:
-      run_checkov: false
-      run_trivy: true
-      run_gitleaks: true
-      run_semgrep: true
+
+  trivy:
+    uses: redacted-org/.github/.github/workflows/trivy.yml@main
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+  opengrep:
+    uses: redacted-org/.github/.github/workflows/opengrep.yml@main
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
