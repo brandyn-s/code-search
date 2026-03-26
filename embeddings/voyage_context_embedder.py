@@ -12,6 +12,68 @@ from embeddings.embedding_model import EmbeddingModel
 logger = logging.getLogger(__name__)
 
 
+# --- Voyage batch token management ---
+_VOYAGE_MAX_TOKENS_PER_DOC = 30_000   # API limit 32K, leave headroom
+_VOYAGE_MAX_TOKENS_PER_BATCH = 100_000  # API limit 120K, leave headroom
+
+
+def _estimate_tokens(texts: list[str]) -> int:
+    """Rough token estimate: ~4 chars per token for English text."""
+    return sum(len(t) for t in texts) // 4
+
+
+def _split_oversized_group(group: list[str], max_tokens: int = _VOYAGE_MAX_TOKENS_PER_DOC) -> list[list[str]]:
+    """Split a document group that exceeds per-document token limit."""
+    sub_groups: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in group:
+        text_tokens = len(text) // 4
+        if current and current_tokens + text_tokens > max_tokens:
+            sub_groups.append(current)
+            current = [text]
+            current_tokens = text_tokens
+        else:
+            current.append(text)
+            current_tokens += text_tokens
+    if current:
+        sub_groups.append(current)
+    return sub_groups if sub_groups else [group]
+
+
+def _prepare_voyage_batches(grouped_texts: list[list[str]]) -> list[list[list[str]]]:
+    """Pre-split oversized groups and build token-aware batches.
+
+    Returns a list of batches, where each batch is a list of groups
+    that fit within Voyage API limits.
+    """
+    # Step 1: Split oversized groups
+    split_groups: list[list[str]] = []
+    for group in grouped_texts:
+        if _estimate_tokens(group) > _VOYAGE_MAX_TOKENS_PER_DOC:
+            split_groups.extend(_split_oversized_group(group))
+        else:
+            split_groups.append(group)
+
+    # Step 2: Build batches respecting total token limit
+    batches: list[list[list[str]]] = []
+    current_batch: list[list[str]] = []
+    current_tokens = 0
+    for group in split_groups:
+        group_tokens = _estimate_tokens(group)
+        if current_batch and (current_tokens + group_tokens > _VOYAGE_MAX_TOKENS_PER_BATCH
+                              or len(current_batch) >= 4):
+            batches.append(current_batch)
+            current_batch = [group]
+            current_tokens = group_tokens
+        else:
+            current_batch.append(group)
+            current_tokens += group_tokens
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
 class VoyageContextEmbedder(EmbeddingModel):
     """Voyage AI contextualized chunk embedding model.
 
@@ -78,13 +140,10 @@ class VoyageContextEmbedder(EmbeddingModel):
     ) -> np.ndarray:
         """Call the contextualized embeddings API with retry."""
         all_embeddings = []
+        batches = _prepare_voyage_batches(grouped_texts)
 
-        # Process in batches of documents (not chunks) to respect rate limits
-        batch_size = 4  # 4 documents per request
-        for i in range(0, len(grouped_texts), batch_size):
-            batch = grouped_texts[i : i + batch_size]
-
-            if i > 0 and self._batch_delay > 0:
+        for batch_idx, batch in enumerate(batches):
+            if batch_idx > 0 and self._batch_delay > 0:
                 time.sleep(self._batch_delay)
 
             for attempt in range(4):
@@ -104,8 +163,6 @@ class VoyageContextEmbedder(EmbeddingModel):
                     response.raise_for_status()
                     data = response.json()
 
-                    # Response is nested: data[i].data[j].embedding
-                    # Each doc in data has its own data array of chunk embeddings
                     for doc_result in data["data"]:
                         for chunk_emb in doc_result["data"]:
                             all_embeddings.append(chunk_emb["embedding"])
@@ -115,7 +172,7 @@ class VoyageContextEmbedder(EmbeddingModel):
                     if attempt < 3 and status in (429, 500, 502, 503, 529):
                         wait = (15 * (attempt + 1)) if status == 429 else 2**attempt
                         logger.warning(
-                            f"Context embed batch {i} error {status}, "
+                            f"Context embed batch {batch_idx} error {status}, "
                             f"retrying in {wait}s (attempt {attempt + 1}/3)..."
                         )
                         time.sleep(wait)
