@@ -27,7 +27,8 @@ class MultiLanguageChunker:
         '.cache', '.parcel-cache', '.turbo',
         'coverage', '.coverage', '.nyc_output',
         '.gradle', '.idea', '.vscode', '.docusaurus', '.vercel', '.serverless', '.terraform', '.mvn', '.tox',
-        'target', 'bin', 'obj'
+        'target', 'bin', 'obj',
+        'logs', '.claude_code_search',
     }
     
     def __init__(self, root_path: Optional[str] = None):

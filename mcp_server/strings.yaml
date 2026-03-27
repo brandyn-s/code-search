@@ -26,6 +26,12 @@ tools:
   clear_index: |
     Permanently delete the FAISS vector index and SQLite metadata for the currently active project. This is irreversible - all indexed chunks, embeddings, and file metadata are destroyed. Re-run index_directory to rebuild after clearing. Only affects the current project; other projects are untouched. Returns JSON with success status. Fails if no project is currently active. Use list_projects to check which project is active before clearing.
 
+  delete_project: |
+    Permanently delete a project and all its associated data (FAISS index, SQLite metadata, embeddings, Merkle snapshots, and project_info.json). Accepts a project_name string matching either the directory prefix or the project_name field in project_info.json. Resets server state if the deleted project is currently active. Returns JSON with success status, deleted_project name, and a confirmation message. Not reversible - re-run index_directory to recreate. Use list_projects to see available project names.
+
+  cancel_indexing: |
+    Request cancellation of the currently running index_directory background job. The job stops at the next progress checkpoint (between chunk batches), so cancellation is not instant. Returns JSON with success status and job_id. If no indexing job is active, returns an error. After cancellation, the index may be partially built - run index_directory again for a complete index.
+
 help: |
   # Find similar code
 

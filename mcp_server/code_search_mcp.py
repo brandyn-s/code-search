@@ -23,6 +23,8 @@ TOOL_ANNOTATIONS = {
     "switch_project": ToolAnnotations(readOnlyHint=False),
     "index_test_project": ToolAnnotations(readOnlyHint=False),
     "clear_index": ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    "delete_project": ToolAnnotations(destructiveHint=True, idempotentHint=False),
+    "cancel_indexing": ToolAnnotations(destructiveHint=True, idempotentHint=True),
 }
 
 

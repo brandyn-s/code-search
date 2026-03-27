@@ -122,6 +122,17 @@ def pytest_configure(config):
     except ImportError:
         pass
 
+@pytest.fixture(autouse=True, scope="session")
+def cleanup_test_projects():
+    """Remove test-project artifacts from shared storage after test session."""
+    yield
+    storage_dir = Path.home() / ".claude_code_search" / "projects"
+    if storage_dir.exists():
+        for d in storage_dir.iterdir():
+            if d.is_dir() and (d.name.startswith("proj_") or d.name.startswith("test-project_")):
+                shutil.rmtree(d, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def reset_global_state():
     """Reset global state before each test."""

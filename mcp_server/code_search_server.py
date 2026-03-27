@@ -1,6 +1,8 @@
 """Code Search Server - manages code search state and business logic."""
 
+import hashlib
 import os
+import shutil
 import sys
 import json
 import asyncio
@@ -23,6 +25,33 @@ from search.searcher import IntelligentSearcher
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+_PIPELINE_COMPONENTS = [
+    "chunker_version=2",
+    "overlap=50",
+    "contextual_headers=on",
+]
+
+
+def get_pipeline_version() -> str:
+    """Hash of pipeline config. Changes when re-embedding is needed."""
+    provider = os.environ.get("EMBEDDING_PROVIDER", "voyage")
+    model = os.environ.get("EMBEDDING_MODEL", "")
+    content_mode = os.environ.get("CONTENT_MODE", "code")
+    components = _PIPELINE_COMPONENTS + [
+        f"provider={provider}",
+        f"model={model}",
+        f"content_mode={content_mode}",
+    ]
+    return hashlib.md5("|".join(sorted(components)).encode()).hexdigest()[:16]
+
+
+def _format_staleness_warning(age_seconds: float) -> str | None:
+    """Return a warning string if index is stale, None if fresh."""
+    days = age_seconds / 86400
+    if days < 1:
+        return None
+    return f"Index is {int(days)} day{'s' if int(days) != 1 else ''} old. Run index_directory to refresh."
 
 
 class CodeSearchServer:
@@ -88,8 +117,6 @@ class CodeSearchServer:
         base_dir = get_storage_dir()
         project_path_obj = Path(project_path).resolve()
         project_name = project_path_obj.name
-        import hashlib
-
         project_hash = hashlib.md5(str(project_path_obj).encode()).hexdigest()[:8]
 
         # Use common utils for base directory
@@ -391,6 +418,19 @@ class CodeSearchServer:
 
             response = {"query": query, "results": formatted_results}
 
+            # Staleness warning
+            if self._current_project:
+                try:
+                    from merkle.snapshot_manager import SnapshotManager
+                    snap_mgr = SnapshotManager()
+                    age = snap_mgr.get_snapshot_age(self._current_project)
+                    if age is not None:
+                        warning = _format_staleness_warning(age)
+                        if warning:
+                            response["staleness_warning"] = warning
+                except Exception:
+                    pass
+
             # Log query for offline analysis
             latency_ms = (time.time() - t_start) * 1000
             top_score = formatted_results[0]["score"] if formatted_results else 0.0
@@ -520,6 +560,7 @@ class CodeSearchServer:
             "directory": str(directory_path_obj),
             "project_name": project_name,
             "result": None,
+            "cancel_requested": False,
         }
 
         def _progress_callback(phase, current, total):
@@ -527,6 +568,8 @@ class CodeSearchServer:
                 self._indexing_job["phase"] = phase
                 self._indexing_job["current"] = current
                 self._indexing_job["total"] = total
+                if self._indexing_job.get("cancel_requested"):
+                    raise InterruptedError("Indexing cancelled by user")
 
         def _run_indexing():
             try:
@@ -545,11 +588,40 @@ class CodeSearchServer:
                     progress_fn=_progress_callback,
                 )
 
+                # Pipeline version check: force full reindex if pipeline changed
+                effective_incremental = incremental
+                project_dir = self.get_project_storage_dir(str(directory_path_obj))
+                info_file = project_dir / "project_info.json"
+                current_pipeline_version = get_pipeline_version()
+                if info_file.exists():
+                    try:
+                        with open(info_file, "r") as f:
+                            info = json.load(f)
+                        stored_version = info.get("pipeline_version", "")
+                        if stored_version and stored_version != current_pipeline_version:
+                            logger.warning(
+                                f"Pipeline version changed ({stored_version} -> {current_pipeline_version}), forcing full reindex"
+                            )
+                            effective_incremental = False
+                    except Exception:
+                        pass
+
                 result = incremental_indexer.incremental_index(
-                    str(directory_path_obj), project_name, force_full=not incremental
+                    str(directory_path_obj), project_name, force_full=not effective_incremental
                 )
 
                 stats = incremental_indexer.get_indexing_stats(str(directory_path_obj))
+
+                # Store pipeline version after successful indexing
+                if info_file.exists():
+                    try:
+                        with open(info_file, "r") as f:
+                            info = json.load(f)
+                        info["pipeline_version"] = current_pipeline_version
+                        with open(info_file, "w") as f:
+                            json.dump(info, f, indent=2)
+                    except Exception as ve:
+                        logger.warning(f"Failed to store pipeline version: {ve}")
 
                 self._indexing_job["status"] = "completed"
                 self._indexing_job["phase"] = "done"
@@ -572,6 +644,11 @@ class CodeSearchServer:
                 # Clear query embedding cache after reindex
                 if self._searcher:
                     self._searcher.clear_cache()
+            except InterruptedError:
+                logger.info("Indexing cancelled by user")
+                self._indexing_job["status"] = "cancelled"
+                self._indexing_job["phase"] = "cancelled"
+                self._indexing_job["result"] = {"cancelled": True, "message": "Indexing was cancelled by user"}
             except Exception as e:
                 logger.error(f"Background indexing failed: {e}", exc_info=True)
                 self._indexing_job["status"] = "failed"
@@ -826,3 +903,102 @@ class CodeSearchServer:
             error_msg = f"Clear index failed: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return json.dumps({"error": error_msg})
+
+    def delete_project(self, project_name: str) -> str:
+        """Delete a project and all its data from storage."""
+        try:
+            base_dir = get_storage_dir()
+            projects_dir = base_dir / "projects"
+
+            if not projects_dir.exists():
+                return json.dumps({"success": False, "error": f"Project not found: {project_name}"})
+
+            # Find project directory by scanning project_info.json or directory prefix
+            target_dir = None
+            target_project_path = None
+            for project_dir in projects_dir.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                # Check by directory name prefix
+                if project_dir.name.startswith(f"{project_name}_"):
+                    target_dir = project_dir
+                    break
+                # Check by project_info.json content
+                info_file = project_dir / "project_info.json"
+                if info_file.exists():
+                    try:
+                        with open(info_file) as f:
+                            info = json.load(f)
+                        if info.get("project_name") == project_name:
+                            target_dir = project_dir
+                            target_project_path = info.get("project_path")
+                            break
+                    except Exception:
+                        continue
+
+            if target_dir is None:
+                return json.dumps({"success": False, "error": f"Project not found: {project_name}"})
+
+            # Read project path before deletion for merkle cleanup
+            if target_project_path is None:
+                info_file = target_dir / "project_info.json"
+                if info_file.exists():
+                    try:
+                        with open(info_file) as f:
+                            info = json.load(f)
+                        target_project_path = info.get("project_path")
+                    except Exception:
+                        pass
+
+            # Reset server state if deleting the current project
+            if self._current_project and target_project_path:
+                if str(Path(self._current_project).resolve()) == str(Path(target_project_path).resolve()):
+                    self._current_project = None
+                    self._index_manager = None
+                    self._searcher = None
+
+            # Delete the project directory
+            shutil.rmtree(target_dir, ignore_errors=True)
+
+            # Also remove any merkle snapshots matching the project
+            if target_project_path:
+                try:
+                    from merkle.snapshot_manager import SnapshotManager
+                    snap_mgr = SnapshotManager()
+                    snap_mgr.delete_snapshot(target_project_path)
+                except Exception as me:
+                    logger.warning(f"Failed to clean up merkle snapshots: {me}")
+
+            logger.info(f"Deleted project: {project_name}")
+            return json.dumps({
+                "success": True,
+                "deleted_project": project_name,
+                "message": f"Project '{project_name}' and all associated data deleted successfully",
+            })
+        except Exception as e:
+            error_msg = f"Delete project failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return json.dumps({"success": False, "error": error_msg})
+
+    def cancel_indexing(self) -> str:
+        """Cancel the currently running indexing job."""
+        try:
+            if not self._indexing_job or self._indexing_job["status"] != "indexing":
+                return json.dumps({
+                    "success": False,
+                    "error": "No active indexing job to cancel",
+                })
+
+            self._indexing_job["cancel_requested"] = True
+            job_id = self._indexing_job["job_id"]
+            logger.info(f"Cancellation requested for indexing job {job_id}")
+
+            return json.dumps({
+                "success": True,
+                "job_id": job_id,
+                "message": "Cancellation requested. The indexing job will stop at the next checkpoint.",
+            })
+        except Exception as e:
+            error_msg = f"Cancel indexing failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return json.dumps({"success": False, "error": error_msg})
