@@ -287,10 +287,11 @@ class TestFullSearchFlow:
         index_manager.create_index(768, "flat")
         index_manager.add_embeddings(embeddings)
         
-        # Find all exception classes across files
+        # Find all exception classes across files (large k to avoid flaky results
+        # from random query vectors missing some classes in nearest-neighbor search)
         exception_results = index_manager.search(
-            np.random.random(768).astype(np.float32), 
-            k=20, 
+            np.random.random(768).astype(np.float32),
+            k=100,
             filters={'chunk_type': 'class'}
         )
         
