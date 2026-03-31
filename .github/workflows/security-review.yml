@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - uses: redacted-org/pr-security-review/fast-gate@0f07de03ae6623c647e8911fb2a361f69c27522c # v0.7.0
+      - uses: redacted-org/pr-security-review/fast-gate@3286d7660757f0fd112287078f846a3dca96078f # v0.7.2
 
   analyze:
     runs-on: ubuntu-24.04
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - uses: redacted-org/pr-security-review@0f07de03ae6623c647e8911fb2a361f69c27522c # v0.7.0
+      - uses: redacted-org/pr-security-review@3286d7660757f0fd112287078f846a3dca96078f # v0.7.2
         with:
           claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
           approve-comment: "true"
