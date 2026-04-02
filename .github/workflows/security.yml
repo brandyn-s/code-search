@@ -39,3 +39,8 @@ jobs:
       contents: read
       security-events: write
       actions: read
+
+  dependency-immutability:
+    uses: redacted-org/.github/.github/workflows/dependency-immutability.yml@main
+    permissions:
+      contents: read
