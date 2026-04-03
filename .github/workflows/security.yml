@@ -44,8 +44,3 @@ jobs:
       actions: read
       pull-requests: write
 
-  dependency-immutability:
-    uses: redacted-org/.github/.github/workflows/dependency-immutability.yml@main
-    permissions:
-      contents: read
-      pull-requests: write
