@@ -1,0 +1,9 @@
+# Security tier policy for auto-merge workflow
+# Tier 1: requires CODEOWNERS approval (default)
+# Tier 2: auto-merge after CODEOWNERS approval
+# Tier 3: auto-merge when CI passes (no approval needed)
+security:
+  tier: 3
+  auto-merge:
+    enabled: true
+    require-attestation: false
