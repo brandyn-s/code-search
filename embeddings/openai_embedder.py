@@ -18,7 +18,38 @@ MODEL_DIMENSIONS = {
     "voyage-code-3": 1024,
     "voyage-3-large": 1024,
     "voyage-3-lite": 512,
+    "voyage-4-large": 1024,
+    "voyage-4": 1024,
+    "voyage-4-lite": 1024,
 }
+
+
+# Voyage API token limits (leave headroom below the 120K hard limit)
+_VOYAGE_MAX_TOKENS_PER_REQUEST = 100_000
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for code/English text."""
+    return len(text) // 4
+
+
+def _split_batch_by_tokens(texts: list, max_tokens: int = _VOYAGE_MAX_TOKENS_PER_REQUEST) -> list:
+    """Split a batch into sub-batches that fit within token limits."""
+    sub_batches = []
+    current = []
+    current_tokens = 0
+    for text in texts:
+        t = _estimate_tokens(text)
+        if current and current_tokens + t > max_tokens:
+            sub_batches.append(current)
+            current = [text]
+            current_tokens = t
+        else:
+            current.append(text)
+            current_tokens += t
+    if current:
+        sub_batches.append(current)
+    return sub_batches
 
 
 class OpenAIEmbeddingModel(EmbeddingModel):
@@ -57,45 +88,60 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         )
 
     def encode(self, texts: List[str], **kwargs) -> np.ndarray:
-        """Encode texts via embeddings API with retry on server/rate-limit errors."""
+        """Encode texts via embeddings API with retry on server/rate-limit errors.
+
+        Kwargs:
+            input_type: Optional "query" or "document" for Voyage models.
+                        Adds retrieval-optimized prompts to the embeddings.
+        """
         import time
 
+        input_type = kwargs.get("input_type")
         all_embeddings = []
+
+        is_voyage = self._model_name.startswith("voyage-")
 
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
 
-            # Inter-batch delay to stay within TPM rate limits
-            if i > 0 and self._batch_delay > 0:
-                time.sleep(self._batch_delay)
+            # Token-aware sub-batching: split oversized batches to avoid 400 errors
+            sub_batches = _split_batch_by_tokens(batch) if is_voyage else [batch]
 
-            for attempt in range(4):
-                try:
-                    response = self._client.post(
-                        f"{self._base_url}/embeddings",
-                        headers={
-                            "Authorization": f"Bearer {self._api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={"input": batch, "model": self._model_name},
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    batch_embeddings = [item["embedding"] for item in data["data"]]
-                    all_embeddings.extend(batch_embeddings)
-                    break
-                except Exception as e:
-                    status = getattr(getattr(e, "response", None), "status_code", 0)
-                    if attempt < 3 and status in (429, 500, 502, 503, 529):
-                        # 429: back off longer to let TPM window reset
-                        wait = (15 * (attempt + 1)) if status == 429 else 2**attempt
-                        logger.warning(
-                            f"Embedding batch {i}-{i + len(batch)} error {status}, "
-                            f"retrying in {wait}s (attempt {attempt + 1}/3)..."
+            for sub_batch in sub_batches:
+                # Inter-batch delay to stay within TPM rate limits
+                if all_embeddings and self._batch_delay > 0:
+                    time.sleep(self._batch_delay)
+
+                for attempt in range(4):
+                    try:
+                        payload = {"input": sub_batch, "model": self._model_name}
+                        # Voyage models support input_type for retrieval optimization
+                        if input_type and is_voyage:
+                            payload["input_type"] = input_type
+                        response = self._client.post(
+                            f"{self._base_url}/embeddings",
+                            headers={
+                                "Authorization": f"Bearer {self._api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=payload,
                         )
-                        time.sleep(wait)
-                        continue
-                    raise
+                        response.raise_for_status()
+                        data = response.json()
+                        batch_embeddings = [item["embedding"] for item in data["data"]]
+                        all_embeddings.extend(batch_embeddings)
+                        break
+                    except Exception as e:
+                        status = getattr(getattr(e, "response", None), "status_code", 0)
+                        if attempt < 3 and status in (429, 500, 502, 503, 529):
+                            wait = (15 * (attempt + 1)) if status == 429 else 2**attempt
+                            logger.warning(
+                                f"Embedding sub-batch error {status}, "
+                                f"retrying in {wait}s (attempt {attempt + 1}/3)..."
+                            )
+                            time.sleep(wait)
+                            continue
+                        raise
 
         return np.array(all_embeddings, dtype=np.float32)
 

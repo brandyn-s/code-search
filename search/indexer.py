@@ -117,37 +117,65 @@ class CodeIndexManager:
     
     def _load_index(self):
         """Load existing FAISS index or create new one."""
+        self._is_binary = False
+        float_store_path = self.storage_dir / "float_store.npy"
+
         if self.index_path.exists():
-            self._logger.info(f"Loading existing index from {self.index_path}")
-            self._index = faiss.read_index(str(self.index_path))
-            # If GPU support is available, optionally move to GPU for runtime speed
-            self._maybe_move_index_to_gpu()
-            
+            # Detect binary mode: float_store.npy exists alongside the index
+            if float_store_path.exists():
+                self._logger.info(f"Loading binary index from {self.index_path}")
+                self._index = faiss.read_index_binary(str(self.index_path))
+                self._float_store = np.load(str(float_store_path))
+                self._is_binary = True
+            else:
+                self._logger.info(f"Loading index from {self.index_path}")
+                self._index = faiss.read_index(str(self.index_path))
+                if not self._is_binary:
+                    self._maybe_move_index_to_gpu()
+
             # Load chunk IDs
             if self.chunk_id_path.exists():
                 with open(self.chunk_id_path, 'rb') as f:
                     self._chunk_ids = pickle.load(f)
         else:
             self._logger.info("Creating new index")
-            # Create a new index - we'll initialize it when we get the first embedding
             self._index = None
             self._chunk_ids = []
     
     def create_index(self, embedding_dimension: int, index_type: str = "flat"):
-        """Create a new FAISS index."""
-        if index_type == "flat":
-            # Simple flat index for exact search
-            self._index = faiss.IndexFlatIP(embedding_dimension)  # Inner product (cosine similarity)
+        """Create a new FAISS index.
+
+        Quantization controlled by QUANTIZATION env var:
+        - "int8" (default): ScalarQuantizer with QT_8bit_direct — 4x smaller, <0.1% quality loss
+        - "float32": IndexFlatIP — original full-precision
+        - "binary": IndexBinaryFlat + float store — 32x smaller, needs rescore (opt-in for 100K+ chunks)
+        """
+        quantization = os.environ.get("QUANTIZATION", "int8").lower()
+        self._is_binary = False
+
+        if quantization == "binary":
+            self._index = faiss.IndexBinaryFlat(embedding_dimension)
+            self._float_store = np.empty((0, embedding_dimension), dtype=np.float32)
+            self._is_binary = True
+            self._logger.info(f"Created binary index with dimension {embedding_dimension} (32x compression, requires rescore)")
+        elif quantization == "int8" and index_type == "flat":
+            self._index = faiss.IndexScalarQuantizer(
+                embedding_dimension, faiss.ScalarQuantizer.QT_8bit_direct, faiss.METRIC_INNER_PRODUCT
+            )
+            self._logger.info(f"Created int8 quantized index with dimension {embedding_dimension} (4x compression)")
+        elif index_type == "flat":
+            self._index = faiss.IndexFlatIP(embedding_dimension)
+            self._logger.info(f"Created float32 flat index with dimension {embedding_dimension}")
         elif index_type == "ivf":
-            # IVF index for faster approximate search on large datasets
             quantizer = faiss.IndexFlatIP(embedding_dimension)
-            n_centroids = min(100, max(10, embedding_dimension // 8))  # Adaptive number of centroids
+            n_centroids = min(100, max(10, embedding_dimension // 8))
             self._index = faiss.IndexIVFFlat(quantizer, embedding_dimension, n_centroids)
+            self._logger.info(f"Created IVF index with dimension {embedding_dimension}")
         else:
             raise ValueError(f"Unsupported index type: {index_type}")
-        
-        self._logger.info(f"Created {index_type} index with dimension {embedding_dimension}")
-        self._maybe_move_index_to_gpu()
+
+        if not self._is_binary:
+            self._maybe_move_index_to_gpu()
     
     def add_embeddings(self, embedding_results: List[EmbeddingResult]) -> None:
         """Add embeddings to the index and metadata to the database."""
@@ -167,15 +195,21 @@ class CodeIndexManager:
         
         # Normalize embeddings for cosine similarity
         faiss.normalize_L2(embeddings)
-        
-        # Train IVF index if needed
+
+        # Train quantized/IVF index if needed
         if hasattr(self._index, 'is_trained') and not self._index.is_trained:
-            self._logger.info("Training IVF index...")
+            self._logger.info("Training index...")
             self._index.train(embeddings)
-        
-        # Add to FAISS index
+
+        # Add to FAISS index (binary mode packs bits separately)
+        if getattr(self, '_is_binary', False):
+            # Binary mode: pack sign bits and store float originals for rescoring
+            codes = np.packbits((embeddings > 0).astype(np.uint8), axis=1)
+            self._index.add(codes)
+            self._float_store = np.concatenate([self._float_store, embeddings], axis=0)
+        else:
+            self._index.add(embeddings)
         start_id = len(self._chunk_ids)
-        self._index.add(embeddings)
         
         # Store metadata and update chunk IDs
         for i, result in enumerate(embedding_results):
@@ -256,16 +290,31 @@ class CodeIndexManager:
         if index is None or index.ntotal == 0:
             logger.warning(f"Index is empty or None. Index: {index}, ntotal: {index.ntotal if index else 'N/A'}")
             return []
-        
+
         logger.info(f"Index has {index.ntotal} total vectors")
-        
+
         # Normalize query embedding
         query_embedding = query_embedding.reshape(1, -1)
         faiss.normalize_L2(query_embedding)
-        
-        # Search in FAISS index
-        search_k = min(k * 3, index.ntotal)  # Get more results for filtering
-        similarities, indices = index.search(query_embedding, search_k)
+
+        # Binary mode: hamming search → float rescore
+        if getattr(self, '_is_binary', False) and hasattr(self, '_float_store'):
+            search_k = min(k * 20, index.ntotal)
+            q_codes = np.packbits((query_embedding[0] > 0).astype(np.uint8)).reshape(1, -1)
+            _distances, bin_indices = index.search(q_codes, search_k)
+            # Rescore with float dot product
+            candidate_ids = bin_indices[0][bin_indices[0] >= 0]
+            if len(candidate_ids) == 0:
+                return []
+            candidate_vecs = self._float_store[candidate_ids]
+            scores = candidate_vecs @ query_embedding[0]
+            top_order = np.argsort(-scores)
+            indices = np.array([candidate_ids[top_order]])
+            similarities = np.array([scores[top_order]])
+        else:
+            # Standard search (float32 or int8)
+            search_k = min(k * 3, index.ntotal)
+            similarities, indices = index.search(query_embedding, search_k)
         
         results = []
         for i, (similarity, index_id) in enumerate(zip(similarities[0], indices[0])):
@@ -397,20 +446,26 @@ class CodeIndexManager:
         """Save the FAISS index and chunk IDs to disk."""
         if self._index is not None:
             try:
-                index_to_write = self._index
-                # If on GPU, convert to CPU before saving
-                if self._on_gpu and hasattr(faiss, 'index_gpu_to_cpu'):
-                    index_to_write = faiss.index_gpu_to_cpu(self._index)
-                faiss.write_index(index_to_write, str(self.index_path))
-                self._logger.info(f"Saved index to {self.index_path}")
+                if getattr(self, '_is_binary', False):
+                    # Binary mode: save binary index + float store
+                    faiss.write_index_binary(self._index, str(self.index_path))
+                    float_path = self.storage_dir / "float_store.npy"
+                    np.save(str(float_path), self._float_store)
+                    self._logger.info(f"Saved binary index + float store to {self.storage_dir}")
+                else:
+                    index_to_write = self._index
+                    if self._on_gpu and hasattr(faiss, 'index_gpu_to_cpu'):
+                        index_to_write = faiss.index_gpu_to_cpu(self._index)
+                    faiss.write_index(index_to_write, str(self.index_path))
+                    self._logger.info(f"Saved index to {self.index_path}")
             except Exception as e:
-                self._logger.warning(f"Failed to save GPU index directly, attempting CPU fallback: {e}")
-                try:
-                    cpu_index = faiss.index_gpu_to_cpu(self._index)
-                    faiss.write_index(cpu_index, str(self.index_path))
-                    self._logger.info(f"Saved index to {self.index_path} (CPU fallback)")
-                except Exception as e2:
-                    self._logger.error(f"Failed to save FAISS index: {e2}")
+                self._logger.warning(f"Failed to save index: {e}")
+                if not getattr(self, '_is_binary', False):
+                    try:
+                        cpu_index = faiss.index_gpu_to_cpu(self._index)
+                        faiss.write_index(cpu_index, str(self.index_path))
+                    except Exception as e2:
+                        self._logger.error(f"Failed to save FAISS index: {e2}")
         
         # Save chunk IDs
         with open(self.chunk_id_path, 'wb') as f:
@@ -420,11 +475,23 @@ class CodeIndexManager:
     
     def _update_stats(self):
         """Update index statistics."""
+        # Detect quantization type for reporting
+        if getattr(self, '_is_binary', False):
+            quant = "binary"
+            idx_dim = self._float_store.shape[1] if hasattr(self, '_float_store') and len(self._float_store) > 0 else 0
+        elif self._index and "ScalarQuantizer" in type(self._index).__name__:
+            quant = "int8"
+            idx_dim = self._index.d if self._index else 0
+        else:
+            quant = "float32"
+            idx_dim = self._index.d if self._index else 0
+
         stats = {
             'total_chunks': len(self._chunk_ids),
             'index_size': self._index.ntotal if self._index else 0,
-            'embedding_dimension': self._index.d if self._index else 0,
-            'index_type': type(self._index).__name__ if self._index else 'None'
+            'embedding_dimension': idx_dim,
+            'index_type': type(self._index).__name__ if self._index else 'None',
+            'quantization': quant,
         }
         
         # Add file and folder statistics

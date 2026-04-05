@@ -35,7 +35,7 @@ _PIPELINE_COMPONENTS = [
 
 def get_pipeline_version() -> str:
     """Hash of pipeline config. Changes when re-embedding is needed."""
-    provider = os.environ.get("EMBEDDING_PROVIDER", "voyage")
+    provider = os.environ.get("EMBEDDING_PROVIDER", "voyage-context")
     model = os.environ.get("EMBEDDING_MODEL", "")
     content_mode = os.environ.get("CONTENT_MODE", "code")
     components = _PIPELINE_COMPONENTS + [

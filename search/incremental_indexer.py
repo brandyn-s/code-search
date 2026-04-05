@@ -1,6 +1,7 @@
 """Incremental indexing using Merkle tree change detection."""
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -187,6 +188,18 @@ class IncrementalIndexer:
             IncrementalIndexResult
         """
         try:
+            # Dimension mismatch guard: detect if the embedding dimension changed
+            # between providers (e.g., voyage-code-3 1024 vs local 384). Log a
+            # warning since we're about to clear_index() anyway in full reindex.
+            current_dim = self.embedder._model.get_embedding_dimension()
+            stats = self.indexer.get_stats()
+            stored_dim = stats.get("embedding_dimension", 0)
+            if stored_dim and stored_dim != current_dim:
+                logger.warning(
+                    f"Embedding dimension changed ({stored_dim} -> {current_dim}), "
+                    f"clearing index to prevent mixed embeddings"
+                )
+
             # Clear existing index
             self.indexer.clear_index()
 
@@ -211,11 +224,56 @@ class IncrementalIndexer:
                     logger.warning(f"Failed to chunk {file_path}: {e}")
                 self._progress_fn("chunking", idx + 1, len(supported_files))
 
-            # Embed chunks in batches with per-batch error recovery
+            # Embed chunks — use Batch API for large full reindexes if enabled
             all_embedding_results = []
             embed_batch_size = 64
             self._progress_fn("embedding", 0, len(all_chunks))
-            if all_chunks:
+
+            use_batch = (
+                os.environ.get("VOYAGE_BATCH_API", "off") == "on"
+                and len(all_chunks) >= int(os.environ.get("VOYAGE_BATCH_THRESHOLD", "1000"))
+                and hasattr(self.embedder._model, '_model_name')
+                and self.embedder._model._model_name.startswith("voyage-")
+            )
+
+            if use_batch and all_chunks:
+                logger.info(f"Using Voyage Batch API for {len(all_chunks)} chunks (33% cheaper)")
+                try:
+                    from embeddings.voyage_batch_embedder import VoyageBatchEmbedder
+                    from embeddings.embedder import EmbeddingResult as ER
+
+                    all_contents = [self.embedder.create_embedding_content(c) for c in all_chunks]
+                    batch_emb = VoyageBatchEmbedder(model=self.embedder._model._model_name)
+                    embeddings_array = batch_emb.embed_all(all_contents, input_type="document")
+                    batch_emb.close()
+
+                    if embeddings_array is not None and len(embeddings_array) == len(all_chunks):
+                        for i, (chunk, emb_vec) in enumerate(zip(all_chunks, embeddings_array)):
+                            chunk_id = f"{chunk.relative_path}:{chunk.start_line}-{chunk.end_line}:{chunk.chunk_type}"
+                            if chunk.name:
+                                chunk_id += f":{chunk.name}"
+                            metadata = {
+                                "file_path": chunk.file_path, "relative_path": chunk.relative_path,
+                                "folder_structure": chunk.folder_structure, "chunk_type": chunk.chunk_type,
+                                "start_line": chunk.start_line, "end_line": chunk.end_line,
+                                "name": chunk.name, "parent_name": chunk.parent_name,
+                                "docstring": chunk.docstring, "decorators": chunk.decorators,
+                                "imports": chunk.imports, "complexity_score": chunk.complexity_score,
+                                "tags": chunk.tags, "project_name": project_name,
+                                "content": chunk.content,
+                                "content_preview": chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content,
+                            }
+                            all_embedding_results.append(ER(embedding=emb_vec, chunk_id=chunk_id, metadata=metadata))
+                        self._progress_fn("embedding", len(all_chunks), len(all_chunks))
+                        logger.info(f"Batch API: embedded {len(all_embedding_results)} chunks")
+                    else:
+                        logger.warning("Batch API returned incomplete results, falling back to real-time")
+                        use_batch = False  # Fall through to real-time loop below
+                except Exception as e:
+                    logger.warning(f"Batch API failed ({e}), falling back to real-time")
+                    use_batch = False
+
+            if not use_batch and all_chunks:
                 for batch_start in range(0, len(all_chunks), embed_batch_size):
                     batch = all_chunks[batch_start : batch_start + embed_batch_size]
                     try:

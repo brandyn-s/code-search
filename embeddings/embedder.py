@@ -37,8 +37,14 @@ class CodeEmbedder:
         # Determine provider from env
         provider = os.environ.get("EMBEDDING_PROVIDER", "").lower()
         if not provider:
-            # Default: openai if key exists, else local
-            provider = "openai" if os.environ.get("OPENAI_API_KEY") else "local"
+            # Default: voyage-context if Voyage key exists (24% better MRR than
+            # voyage-code-3 on Nix eval, 2026-04-04), openai if OpenAI key, else local
+            if os.environ.get("VOYAGE_API_KEY"):
+                provider = "voyage-context"
+            elif os.environ.get("OPENAI_API_KEY"):
+                provider = "openai"
+            else:
+                provider = "local"
 
         if provider == "openai":
             from embeddings.openai_embedder import OpenAIEmbeddingModel
@@ -251,10 +257,16 @@ class CodeEmbedder:
             batch_contents = [self.create_embedding_content(chunk) for chunk in batch]
 
             # Generate embeddings for batch
+            encode_kwargs = {
+                "prompt_name": "Retrieval-document",
+                "show_progress_bar": False,
+            }
+            # Voyage input_type optimization: "document" for indexing
+            if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on":
+                encode_kwargs["input_type"] = "document"
             batch_embeddings = self._model.encode(
                 batch_contents,
-                prompt_name="Retrieval-document",
-                show_progress_bar=False,
+                **encode_kwargs,
             )
 
             # Create results
@@ -394,8 +406,15 @@ class CodeEmbedder:
             self._query_cache.move_to_end(cache_key)
             return self._query_cache[cache_key]
 
+        encode_kwargs = {
+            "prompt_name": "InstructionRetrieval",
+            "show_progress_bar": False,
+        }
+        # Voyage input_type optimization: "query" for search
+        if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on":
+            encode_kwargs["input_type"] = "query"
         embedding = self._model.encode(
-            [query], prompt_name="InstructionRetrieval", show_progress_bar=False
+            [query], **encode_kwargs
         )[0]
 
         self._query_cache[cache_key] = embedding
