@@ -76,6 +76,20 @@ class CodeEmbedder:
                 api_key=api_key,
                 model_name=model_name,
             )
+        elif provider in ("jina", "jina-code"):
+            from embeddings.jina_code_embedder import JinaCodeEmbedder
+
+            model_name = model_name or os.environ.get(
+                "LOCAL_EMBEDDING_MODEL", "jinaai/jina-code-embeddings-0.5b"
+            )
+            truncate_dim_str = os.environ.get("JINA_TRUNCATE_DIM", "")
+            truncate_dim = int(truncate_dim_str) if truncate_dim_str else None
+            self._model = JinaCodeEmbedder(
+                model_name=model_name,
+                cache_dir=cache_dir,
+                device=device,
+                truncate_dim=truncate_dim,
+            )
         elif provider == "local":
             from embeddings.sentence_transformer import SentenceTransformerModel
 
@@ -93,7 +107,7 @@ class CodeEmbedder:
         else:
             raise ValueError(
                 f"Unknown EMBEDDING_PROVIDER: {provider}. "
-                f"Use 'openai', 'voyage', 'voyage-context', 'local', or 'gemma'."
+                f"Use 'voyage-context', 'voyage', 'openai', 'jina', 'local', or 'gemma'."
             )
 
         self._logger.info(f"Embedding provider: {provider}, model: {model_name}")

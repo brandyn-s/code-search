@@ -39,7 +39,8 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `EMBEDDING_PROVIDER` | `voyage-context` (if `VOYAGE_API_KEY` set) | Provider: `voyage-context` (recommended), `voyage`, `openai`, `local` |
+| `EMBEDDING_PROVIDER` | `voyage-context` (if `VOYAGE_API_KEY` set) | Provider: `voyage-context` (recommended), `voyage`, `openai`, `jina` (local, code-optimized), `local` |
+| `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for jina provider (0.5b: 64-896, 1.5b: 128-1536) |
 | `VOYAGE_API_KEY` | - | Voyage AI API key |
 | `CONTENT_MODE` | `code` | `code` or `docs` - affects search weights and provider auto-select |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
