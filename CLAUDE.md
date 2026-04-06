@@ -61,20 +61,20 @@ code-search uses [Voyage AI](https://voyageai.com) embedding models to convert c
 2. **Search**: Query embedded via Voyage → FAISS cosine similarity → BM25 keyword search → Weighted RRF fusion (50/50) → chunk-type boosts → results
 
 **Optimizations**:
-- **int8 quantization** (default): 4x smaller FAISS indexes, 0.9997 correlation with float32
+- **int8 quantization** (default): QT_8bit (trained), 4x smaller FAISS indexes. Must use `QT_8bit`, NOT `QT_8bit_direct` (which silently returns 0.0 similarities on normalized vectors — discovered 2026-04-05).
 - **Binary + rescore** (opt-in `QUANTIZATION=binary`): 32x smaller, hamming search → float rescore top-k. For 100K+ chunk repos.
 - **Token pre-count**: Batches split by estimated token budget before API calls, preventing 400 errors
 - **Batch API** (opt-in `VOYAGE_BATCH_API=on`): 33% cheaper async embedding for full reindexes (1000+ chunks)
 
-**Eval results** (n=44, Nix sub-project):
+**Multi-language eval results** (n=102, 4 language sub-projects):
 
-| Config | MRR | vs Baseline |
-|--------|-----|-------------|
-| voyage-code-3 (baseline) | 0.584 | — |
-| +input_type | 0.631 | +8% |
-| **voyage-context-3** | **0.723** | **+24%** |
-| voyage-4-large | 0.672 | +15% |
-| +rerank-2.5 | 0.411 | -30% (harmful) |
+| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) |
+|----------|-------|-----------|----------------|----------------|------------------|
+| `voyage-context` | voyage-context-3 | **0.723** | **0.783** | **0.861** | **0.677** |
+| `voyage` | voyage-code-3 | 0.584 | 0.742 | 0.861 | 0.642 |
+| `jina` | jina-code-0.5b | 0.582 | 0.742 | ~0.86 | 0.660 |
+
+Key: voyage-context-3 wins all languages (+24% Nix, +5.5% Rust/TS, 0% Rust lib). Jina matches voyage-code-3 everywhere, beats it on TypeScript. Reranking (rerank-2.5) degrades quality (-30% MRR) — disabled.
 
 ## Protected Repo
 
