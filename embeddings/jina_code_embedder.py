@@ -107,9 +107,17 @@ class JinaCodeEmbedder(EmbeddingModel):
             logger.info("Model cache detected — loading offline")
 
         model = SentenceTransformer(self.model_name, **st_kwargs)
+
+        # CRITICAL: The model defaults to max_seq_length=32768. The decoder pads
+        # every input to this length, making CPU inference ~5x slower than needed.
+        # Our chunks are capped at 6000 chars (~1500 tokens) by create_embedding_content.
+        # 512 tokens covers 95%+ of chunks; longer ones get truncated with minimal
+        # quality loss (Matryoshka training makes the model robust to truncation).
+        model.max_seq_length = 512
+
         logger.info(
             f"Jina code embedder loaded: dim={model.get_sentence_embedding_dimension()}, "
-            f"device={model.device}"
+            f"max_seq={model.max_seq_length}, device={model.device}"
         )
         return model
 
