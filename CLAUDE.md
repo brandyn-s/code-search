@@ -46,7 +46,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 | `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
 | `RERANKER` | `off` | Cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`). **Disabled** — golden eval (2026-03-22) showed reranking degrades quality: HR 0.700→1.000, MRR 0.527→0.783 with reranker off. The cross-encoder reshuffles well-ranked RRF output into a worse order. Code preserved for future evaluation. |
-| `QUANTIZATION` | `int8` | Index type: `int8` (4x smaller, default), `float32` (legacy), `binary` (32x smaller, opt-in for 100K+ chunks) |
+| `QUANTIZATION` | `int8` | Index type: `int8` (QT_8bit trained, 4x smaller, default), `float32` (legacy), `binary` (32x smaller, opt-in for 100K+ chunks). **Note**: QT_8bit requires a training step (learns value range). Indexes built before 2026-04-05 used QT_8bit_direct which silently returned 0.0 similarities — must reindex. |
 | `VOYAGE_BATCH_API` | `off` | `on` to use Batch API for full reindex (33% cheaper, 1000+ chunk threshold) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |
 

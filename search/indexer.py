@@ -6,12 +6,10 @@ import pickle
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import asdict
 import numpy as np
 import faiss
 from sqlitedict import SqliteDict
 from embeddings.embedder import EmbeddingResult
-from chunking.code_chunk import CodeChunk
 
 
 class CodeIndexManager:
@@ -159,10 +157,14 @@ class CodeIndexManager:
             self._is_binary = True
             self._logger.info(f"Created binary index with dimension {embedding_dimension} (32x compression, requires rescore)")
         elif quantization == "int8" and index_type == "flat":
+            # QT_8bit (trained) learns the value range from data, then linearly maps to [0,255].
+            # QT_8bit_direct was wrong — it interprets float bytes as raw ints, producing
+            # all-zero similarities on normalized [-1,1] vectors. (Confirmed 2026-04-05:
+            # isolated FAISS test showed QT_8bit_direct returns 0.0 for all queries.)
             self._index = faiss.IndexScalarQuantizer(
-                embedding_dimension, faiss.ScalarQuantizer.QT_8bit_direct, faiss.METRIC_INNER_PRODUCT
+                embedding_dimension, faiss.ScalarQuantizer.QT_8bit, faiss.METRIC_INNER_PRODUCT
             )
-            self._logger.info(f"Created int8 quantized index with dimension {embedding_dimension} (4x compression)")
+            self._logger.info(f"Created int8 quantized index with dimension {embedding_dimension} (4x compression, requires training)")
         elif index_type == "flat":
             self._index = faiss.IndexFlatIP(embedding_dimension)
             self._logger.info(f"Created float32 flat index with dimension {embedding_dimension}")
