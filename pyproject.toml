@@ -3,16 +3,13 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-context-local"
-version = "0.1.0"
-description = "Local semantic code search for Claude Code (MCP) using EmbeddingGemma, FAISS, and AST/tree-sitter chunking. 100% local embeddings and indexing."
+name = "redacted-code-search"
+version = "0.2.0"
+description = "Hybrid semantic + keyword code search MCP server. FAISS vector + FTS5 BM25 with Voyage AI, Jina, or local embeddings."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
-    { name = "Farhan Ali Raza" }
-]
-maintainers = [
-    { name = "Farhan Ali Raza" }
+    { name = "redacted Security" }
 ]
 keywords = [
     "semantic-search",
@@ -22,8 +19,12 @@ keywords = [
     "mcp",
     "claude",
     "tree-sitter",
-    "chunking",
-    "python",
+]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
     "click>=8.2.1",
@@ -32,10 +33,7 @@ dependencies = [
     "fastmcp>=2.12.2",
     "huggingface-hub>=0.34.4",
     "mcp>=1.13.1",
-    "pytest>=8.4.2",
-    "pytest-asyncio>=1.1.0",
-    "pytest-cov>=6.2.1",
-    "pytest-mock>=3.14.1",
+    "numpy",
     "rich>=14.1.0",
     "sentence-transformers>=5.1.0",
     "sqlitedict>=2.1.0",
@@ -54,20 +52,27 @@ dependencies = [
     "tree-sitter-typescript>=0.23.2",
 ]
 
-classifiers = [
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
-    "Operating System :: OS Independent",
-    "Intended Audience :: Developers",
-    "Topic :: Software Development :: Libraries",
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.1.0",
+    "pytest-cov>=6.2.1",
+    "pytest-mock>=3.14.1",
 ]
 
+[project.scripts]
+code-search-mcp = "mcp_server.server:main"
+
 [project.urls]
-Homepage = "https://github.com/FarhanAliRaza/claude-context-local"
-Repository = "https://github.com/FarhanAliRaza/claude-context-local"
-Documentation = "https://github.com/FarhanAliRaza/claude-context-local#readme"
-Issues = "https://github.com/FarhanAliRaza/claude-context-local/issues"
+Homepage = "https://github.com/redacted-org/code-search"
+Repository = "https://github.com/redacted-org/code-search"
+
+[tool.setuptools]
+py-modules = ["common_utils"]
 
 [tool.setuptools.packages.find]
-include = ["claude_embedding_search*"]
+include = ["mcp_server*", "embeddings*", "chunking*", "search*", "merkle*"]
+
+[tool.setuptools.package-data]
+"mcp_server" = ["*.yaml"]
+"chunking" = ["*.yaml"]
