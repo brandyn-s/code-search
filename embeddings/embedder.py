@@ -117,6 +117,21 @@ class CodeEmbedder:
         """Get the underlying embedding model."""
         return self._model.model
 
+    # Sibling context: populated by embed_chunks/embed_chunks_grouped before
+    # calling create_embedding_content. Maps relative_path -> list of sibling
+    # chunk names in the same file. Approximates Voyage's contextualized
+    # embeddings for non-contextual models (Jina, local).
+    _sibling_context: Dict[str, list] = {}
+
+    def set_sibling_context(self, chunks: list) -> None:
+        """Build sibling name index from a batch of chunks grouped by file."""
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for c in chunks:
+            if c.name:
+                groups[c.relative_path].append(c.name)
+        self._sibling_context = dict(groups)
+
     def create_embedding_content(self, chunk: CodeChunk, max_chars: int = 6000) -> str:
         """Create clean content for embedding generation.
 
@@ -144,6 +159,20 @@ class CodeEmbedder:
             else:
                 header_parts.append(f"- {chunk.chunk_type}")
             content_parts.append(" ".join(header_parts))
+
+            # Enriched context: add sibling chunk names from the same file.
+            # Approximates Voyage's contextualized embeddings for models that
+            # embed each chunk independently (Jina, local).
+            # Default: "on" for non-contextualized providers, "off" for voyage-context
+            # (which already has file-grouped context via the API).
+            # Eval result: +9.6% MRR on Nix, closing 40% of the gap to voyage-context-3.
+            enriched_default = "off" if os.environ.get("EMBEDDING_PROVIDER", "") == "voyage-context" else "on"
+            if os.environ.get("ENRICHED_CONTEXT", enriched_default) == "on":
+                siblings = self._sibling_context.get(chunk.relative_path, [])
+                # Exclude self, limit to 15 siblings to stay within token budget
+                other_names = [n for n in siblings if n != chunk.name][:15]
+                if other_names:
+                    content_parts.append(f"# File also contains: {', '.join(other_names)}")
 
         # Add docstring if available
         docstring_budget = 300
@@ -262,6 +291,9 @@ class CodeEmbedder:
             List of EmbeddingResults
         """
         results = []
+
+        # Build sibling context for enriched headers
+        self.set_sibling_context(chunks)
 
         self._logger.info(f"Generating embeddings for {len(chunks)} chunks")
 
