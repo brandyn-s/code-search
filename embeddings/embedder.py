@@ -402,12 +402,45 @@ class CodeEmbedder:
         self._logger.info("Grouped embedding generation completed")
         return results
 
-    # LRU query embedding cache (ported from memory-search)
+    # LRU query embedding cache (in-memory) + optional SQLite persistent cache.
+    # In-memory cache: fast, dies with process. SQLite: survives restarts,
+    # eliminates cold-start latency for Jina on CPU (~5s per query → instant).
     _query_cache: OrderedDict = OrderedDict()
     _QUERY_CACHE_MAX: int = 256
+    _disk_cache_db = None
+
+    def _get_disk_cache(self):
+        """Lazy-init SQLite persistent query cache."""
+        if self._disk_cache_db is not None:
+            return self._disk_cache_db
+        try:
+            import sqlite3
+            cache_path = get_storage_dir() / "query_cache.db"
+            db = sqlite3.connect(str(cache_path), check_same_thread=False)
+            db.execute("PRAGMA journal_mode = WAL")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS query_embeddings (
+                    query_key TEXT PRIMARY KEY,
+                    embedding BLOB,
+                    provider TEXT,
+                    dim INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            db.commit()
+            self._disk_cache_db = db
+            return db
+        except Exception as e:
+            self._logger.debug(f"Disk cache unavailable: {e}")
+            return None
 
     def embed_query(self, query: str) -> np.ndarray:
-        """Generate embedding for a search query. Cached via LRU.
+        """Generate embedding for a search query. Cached via LRU + SQLite.
+
+        Cache layers:
+        1. In-memory LRU (instant, per-session)
+        2. SQLite on disk (survives restarts, eliminates Jina cold-start)
+        3. Model encode (slowest, only on cache miss)
 
         Args:
             query: Search query text
@@ -416,10 +449,30 @@ class CodeEmbedder:
             Embedding vector
         """
         cache_key = query.strip().lower()
+
+        # Layer 1: in-memory LRU
         if cache_key in self._query_cache:
             self._query_cache.move_to_end(cache_key)
             return self._query_cache[cache_key]
 
+        # Layer 2: SQLite persistent cache
+        provider = os.environ.get("EMBEDDING_PROVIDER", "")
+        db = self._get_disk_cache()
+        if db is not None:
+            try:
+                row = db.execute(
+                    "SELECT embedding, dim FROM query_embeddings WHERE query_key = ? AND provider = ?",
+                    (cache_key, provider),
+                ).fetchone()
+                if row:
+                    embedding = np.frombuffer(row[0], dtype=np.float32).copy()
+                    if embedding.shape[0] == row[1]:
+                        self._query_cache[cache_key] = embedding
+                        return embedding
+            except Exception:
+                pass
+
+        # Layer 3: model encode
         encode_kwargs = {
             "prompt_name": "InstructionRetrieval",
             "show_progress_bar": False,
@@ -431,14 +484,33 @@ class CodeEmbedder:
             [query], **encode_kwargs
         )[0]
 
+        # Store in both caches
         self._query_cache[cache_key] = embedding
         if len(self._query_cache) > self._QUERY_CACHE_MAX:
             self._query_cache.popitem(last=False)
+
+        if db is not None:
+            try:
+                db.execute(
+                    "INSERT OR REPLACE INTO query_embeddings (query_key, embedding, provider, dim) VALUES (?, ?, ?, ?)",
+                    (cache_key, embedding.tobytes(), provider, embedding.shape[0]),
+                )
+                db.commit()
+            except Exception:
+                pass
+
         return embedding
 
     def clear_query_cache(self):
-        """Clear the query embedding cache (call after reindex)."""
+        """Clear both in-memory and persistent query caches (call after reindex)."""
         self._query_cache.clear()
+        db = self._get_disk_cache()
+        if db is not None:
+            try:
+                db.execute("DELETE FROM query_embeddings")
+                db.commit()
+            except Exception:
+                pass
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the embedding model.

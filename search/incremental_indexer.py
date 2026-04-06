@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from merkle.change_detector import ChangeDetector, FileChanges
 from merkle.merkle_dag import MerkleDAG
@@ -317,6 +317,31 @@ class IncrementalIndexer:
 
             # Save index
             self.indexer.save_index()
+
+            # Post-indexing smoke test: verify vector search returns non-zero
+            # similarities. Catches silent FAISS quantizer bugs (QT_8bit_direct
+            # returned 0.0 for all queries — discovered 2026-04-05).
+            if all_embedding_results and self.indexer.index is not None:
+                try:
+                    test_embedding = all_embedding_results[0].embedding
+                    test_results = self.indexer.search(test_embedding, k=3)
+                    if test_results:
+                        top_sim = test_results[0][1]
+                        if top_sim == 0.0:
+                            logger.error(
+                                "SMOKE TEST FAILED: Vector search returns 0.0 similarity. "
+                                "FAISS quantizer may be misconfigured (QT_8bit_direct?). "
+                                "Search will fall back to BM25-only."
+                            )
+                        elif len(test_results) >= 2 and len(set(r[1] for r in test_results)) == 1:
+                            logger.warning(
+                                "SMOKE TEST WARNING: All similarities identical. "
+                                "Vector component may not be discriminating."
+                            )
+                        else:
+                            logger.info(f"Smoke test passed: top similarity={top_sim:.4f}")
+                except Exception as e:
+                    logger.warning(f"Smoke test skipped: {e}")
 
             return IncrementalIndexResult(
                 files_added=len(supported_files),

@@ -481,7 +481,7 @@ class CodeSearchServer:
             )
             text = response.content[0].text.strip()
             if not re.match(r'^[\d,\s]+$', text):
-                logger.warning(f"LLM returned non-numeric response, using baseline order")
+                logger.warning("LLM returned non-numeric response, using baseline order")
                 return results
             llm_order = []
             for num in re.findall(r'\d+', text):
@@ -793,6 +793,75 @@ class CodeSearchServer:
             )
         except Exception as e:
             logger.error(f"Error listing projects: {e}")
+            return json.dumps({"error": str(e)})
+
+    def search_all_projects(self, query: str, k: int = 3) -> str:
+        """Search across ALL indexed projects, returning results tagged by project.
+
+        Useful for cross-version comparison, monorepo-wide discovery, and
+        finding code across multiple sub-projects without manual switching.
+
+        Args:
+            query: Natural language search query
+            k: Results per project (default 3)
+
+        Returns:
+            JSON with results grouped by project name
+        """
+        try:
+            base_dir = get_storage_dir()
+            projects_dir = base_dir / "projects"
+
+            if not projects_dir.exists():
+                return json.dumps({"error": "No projects indexed", "results_by_project": {}})
+
+            all_results = {}
+            original_project = self._current_project
+
+            for project_dir in projects_dir.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                info_file = project_dir / "project_info.json"
+                if not info_file.exists():
+                    continue
+
+                try:
+                    with open(info_file) as f:
+                        info = json.load(f)
+                    project_path = info.get("project_path", "")
+                    project_name = info.get("project_name", project_dir.name)
+
+                    if not project_path:
+                        continue
+
+                    # Switch to this project and search
+                    self.switch_project(project_path)
+                    raw = self.search_code(query=query, k=k, auto_reindex=False)
+                    results = json.loads(raw)
+
+                    if results.get("results"):
+                        all_results[project_name] = {
+                            "project_path": project_path,
+                            "results": results["results"][:k],
+                        }
+                except Exception as e:
+                    logger.warning(f"Search failed for {project_dir.name}: {e}")
+                    continue
+
+            # Restore original project
+            if original_project:
+                try:
+                    self.switch_project(original_project)
+                except Exception:
+                    pass
+
+            return json.dumps({
+                "query": query,
+                "projects_searched": len(all_results),
+                "results_by_project": all_results,
+            }, indent=2)
+        except Exception as e:
+            logger.error(f"Cross-project search failed: {e}")
             return json.dumps({"error": str(e)})
 
     def switch_project(self, project_path: str) -> str:

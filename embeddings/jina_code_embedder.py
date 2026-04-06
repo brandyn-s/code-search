@@ -87,7 +87,9 @@ class JinaCodeEmbedder(EmbeddingModel):
         logger.info(f"Loading Jina code embedder: {self.model_name} on {self._device}")
 
         model_kwargs = {}
-        if self._device == "cuda" and torch.cuda.is_available():
+        # bfloat16 halves memory and speeds up inference on GPU.
+        # CPU: some support bfloat16 (AVX-512) but float32 is safer default.
+        if self._device in ("cuda", "mps"):
             model_kwargs["torch_dtype"] = torch.bfloat16
 
         st_kwargs = {

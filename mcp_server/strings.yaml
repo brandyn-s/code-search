@@ -29,6 +29,9 @@ tools:
   delete_project: |
     Permanently delete a project and all its associated data (FAISS index, SQLite metadata, embeddings, Merkle snapshots, and project_info.json). Accepts a project_name string matching either the directory prefix or the project_name field in project_info.json. Resets server state if the deleted project is currently active. Returns JSON with success status, deleted_project name, and a confirmation message. Not reversible - re-run index_directory to recreate. Use list_projects to see available project names.
 
+  search_all_projects: |
+    Search across ALL indexed projects simultaneously, returning results tagged by project name. Useful for cross-version comparison (search v1 and v2 indexes at once), monorepo-wide discovery (find auth code across all sub-projects), and release notes generation. Returns JSON with results grouped by project. Takes query (string) and optional k (results per project, default 3). Temporarily switches between projects internally — restores the original active project when done.
+
   cancel_indexing: |
     Request cancellation of the currently running index_directory background job. The job stops at the next progress checkpoint (between chunk batches), so cancellation is not instant. Returns JSON with success status and job_id. If no indexing job is active, returns an error. After cancellation, the index may be partially built - run index_directory again for a complete index.
 
