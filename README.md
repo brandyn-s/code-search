@@ -1,19 +1,100 @@
 # code-search
 
-Semantic code search MCP server for Claude Code. Hybrid BM25 + vector search with per-project embedding models.
+Semantic code search MCP server for Claude Code. Hybrid BM25 + vector search with multiple embedding providers.
 
-Originally forked from [FarhanAliRaza/claude-context-local](https://github.com/FarhanAliRaza/claude-context-local). Substantially rewritten - hybrid search, Voyage AI embeddings, per-project model switching, contextual chunk headers, config file chunkers, and multi-language AST chunking across 18+ file types.
+## Installation
+
+### 1. Clone and install dependencies
+
+```bash
+git clone https://github.com/redacted-org/code-search.git
+cd code-search
+python -m venv .venv
+
+# Linux/Mac
+.venv/bin/pip install -r requirements.txt
+
+# Windows
+.venv\Scripts\pip install -r requirements.txt
+```
+
+### 2. Choose an embedding provider
+
+| Provider | Quality (MRR) | Data leaves machine? | Cost | Setup |
+|----------|:---:|:---:|:---:|---|
+| **`voyage-context`** | **0.723** | Yes | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
+| `jina` | 0.582-0.660 | **No** | **Free** | Nothing — downloads model on first run |
+| `local` | ~0.35-0.45 | No | Free | Nothing |
+
+MRR values from eval on 102 queries across Nix, Rust, and TypeScript. See [Model Comparison](#model-comparison) for details.
+
+### 3. Configure Claude Code
+
+Add to your MCP settings (`.claude/settings.local.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "code-search": {
+      "type": "stdio",
+      "command": "/path/to/code-search/.venv/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/path/to/code-search",
+      "env": {
+        "EMBEDDING_PROVIDER": "voyage-context",
+        "VOYAGE_API_KEY": "pa-..."
+      }
+    }
+  }
+}
+```
+
+For local-only (no API key):
+```json
+{
+  "mcpServers": {
+    "code-search": {
+      "type": "stdio",
+      "command": "/path/to/code-search/.venv/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/path/to/code-search",
+      "env": {
+        "EMBEDDING_PROVIDER": "jina"
+      }
+    }
+  }
+}
+```
+
+On Windows, use `.venv\Scripts\pythonw.exe` instead of `.venv/bin/python`.
+
+### 4. Index a repo
+
+From Claude Code:
+```
+mcp__code-search__index_directory(directory_path="/path/to/your/repo")
+```
+
+Or if using the [codebase-search-plugin](https://github.com/redacted-org/codebase-search-plugin):
+```
+/index-repo /path/to/your/repo
+```
+
+### 5. Search
+
+```
+mcp__code-search__search_code(query="authentication middleware")
+```
 
 ## What It Does
 
 Natural language queries against indexed codebases. "Find authentication logic" returns actual auth functions ranked by relevance, not string matches.
 
 - **Hybrid search**: Weighted RRF fusion of FAISS vector similarity + FTS5 BM25 keyword matching
-- **Per-project models**: `voyage-code-3` for code repos, `voyage-context-3` for documentation - auto-selected from `CONTENT_MODE`
-- **Contextual chunk headers**: Prepends file path + type + name before embedding for better retrieval quality
 - **18+ file types**: Python, JS/TS/JSX/TSX, Go, Rust, Java, C/C++/C#, Nix, Svelte, Markdown, TOML, YAML, HCL
-- **Chunk overlap**: Config file chunkers (TOML/YAML/HCL) carry 100 chars from previous section to prevent boundary context loss
-- **Incremental indexing**: Merkle tree change detection - only re-embeds changed files
+- **Contextual chunk headers**: Prepends file path + type + name before embedding for better retrieval
+- **Incremental indexing**: Merkle tree change detection — only re-embeds changed files
+- **Per-project config**: Embedding provider and model stored per project. Server switches automatically.
 
 ## MCP Tools
 
@@ -28,70 +109,89 @@ Natural language queries against indexed codebases. "Find authentication logic" 
 | `list_projects` | Show all indexed projects |
 | `get_index_status` | Index stats and model info |
 
-## Embedding Providers
+## Model Comparison
 
-| Provider | Model | Dimensions | Use Case |
-|----------|-------|:---:|----------|
-| `voyage` (default) | `voyage-code-3` | 1024 | Code repos - trained on 300+ languages |
-| `voyage-context` | `voyage-context-3` | 1024 | Documentation - sees full document context per chunk |
-| `openai` | `text-embedding-3-small` | 1536 | Fallback |
-| `local` | `all-MiniLM-L6-v2` | 384 | Fully offline, no API keys |
+Measured on 102 queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo:
 
-Auto-selection: `CONTENT_MODE=code` uses `voyage-code-3`, `CONTENT_MODE=docs` uses `voyage-context-3`. Override with `EMBEDDING_PROVIDER` env var. Per-project config stored in `project_info.json` - server switches automatically on project change.
+| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) |
+|----------|-------|:---:|:---:|:---:|:---:|
+| **`voyage-context`** | voyage-context-3 | **0.723** | **0.783** | **0.861** | **0.677** |
+| `voyage` | voyage-code-3 | 0.584 | 0.742 | 0.861 | 0.642 |
+| **`jina`** | jina-code-0.5b | 0.582 | 0.742 | ~0.86 | **0.660** |
+| `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 |
 
-## Setup
+### What the numbers mean
 
-```json
-{
-  "mcpServers": {
-    "code-search": {
-      "type": "stdio",
-      "command": "C:/path/to/.venv/Scripts/pythonw.exe",
-      "args": ["-m", "mcp_server.server"],
-      "cwd": "C:/path/to/code-search",
-      "env": {
-        "EMBEDDING_PROVIDER": "voyage",
-        "VOYAGE_API_KEY": "pa-...",
-        "CONTENT_MODE": "code",
-        "CONTEXTUAL_HEADERS": "on"
-      }
-    }
-  }
-}
-```
+- **MRR** (Mean Reciprocal Rank): How often the correct file appears at position #1 in results. 0.723 means the right answer is typically the top result. 0.584 means it's typically at position #2.
+- Values measured using golden test sets with verified expected files.
 
-## Development
+### Key findings
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+- **`voyage-context-3` wins every language.** Its advantage is largest on declarative config languages (+24% on Nix) and zero on self-contained libraries.
+- **`jina-code-0.5b` matches `voyage-code-3`** everywhere and beats it on TypeScript. Runs fully on-device, free, no data exfiltration.
+- **Reranking hurts quality.** Cross-encoder reranking was tested and disabled (-30% MRR).
 
-# Run tests
-.venv/Scripts/python.exe -m pytest tests/unit/ -v
+### Indexing time (3,000 chunks)
 
-# Run MCP server
-.venv/Scripts/python.exe -m mcp_server.server
-```
+| Provider | Time | Notes |
+|----------|------|-------|
+| `voyage-context` | ~5-10 min | API rate-limited |
+| `jina` | ~50 min (CPU) | First run downloads ~1GB model. GPU: ~5 min |
+| `local` | ~2-5 min | Small model, fast |
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `EMBEDDING_PROVIDER` | `voyage-context` (if `VOYAGE_API_KEY` set), else `local` | Embedding provider |
+| `VOYAGE_API_KEY` | - | Voyage AI API key ([get one](https://dash.voyageai.com)) |
+| `LOCAL_EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-0.5b` | Model for `jina` provider |
+| `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for Jina (0.5b: 64-896) |
+| `CONTENT_MODE` | `code` | `code` or `docs` — affects search weights |
+| `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
+| `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
+| `QUANTIZATION` | `int8` | FAISS index type: `int8` (4x smaller), `float32`, `binary` (32x smaller) |
+| `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory for indexes |
 
 ## Architecture
 
 ```
 code-search/
-├── chunking/                    # Multi-language AST chunking (18+ file types)
-│   └── languages/               # Per-language chunkers (Python, Nix, TOML, YAML, HCL, etc.)
+├── chunking/                       # Multi-language AST chunking (18+ file types)
+│   └── languages/                  # Per-language chunkers
 ├── embeddings/
-│   ├── embedder.py              # CodeEmbedder - provider routing, contextual headers
-│   ├── openai_embedder.py       # OpenAI + Voyage standard API (voyage-code-3)
-│   └── voyage_context_embedder.py  # Voyage contextualized API (voyage-context-3)
+│   ├── embedder.py                 # Provider routing, contextual headers
+│   ├── voyage_context_embedder.py  # Voyage contextualized API
+│   ├── jina_code_embedder.py       # Jina local code embeddings
+│   ├── openai_embedder.py          # OpenAI + Voyage standard API
+│   └── sentence_transformer.py     # Local sentence-transformers
 ├── search/
-│   ├── indexer.py               # FAISS index + SQLite metadata
-│   ├── searcher.py              # Hybrid BM25+vector search with RRF fusion
-│   ├── incremental_indexer.py   # Merkle tree change detection
-│   └── reranker.py              # Cross-encoder reranker (enabled by default)
+│   ├── indexer.py                  # FAISS index + SQLite metadata
+│   ├── searcher.py                 # Hybrid BM25+vector with RRF fusion
+│   └── incremental_indexer.py      # Merkle tree change detection
 ├── mcp_server/
-│   └── code_search_server.py    # MCP server with per-project model switching
+│   └── code_search_server.py       # MCP server, per-project switching
+├── benchmarks/
+│   ├── golden_nix.json             # Eval: 44 Nix queries
+│   ├── golden_rust_assetman.json   # Eval: 20 Rust service queries
+│   ├── golden_rust_libnet.json     # Eval: 18 Rust library queries
+│   ├── golden_typescript_mithrandir.json  # Eval: 20 TypeScript queries
+│   └── run_multilang_eval.py       # Cross-language A/B eval harness
 └── tests/
-    └── unit/                    # 34+ unit tests
+    └── unit/                       # 34+ unit tests
+```
+
+## Development
+
+```bash
+# Run all tests
+.venv/Scripts/python.exe -m pytest tests/unit/ -v
+
+# Run the multi-language eval
+.venv/Scripts/python.exe benchmarks/run_multilang_eval.py --lang rust-assetman
+
+# Run full eval (all languages, ~2 hours with Jina CPU)
+.venv/Scripts/python.exe benchmarks/run_multilang_eval.py
 ```
 
 ## License
