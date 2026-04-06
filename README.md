@@ -117,7 +117,7 @@ Measured on 102 queries across 4 language sub-projects from a production Rust/Ni
 |----------|-------|:---:|:---:|:---:|:---:|
 | **`voyage-context`** | voyage-context-3 | **0.723** | **0.783** | **0.861** | **0.677** |
 | `voyage` | voyage-code-3 | 0.584 | 0.742 | 0.861 | 0.642 |
-| **`jina`** | jina-code-0.5b | 0.582 | 0.742 | ~0.86 | **0.660** |
+| **`jina`** (enriched) | jina-code-0.5b | **0.638** | 0.742 | ~0.86 | **0.660** |
 | `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 |
 
 ### What the numbers mean
@@ -128,7 +128,7 @@ Measured on 102 queries across 4 language sub-projects from a production Rust/Ni
 ### Key findings
 
 - **`voyage-context-3` wins every language.** Its advantage is largest on declarative config languages (+24% on Nix) and zero on self-contained libraries.
-- **`jina-code-0.5b` matches `voyage-code-3`** everywhere and beats it on TypeScript. Runs fully on-device, free, no data exfiltration.
+- **`jina-code-0.5b` with enriched context beats `voyage-code-3`** on Nix (+9.2%) and TypeScript (+2.8%). Enriched headers (sibling chunk names) are on by default. Runs fully on-device, free, no data exfiltration.
 - **Reranking hurts quality.** Cross-encoder reranking was tested and disabled (-30% MRR).
 
 ### Indexing time (3,000 chunks)
@@ -149,6 +149,7 @@ Measured on 102 queries across 4 language sub-projects from a production Rust/Ni
 | `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for Jina (0.5b: 64-896) |
 | `CONTENT_MODE` | `code` | `code` or `docs` — affects search weights |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
+| `ENRICHED_CONTEXT` | `on` (jina/local), `off` (voyage-context) | Add sibling chunk names to headers (+9.6% MRR on Nix) |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
 | `QUANTIZATION` | `int8` | FAISS index type: `int8` (4x smaller), `float32`, `binary` (32x smaller) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory for indexes |
