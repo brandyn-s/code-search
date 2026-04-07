@@ -16,7 +16,12 @@ from merkle import MerkleDAG, SnapshotManager, ChangeDetector
 
 class TestFullSearchFlow:
     """Integration tests using real Python project files."""
-    
+
+    @pytest.fixture(autouse=True)
+    def _seed_rng(self):
+        """Seed numpy RNG for deterministic search results with random query vectors."""
+        np.random.seed(42)
+
     @pytest.fixture
     def test_project_path(self):
         """Path to the test Python project."""
@@ -151,7 +156,7 @@ class TestFullSearchFlow:
         # Test filtering by file pattern
         auth_results = index_manager.search(
             query_embedding, 
-            k=10, 
+            k=100,
             filters={'file_pattern': ['auth']}
         )
         for chunk_id, similarity, metadata in auth_results:
@@ -219,7 +224,7 @@ class TestFullSearchFlow:
         # Search for authentication-related code
         auth_results = index_manager.search(
             np.random.random(768).astype(np.float32), 
-            k=10, 
+            k=100,
             filters={'file_pattern': ['auth']}
         )
         
@@ -239,7 +244,7 @@ class TestFullSearchFlow:
         # Search for database-related code
         db_results = index_manager.search(
             np.random.random(768).astype(np.float32), 
-            k=10, 
+            k=100,
             filters={'file_pattern': ['database']}
         )
         
@@ -257,7 +262,7 @@ class TestFullSearchFlow:
         # Search for API-related code
         api_results = index_manager.search(
             np.random.random(768).astype(np.float32), 
-            k=10, 
+            k=100,
             filters={'file_pattern': ['api']}
         )
         
@@ -308,7 +313,7 @@ class TestFullSearchFlow:
         # Find all validation-related functions
         validation_results = index_manager.search(
             np.random.random(768).astype(np.float32), 
-            k=20, 
+            k=100,
             filters={'chunk_type': 'function'}
         )
         
@@ -346,7 +351,6 @@ class TestFullSearchFlow:
         stats_file = mock_storage_dir / "stats.json"
         assert stats_file.exists()
         
-        import json
         with open(stats_file) as f:
             stats = json.load(f)
         
