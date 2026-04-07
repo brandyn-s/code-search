@@ -27,7 +27,7 @@ from search.searcher import IntelligentSearcher
 logger = logging.getLogger(__name__)
 
 _PIPELINE_COMPONENTS = [
-    "chunker_version=2",
+    "chunker_version=3",  # v3: cAST-style merge of small adjacent chunks
     "overlap=50",
     "contextual_headers=on",
 ]

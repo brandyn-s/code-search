@@ -19,7 +19,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 
 - **Embedding providers**: Voyage AI (`voyage-context-3` default — +24% MRR over `voyage-code-3` in eval), `voyage-code-3` legacy, OpenAI, local sentence-transformers
 - **Search**: Weighted RRF fusion of FAISS vector + FTS5 BM25. Content mode boosts (code: function/method 1.3x, docs: section 1.3x)
-- **Chunking**: Tree-sitter AST for 12+ languages, regex-based for TOML/YAML/HCL/Markdown/Nix
+- **Chunking**: Tree-sitter AST for 12+ languages, regex-based for TOML/YAML/HCL/Markdown/Nix. Post-processing merge step (cAST-style) greedily combines small adjacent chunks to 1500 NWS char budget, capturing gap code (imports, constants) between semantic units.
 - **Per-project config**: `project_info.json` stores embedding provider, model, content mode. Server creates correct embedder on project switch.
 - **Contextual headers**: `# From <path> - <type> <name>` prepended before embedding (controlled by `CONTEXTUAL_HEADERS=on`)
 

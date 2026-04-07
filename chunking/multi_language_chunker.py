@@ -55,23 +55,58 @@ class MultiLanguageChunker:
         return suffix in self.SUPPORTED_EXTENSIONS
     
     def chunk_file(self, file_path: str) -> List[CodeChunk]:
-        """Chunk a file into semantic units.
-        
+        """Chunk a file into semantic units, then merge small adjacent chunks.
+
+        Uses tree-sitter AST chunking to extract semantic units (functions,
+        classes, etc.), then applies a greedy merge pass to combine small
+        adjacent chunks up to a NWS character budget. This captures gap code
+        (imports, constants, comments) between semantic units and produces
+        chunks large enough for effective embedding.
+
         Args:
             file_path: Path to the file
-            
+
         Returns:
             List of CodeChunk objects
         """
+        from chunking.chunk_merging import merge_file_chunks
+
         if not self.is_supported(file_path):
             logger.debug(f"File type not supported: {file_path}")
             return []
 
-        # Use tree-sitter for all  languages 
         try:
             tree_chunks = self.tree_sitter_chunker.chunk_file(file_path)
-            # Convert TreeSitterChunk to CodeChunk
-            return self._convert_tree_chunks(tree_chunks, file_path)
+            code_chunks = self._convert_tree_chunks(tree_chunks, file_path)
+
+            # Read source for merge step
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    source_code = f.read()
+            except Exception:
+                return code_chunks  # fall back to unmerged
+
+            # Build path metadata for merged chunks
+            path = Path(file_path)
+            folder_parts = []
+            if self.root_path:
+                try:
+                    rel_path = path.relative_to(self.root_path)
+                    folder_parts = list(rel_path.parent.parts)
+                except ValueError:
+                    folder_parts = [path.parent.name] if path.parent.name else []
+            else:
+                folder_parts = [path.parent.name] if path.parent.name else []
+
+            relative_path = str(path.relative_to(self.root_path)) if self.root_path else str(path)
+
+            return merge_file_chunks(
+                chunks=code_chunks,
+                source_code=source_code,
+                file_path=str(path),
+                relative_path=relative_path,
+                folder_structure=folder_parts,
+            )
         except Exception as e:
             logger.error(f"Failed to chunk file {file_path}: {e}")
             return []

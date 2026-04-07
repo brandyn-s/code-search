@@ -41,33 +41,32 @@ class TestMultiLanguageChunker:
         """Test chunking Python file."""
         file_path = test_data_dir / "example.py"
         chunks = chunker.chunk_file(str(file_path))
-        
+
         assert len(chunks) > 0
-        # Should find the class and functions
+        # Should find the class and functions (may be merged into fewer chunks)
         chunk_types = {chunk.chunk_type for chunk in chunks}
-        assert "function" in chunk_types or "method" in chunk_types
-        assert "class" in chunk_types
+        assert any(t in chunk_types for t in ["function", "method", "class", "merged"])
     
     def test_chunk_javascript_file(self, chunker, test_data_dir):
         """Test chunking JavaScript file."""
         file_path = test_data_dir / "example.js"
         chunks = chunker.chunk_file(str(file_path))
-        
+
         assert len(chunks) > 0
-        # Should find functions and class
-        chunk_names = {chunk.name for chunk in chunks if chunk.name}
-        assert "calculateSum" in chunk_names
-        assert "Calculator" in chunk_names
+        # Should find functions and class (may be merged)
+        all_names = ' '.join(c.name or '' for c in chunks)
+        assert "calculateSum" in all_names
+        assert "Calculator" in all_names
     
     def test_chunk_typescript_file(self, chunker, test_data_dir):
         """Test chunking TypeScript file."""
         file_path = test_data_dir / "example.ts"
         chunks = chunker.chunk_file(str(file_path))
-        
+
         assert len(chunks) > 0
-        # Should find interface, class, and functions
+        # Should find interface, class, and functions (may be merged)
         chunk_types = {chunk.chunk_type for chunk in chunks}
-        assert any(t in chunk_types for t in ["class", "interface", "function"])
+        assert any(t in chunk_types for t in ["class", "interface", "function", "merged"])
     
     def test_chunk_jsx_file(self, chunker, test_data_dir):
         """Test chunking JSX file."""
@@ -83,11 +82,11 @@ class TestMultiLanguageChunker:
         """Test chunking TSX file."""
         file_path = test_data_dir / "Component.tsx"
         chunks = chunker.chunk_file(str(file_path))
-        
+
         assert len(chunks) > 0
-        # Should find TypeScript React components
-        chunk_names = {chunk.name for chunk in chunks if chunk.name}
-        assert any(name in chunk_names for name in ["TypedCounter", "UserList"])
+        # Should find TypeScript React components (may be merged)
+        all_names = ' '.join(c.name or '' for c in chunks)
+        assert any(name in all_names for name in ["TypedCounter", "UserList"])
     
     def test_chunk_svelte_file(self, chunker, test_data_dir):
         """Test chunking Svelte file."""
@@ -103,30 +102,29 @@ class TestMultiLanguageChunker:
         """Test chunking Java file."""
         file_path = test_data_dir / "Calculator.java"
         chunks = chunker.chunk_file(str(file_path))
-        
+
         assert len(chunks) > 0
-        # Should find class, methods, interface, and enum
-        chunk_names = {chunk.name for chunk in chunks if chunk.name}
+        # Should find class, methods, interface, and enum (may be merged)
+        all_names = ' '.join(c.name or '' for c in chunks)
         chunk_types = {chunk.chunk_type for chunk in chunks}
-        
-        assert "Calculator" in chunk_names
-        assert "MathOperations" in chunk_names
-        assert "Operation" in chunk_names
-        assert any(t in chunk_types for t in ["class", "interface", "enum"])
+
+        assert "Calculator" in all_names
+        assert "MathOperations" in all_names
+        assert "Operation" in all_names
+        assert any(t in chunk_types for t in ["class", "interface", "enum", "merged"])
     
     def test_chunk_go_file(self, chunker, test_data_dir):
         """Test chunking Go file."""
         file_path = test_data_dir / "calculator.go"
         chunks = chunker.chunk_file(str(file_path))
-        
+
         assert len(chunks) > 0
-        # Should find functions, methods, types, and interfaces
-        chunk_names = {chunk.name for chunk in chunks if chunk.name}
+        # Should find functions, methods, types, and interfaces (may be merged)
+        all_names = ' '.join(c.name or '' for c in chunks)
         chunk_types = {chunk.chunk_type for chunk in chunks}
-        
-        assert any(name in chunk_names for name in ["Calculator", "CalculateSum", "NewCalculator"])
-        assert len(chunk_names) > 0
-        assert any(t in chunk_types for t in ["function", "method", "type", "interface"]) or len(chunks) > 0
+
+        assert any(name in all_names for name in ["Calculator", "CalculateSum", "NewCalculator"])
+        assert any(t in chunk_types for t in ["function", "method", "type", "interface", "merged"])
     
     def test_chunk_c_file(self, chunker, test_data_dir):
         """Test chunking C file."""
@@ -171,11 +169,11 @@ class TestMultiLanguageChunker:
         """Test chunking Rust file."""
         file_path = test_data_dir / "calculator.rs"
         chunks = chunker.chunk_file(str(file_path))
-        
+
         assert len(chunks) > 0
-        # Should find functions, structs, traits, enums, impls, macros
-        chunk_names = {chunk.name for chunk in chunks if chunk.name}
+        # Should find functions, structs, traits, enums, impls, macros (may be merged)
+        all_names = ' '.join(c.name or '' for c in chunks)
         chunk_types = {chunk.chunk_type for chunk in chunks}
-        
-        assert any(name in chunk_names for name in ["Calculator", "calculate_sum", "MathOperations", "Operation", "Point"])
-        assert any(t in chunk_types for t in ["function", "struct", "trait", "enum", "impl", "macro"])
+
+        assert any(name in all_names for name in ["Calculator", "calculate_sum", "MathOperations", "Operation", "Point"])
+        assert any(t in chunk_types for t in ["function", "struct", "trait", "enum", "impl", "macro", "merged"])
