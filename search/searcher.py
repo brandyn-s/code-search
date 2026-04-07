@@ -271,7 +271,6 @@ class IntelligentSearcher:
             context_depth: Include related chunks
             filters: Optional filters
         """
-        import os
 
         mode = search_mode or os.environ.get("SEARCH_MODE", "hybrid")
 
@@ -342,7 +341,6 @@ class IntelligentSearcher:
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[SearchResult]:
         """Hybrid BM25 + vector search with weighted RRF fusion and content mode boosting."""
-        import os
 
         fusion_k = int(os.environ.get("FUSION_K", "20"))  # k=20 wins over k=60 (sharper rank fusion)
         candidate_k = 50  # Retrieve 50 from each source
@@ -364,12 +362,13 @@ class IntelligentSearcher:
         vector_raw = self.index_manager.search(query_embedding, candidate_k, filters)
         vector_pairs = [(chunk_id, sim) for chunk_id, sim, _meta in vector_raw]
 
-        # BM25 search (with optional query expansion)
-        bm25_query = (
-            expand_code_query(query)
-            if os.environ.get("QUERY_EXPANSION", "on") == "on"
-            else query
-        )
+        # BM25 search: LLM rewrite (if enabled) then static expansion
+        bm25_query = query
+        if os.environ.get("BM25_REWRITE", "off") == "on":
+            from search.query_rewriter import rewrite_query_for_bm25
+            bm25_query = rewrite_query_for_bm25(query)
+        if os.environ.get("QUERY_EXPANSION", "on") == "on":
+            bm25_query = expand_code_query(bm25_query)
         bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k)
         bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
 
