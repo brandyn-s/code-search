@@ -240,6 +240,25 @@ class CodeIndexManager:
             content = result.metadata.get("full_content", result.metadata.get("content_preview", ""))
             file_path = result.metadata.get("relative_path", result.metadata.get("file_path", ""))
             name = result.metadata.get("name", "") or ""
+
+            # Contextual BM25: prepend metadata header so BM25 can match on
+            # file path, type, and name even when the code body doesn't contain
+            # the query terms. Evidence: +0.128 MRR on TypeScript when combined
+            # with query rewriting (A/B eval 2026-04-07, 102 queries).
+            chunk_type = result.metadata.get("chunk_type", "")
+            parent = result.metadata.get("parent_name", "")
+            header_parts = []
+            if file_path:
+                header_parts.append(f"# From {file_path}")
+            if parent and name:
+                header_parts.append(f"- {chunk_type} {parent}.{name}")
+            elif name:
+                header_parts.append(f"- {chunk_type} {name}")
+            elif chunk_type:
+                header_parts.append(f"- {chunk_type}")
+            if header_parts:
+                content = " ".join(header_parts) + "\n" + content
+
             self._fts_conn.execute(
                 "INSERT INTO chunk_fts (chunk_id, content, file_path, name) VALUES (?, ?, ?, ?)",
                 (result.chunk_id, content, file_path, name),

@@ -30,6 +30,7 @@ _PIPELINE_COMPONENTS = [
     "chunker_version=3",  # v3: cAST-style merge of small adjacent chunks
     "overlap=50",
     "contextual_headers=on",
+    "contextual_bm25=on",  # prepend metadata headers to FTS5 (+0.128 MRR TS combined w/ rewrite)
 ]
 
 
