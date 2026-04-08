@@ -409,12 +409,17 @@ class IntelligentSearcher:
             if boosts:
                 result.similarity_score *= boosts.get(result.chunk_type, 1.0)
 
-            # Name-match boost (ported from _rank_results)
+            # Name-match boost (amplified 2x — A/B eval: +0.041 avg MRR)
             name_boost = self._calculate_name_boost(result.name, query, query_tokens)
+            if name_boost > 1.0:
+                name_boost = 1.0 + (name_boost - 1.0) * 2.0
             result.similarity_score *= name_boost
 
-            # Path relevance boost
+            # Path relevance boost (amplified 3x — fixes Nix +0.036 MRR
+            # where correct files are retrieved but ranked too low)
             path_boost = self._calculate_path_boost(result.relative_path, query_tokens)
+            if path_boost > 1.0:
+                path_boost = 1.0 + (path_boost - 1.0) * 3.0
             result.similarity_score *= path_boost
 
         # Optional cross-encoder reranking
