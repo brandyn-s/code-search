@@ -316,23 +316,21 @@ class TestFullSearchFlow:
                     found_exceptions.add(expected)
         assert len(found_exceptions) >= 2, f"Should find multiple exception classes, found: {found_exceptions}"
         
-        # Find all validation-related functions
+        # Find all validation-related functions (no type filter — merged chunks
+        # containing functions have type 'merged', not 'function')
         validation_results = index_manager.search(
-            np.random.random(768).astype(np.float32), 
+            np.random.random(768).astype(np.float32),
             k=100,
-            filters={'chunk_type': 'function'}
         )
-        
-        validation_functions = []
-        for chunk_id, similarity, metadata in validation_results:
-            name = metadata.get('name', '')
-            if 'validate' in name.lower() or 'check' in name.lower():
-                validation_functions.append(name)
-        
-        # Should find validation functions from different modules
+
+        # Use substring matching for merged chunk names ("validate_email + check_password")
         expected_validators = {'validate_email', 'validate_string', 'validate_password', 'check_password'}
-        found_validators = set(validation_functions).intersection(expected_validators)
-        # Relax assertion - with random embeddings, finding 1 validator is acceptable
+        found_validators = set()
+        for _, _, metadata in validation_results:
+            name = metadata.get('name', '') or ''
+            for expected in expected_validators:
+                if expected in name:
+                    found_validators.add(expected)
         assert len(found_validators) >= 1, f"Should find at least one validation function, found: {found_validators}"
     
     def test_project_statistics_and_insights(self, test_project_path, mock_storage_dir):
