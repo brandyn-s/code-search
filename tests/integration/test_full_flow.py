@@ -97,10 +97,15 @@ class TestFullSearchFlow:
         chunk_files = {chunk.relative_path for chunk in all_chunks}
         assert len(chunk_files) >= 5, f"Should chunk multiple files, got {chunk_files}"
         
-        # Verify some expected chunks exist
+        # Verify some expected chunks exist (merged chunks have names like "A + B")
         chunk_names = {chunk.name for chunk in all_chunks if chunk.name}
         expected_names = {'User', 'authenticate_user', 'DatabaseConnection', 'UserHandler', 'validate_email'}
-        found_names = chunk_names.intersection(expected_names)
+        found_names = set()
+        for expected in expected_names:
+            for cn in chunk_names:
+                if expected in cn:
+                    found_names.add(expected)
+                    break
         assert len(found_names) >= 3, f"Should find expected classes/functions, found {found_names}"
     
     def test_real_project_indexing_and_search(self, test_project_path, mock_storage_dir):
@@ -293,21 +298,22 @@ class TestFullSearchFlow:
         index_manager.add_embeddings(embeddings)
         
         # Find all exception classes across files (large k to avoid flaky results
-        # from random query vectors missing some classes in nearest-neighbor search)
+        # from random query vectors missing some classes in nearest-neighbor search).
+        # Include 'merged' type since chunk merging can combine class chunks.
         exception_results = index_manager.search(
             np.random.random(768).astype(np.float32),
             k=100,
-            filters={'chunk_type': 'class'}
         )
-        
-        exception_names = []
-        for chunk_id, similarity, metadata in exception_results:
-            if 'Error' in metadata.get('name', ''):
-                exception_names.append(metadata['name'])
-        
-        # Should find various error classes from different files
+
+        # Check for expected exceptions using substring matching since
+        # merged chunks have names like "AuthenticationError + DatabaseError"
         expected_exceptions = {'AuthenticationError', 'DatabaseError', 'HTTPError', 'ValidationError'}
-        found_exceptions = set(exception_names).intersection(expected_exceptions)
+        found_exceptions = set()
+        for _, _, metadata in exception_results:
+            name = metadata.get('name', '') or ''
+            for expected in expected_exceptions:
+                if expected in name:
+                    found_exceptions.add(expected)
         assert len(found_exceptions) >= 2, f"Should find multiple exception classes, found: {found_exceptions}"
         
         # Find all validation-related functions
