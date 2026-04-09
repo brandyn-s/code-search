@@ -22,11 +22,11 @@ python -m venv .venv
 
 | Provider | Quality (MRR) | Data leaves machine? | Cost | Setup |
 |----------|:---:|:---:|:---:|---|
-| **`voyage-context`** | **0.723** | Yes | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
-| `jina` | 0.582-0.660 | **No** | **Free** | Nothing — downloads model on first run |
+| **`voyage`** | **0.828** | Yes | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
+| `jina` | 0.638-0.742 | **No** | **Free** | Nothing — downloads model on first run |
 | `local` | ~0.35-0.45 | No | Free | Nothing |
 
-MRR values from eval on 102 queries across Nix, Rust, and TypeScript. See [Model Comparison](#model-comparison) for details.
+MRR = weighted avg across 102 queries (Nix, Rust, TypeScript). `voyage` uses voyage-4-large. See [Model Comparison](#model-comparison).
 
 ### 3. Configure Claude Code
 
@@ -41,7 +41,6 @@ Add to your MCP settings (`.claude/settings.local.json` or project `.mcp.json`):
       "args": ["-m", "mcp_server.server"],
       "cwd": "/path/to/code-search",
       "env": {
-        "EMBEDDING_PROVIDER": "voyage-context",
         "VOYAGE_API_KEY": "pa-..."
       }
     }
