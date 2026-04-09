@@ -113,29 +113,30 @@ Natural language queries against indexed codebases. "Find authentication logic" 
 
 Measured on 102 queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo:
 
-| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) |
-|----------|-------|:---:|:---:|:---:|:---:|
-| **`voyage-context`** | voyage-context-3 | **0.723** | **0.783** | **0.861** | **0.677** |
-| `voyage` | voyage-code-3 | 0.584 | 0.742 | 0.861 | 0.642 |
-| **`jina`** (enriched) | jina-code-0.5b | **0.638** | 0.742 | ~0.86 | **0.660** |
-| `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 |
+| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) | Avg |
+|----------|-------|:---:|:---:|:---:|:---:|:---:|
+| **`voyage`** | **voyage-4-large** | **0.826** | **0.917** | 0.861 | **0.683** | **0.828** |
+| `voyage-context` | voyage-context-3 | 0.792 | 0.783 | **0.861** | 0.662 | 0.775 |
+| `voyage` | voyage-4 | 0.803 | 0.892 | 0.861 | 0.650 | 0.806 |
+| **`jina`** (enriched) | jina-code-0.5b | 0.638 | 0.742 | ~0.86 | 0.660 | — |
+| `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 | — |
 
 ### What the numbers mean
 
-- **MRR** (Mean Reciprocal Rank): How often the correct file appears at position #1 in results. 0.723 means the right answer is typically the top result. 0.584 means it's typically at position #2.
+- **MRR** (Mean Reciprocal Rank): How often the correct file appears at position #1 in results. 0.826 means the right answer is typically the top result. 0.662 means it's typically at position #2.
 - Values measured using golden test sets with verified expected files.
 
 ### Key findings
 
-- **`voyage-context-3` wins every language.** Its advantage is largest on declarative config languages (+24% on Nix) and zero on self-contained libraries.
-- **`jina-code-0.5b` with enriched context beats `voyage-code-3`** on Nix (+9.2%) and TypeScript (+2.8%). Enriched headers (sibling chunk names) are on by default. Runs fully on-device, free, no data exfiltration.
+- **`voyage-4-large` wins 3 of 4 languages** (+0.053 weighted avg MRR over voyage-context-3). Uses MoE architecture via standard `/embeddings` endpoint.
+- **`jina-code-0.5b` with enriched context** runs fully on-device with no data exfiltration. Good fallback for air-gapped environments.
 - **Reranking hurts quality.** Cross-encoder reranking was tested and disabled (-30% MRR).
 
 ### Indexing time (3,000 chunks)
 
 | Provider | Time | Notes |
 |----------|------|-------|
-| `voyage-context` | ~5-10 min | API rate-limited |
+| `voyage` (voyage-4-large) | ~5-10 min | API rate-limited |
 | `jina` | ~50 min (CPU) | First run downloads ~1GB model. GPU: ~5 min |
 | `local` | ~2-5 min | Small model, fast |
 
@@ -143,7 +144,7 @@ Measured on 102 queries across 4 language sub-projects from a production Rust/Ni
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `EMBEDDING_PROVIDER` | `voyage-context` (if `VOYAGE_API_KEY` set), else `local` | Embedding provider |
+| `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set), else `local` | Embedding provider (voyage uses voyage-4-large) |
 | `VOYAGE_API_KEY` | - | Voyage AI API key ([get one](https://dash.voyageai.com)) |
 | `LOCAL_EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-0.5b` | Model for `jina` provider |
 | `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for Jina (0.5b: 64-896) |
