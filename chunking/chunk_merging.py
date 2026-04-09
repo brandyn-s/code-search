@@ -235,3 +235,84 @@ class _Segment:
         self.is_gap = is_gap
         self.original_chunk = original_chunk
         self.nws = nws_count(content)
+
+
+# ---------------------------------------------------------------------------
+# Co-located tests — run with: pytest chunking/chunk_merging.py -v
+# ---------------------------------------------------------------------------
+if __name__ == '__main__':
+    import pytest
+    pytest.main([__file__, '-v'])
+
+
+def _make_chunk(name, chunk_type, start, end, content='x = 1'):
+    """Test helper: create a minimal CodeChunk."""
+    return CodeChunk(
+        content=content,
+        chunk_type=chunk_type,
+        start_line=start,
+        end_line=end,
+        file_path='/test.py',
+        relative_path='test.py',
+        folder_structure=[],
+        name=name,
+    )
+
+
+class TestMergeFileChunks:
+    """Tests for merge_file_chunks output contract.
+
+    These verify the naming and typing conventions that downstream code
+    (integration tests, search filters) depends on.
+    """
+
+    def test_merged_name_uses_plus_separator(self):
+        """When two named chunks merge, name = 'A + B'."""
+        source = 'def foo():\n    pass\ndef bar():\n    pass'
+        chunks = [
+            _make_chunk('foo', 'function', 1, 2, 'def foo():\n    pass'),
+            _make_chunk('bar', 'function', 3, 4, 'def bar():\n    pass'),
+        ]
+        result = merge_file_chunks(chunks, source, '/t.py', 't.py', [])
+        merged = [c for c in result if c.name and ' + ' in c.name]
+        assert len(merged) == 1
+        assert merged[0].name == 'foo + bar'
+
+    def test_merged_mixed_types_become_merged(self):
+        """When a function and class merge, chunk_type = 'merged'."""
+        source = 'class A:\n    pass\ndef b():\n    pass'
+        chunks = [
+            _make_chunk('A', 'class', 1, 2, 'class A:\n    pass'),
+            _make_chunk('b', 'function', 3, 4, 'def b():\n    pass'),
+        ]
+        result = merge_file_chunks(chunks, source, '/t.py', 't.py', [])
+        merged = [c for c in result if c.name and ' + ' in c.name]
+        assert len(merged) == 1
+        assert merged[0].chunk_type == 'merged'
+
+    def test_single_chunk_preserves_original(self):
+        """A single large chunk is returned unchanged (no merge)."""
+        content = 'class Big:\n' + '    x = 1\n' * 100
+        source = content
+        chunks = [_make_chunk('Big', 'class', 1, 101, content)]
+        result = merge_file_chunks(chunks, source, '/t.py', 't.py', [])
+        assert len(result) == 1
+        assert result[0].name == 'Big'
+        assert result[0].chunk_type == 'class'
+
+    def test_same_type_merge_keeps_type(self):
+        """When two functions merge, chunk_type stays 'function'."""
+        source = 'def a():\n    pass\ndef b():\n    pass'
+        chunks = [
+            _make_chunk('a', 'function', 1, 2, 'def a():\n    pass'),
+            _make_chunk('b', 'function', 3, 4, 'def b():\n    pass'),
+        ]
+        result = merge_file_chunks(chunks, source, '/t.py', 't.py', [])
+        merged = [c for c in result if c.name and ' + ' in c.name]
+        assert len(merged) == 1
+        assert merged[0].chunk_type == 'function'
+
+    def test_nws_count(self):
+        assert nws_count('  hello  world  ') == 10
+        assert nws_count('') == 0
+        assert nws_count('abc') == 3
