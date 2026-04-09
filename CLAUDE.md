@@ -17,7 +17,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 
 ## Architecture
 
-- **Embedding providers**: Voyage AI (`voyage-context-3` default — +24% MRR over `voyage-code-3` in eval), `voyage-code-3` legacy, OpenAI, local sentence-transformers
+- **Embedding providers**: Voyage AI (`voyage-4-large` default — +0.053 weighted avg MRR over `voyage-context-3` across 4 langs), `voyage-context-3` legacy, OpenAI, local sentence-transformers
 - **Search**: Weighted RRF fusion of FAISS vector + FTS5 BM25. Content mode boosts (code: function/method 1.3x, docs: section 1.3x)
 - **Chunking**: Tree-sitter AST for 12+ languages, regex-based for TOML/YAML/HCL/Markdown/Nix. Post-processing merge step (cAST-style) greedily combines small adjacent chunks to 1500 NWS char budget, capturing gap code (imports, constants) between semantic units.
 - **Per-project config**: `project_info.json` stores embedding provider, model, content mode. Server creates correct embedder on project switch.
@@ -39,7 +39,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `EMBEDDING_PROVIDER` | `voyage-context` (if `VOYAGE_API_KEY` set) | Provider: `voyage-context` (recommended), `voyage`, `openai`, `jina` (local, code-optimized), `local` |
+| `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set) | Provider: `voyage` (recommended, uses voyage-4-large), `voyage-context` (legacy contextualized), `openai`, `jina` (local, code-optimized), `local` |
 | `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for jina provider (0.5b: 64-896, 1.5b: 128-1536) |
 | `VOYAGE_API_KEY` | - | Voyage AI API key |
 | `CONTENT_MODE` | `code` | `code` or `docs` - affects search weights and provider auto-select |
@@ -54,10 +54,10 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 
 code-search uses [Voyage AI](https://voyageai.com) embedding models to convert code chunks into vectors for semantic similarity search. When you search "where is the firewall config?", your query and every indexed chunk are compared as vectors — chunks whose vectors point in similar directions are returned as results.
 
-**Model**: `voyage-context-3` (contextualized chunk embeddings). Chunks from the same source file are sent to Voyage together, so each chunk is embedded with awareness of its sibling chunks. A line like `allowedTCPPorts = [ 80 443 ]` gets embedded knowing it's inside a NixOS firewall block — not just a random list. This gave +24% MRR improvement over the code-specific `voyage-code-3` model in A/B eval (n=44 queries).
+**Model**: `voyage-4-large` (MoE architecture, SOTA retrieval). Uses the standard `/v1/embeddings` endpoint. Eval (n=102 queries, 4 languages) showed +0.053 weighted avg MRR over `voyage-context-3`. Wins on Nix (+0.034), Rust service (+0.134), TypeScript (+0.021), ties on Rust lib. The `voyage-context` provider (contextualized embeddings via `/v1/contextualizedembeddings`) is preserved as legacy.
 
 **Search pipeline**:
-1. **Indexing**: Tree-sitter parses code into AST chunks → contextual headers prepended → chunks grouped by file → sent to Voyage `/v1/contextualizedembeddings` → vectors stored in FAISS (int8 quantized, 4x smaller)
+1. **Indexing**: Tree-sitter parses code into AST chunks → contextual headers prepended → sent to Voyage `/v1/embeddings` → vectors stored in FAISS (int8 quantized, 4x smaller)
 2. **Search**: Query embedded via Voyage → FAISS cosine similarity → BM25 keyword search → Weighted RRF fusion (50/50) → chunk-type boosts → results
 
 **Optimizations**:
@@ -66,15 +66,17 @@ code-search uses [Voyage AI](https://voyageai.com) embedding models to convert c
 - **Token pre-count**: Batches split by estimated token budget before API calls, preventing 400 errors
 - **Batch API** (opt-in `VOYAGE_BATCH_API=on`): 33% cheaper async embedding for full reindexes (1000+ chunks)
 
-**Multi-language eval results** (n=102, 4 language sub-projects):
+**Multi-language eval results** (n=102, 4 language sub-projects, MRR):
 
-| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) |
-|----------|-------|-----------|----------------|----------------|------------------|
-| `voyage-context` | voyage-context-3 | **0.723** | **0.783** | **0.861** | **0.677** |
-| `voyage` | voyage-code-3 | 0.584 | 0.742 | 0.861 | 0.642 |
-| `jina` (enriched) | jina-code-0.5b | **0.638** | 0.742 | ~0.86 | 0.660 |
+| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) | Avg |
+|----------|-------|-----------|----------------|----------------|------------------|-----|
+| `voyage` | **voyage-4-large** | **0.826** | **0.917** | 0.861 | **0.683** | **0.828** |
+| `voyage-context` | voyage-context-3 | 0.792 | 0.783 | **0.861** | 0.662 | 0.775 |
+| `voyage` | voyage-4 | 0.803 | 0.892 | 0.861 | 0.650 | 0.806 |
+| `voyage` | voyage-4-lite | 0.785 | 0.892 | 0.880 | 0.650 | 0.798 |
+| `jina` (enriched) | jina-code-0.5b | 0.638 | 0.742 | ~0.86 | 0.660 | — |
 
-Key: voyage-context-3 wins all languages (+24% Nix, +5.5% Rust/TS, 0% Rust lib). Jina with enriched context headers closes 40% of the Nix gap (0.582→0.638) and beats voyage-code-3 on Nix (+9.2%) and TypeScript (+2.8%). Enriched context is on by default for jina/local providers. Reranking (rerank-2.5) degrades quality (-30% MRR) — disabled.
+Key: voyage-4-large wins 3 of 4 languages, +0.053 weighted avg MRR over voyage-context-3. Uses standard `/embeddings` endpoint (simpler than contextualized). Reranking (rerank-2.5) degrades quality (-30% MRR) — disabled.
 
 ## Protected Repo
 

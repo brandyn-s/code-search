@@ -1,7 +1,6 @@
 """Tests for embedding provider selection via env vars."""
 
 import os
-import pytest
 from unittest.mock import patch
 
 
@@ -39,7 +38,7 @@ def test_local_provider_selected_when_env_set():
 
 
 def test_default_provider_is_voyage_context_when_voyage_key_present():
-    """When no EMBEDDING_PROVIDER set but VOYAGE_API_KEY exists, default to voyage-context."""
+    """When no EMBEDDING_PROVIDER set but VOYAGE_API_KEY exists, default to voyage (v4-large)."""
     env = os.environ.copy()
     env.pop("EMBEDDING_PROVIDER", None)
     env["VOYAGE_API_KEY"] = "test-key"
@@ -49,7 +48,7 @@ def test_default_provider_is_voyage_context_when_voyage_key_present():
 
         embedder = CodeEmbedder()
         info = embedder.get_model_info()
-        assert info["provider"] == "voyage-context"
+        assert info["provider"] == "openai"  # voyage provider uses OpenAIEmbeddingModel
 
 
 def test_default_provider_is_openai_when_only_openai_key_present():

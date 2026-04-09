@@ -82,7 +82,6 @@ def test_openai_embedder_retries_on_500():
 
         model = OpenAIEmbeddingModel(api_key="test-key")
         # Monkey-patch to skip the actual 5s sleep in tests
-        import embeddings.openai_embedder as mod
 
         original_encode = model.encode
         import time
@@ -121,7 +120,7 @@ def test_voyage_provider_creates_embedder():
 
         embedder = CodeEmbedder()
         assert embedder._model._base_url == "https://api.voyageai.com/v1"
-        assert embedder._model._model_name == "voyage-code-3"
+        assert embedder._model._model_name == "voyage-4-large"
 
 
 def test_voyage_context_provider_creates_embedder():

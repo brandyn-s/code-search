@@ -37,10 +37,11 @@ class CodeEmbedder:
         # Determine provider from env
         provider = os.environ.get("EMBEDDING_PROVIDER", "").lower()
         if not provider:
-            # Default: voyage-context if Voyage key exists (24% better MRR than
-            # voyage-code-3 on Nix eval, 2026-04-04), openai if OpenAI key, else local
+            # Default: voyage-4-large if Voyage key exists (+0.053 weighted avg MRR
+            # over voyage-context-3 across 4 languages, 102 queries, 2026-04-08).
+            # Uses standard /embeddings endpoint (not /contextualizedembeddings).
             if os.environ.get("VOYAGE_API_KEY"):
-                provider = "voyage-context"
+                provider = "voyage"
             elif os.environ.get("OPENAI_API_KEY"):
                 provider = "openai"
             else:
@@ -57,7 +58,7 @@ class CodeEmbedder:
             from embeddings.openai_embedder import OpenAIEmbeddingModel
 
             model_name = model_name or os.environ.get(
-                "EMBEDDING_MODEL", "voyage-code-3"
+                "EMBEDDING_MODEL", "voyage-4-large"
             )
             api_key = os.environ.get("VOYAGE_API_KEY", "")
             self._model = OpenAIEmbeddingModel(
