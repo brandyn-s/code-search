@@ -174,10 +174,21 @@ class MultiLanguageChunker:
             }
             
             chunk_type = chunk_type_map.get(tchunk.node_type, tchunk.node_type)
-            
+
+            # Refine Nix binding chunk types based on NixOS pattern metadata
+            if tchunk.language == 'nix' and chunk_type == 'binding':
+                nix_pattern = tchunk.metadata.get('nix_pattern')
+                if nix_pattern in ('mkOption', 'mkEnableOption', 'mkPackageOption',
+                                   'mkSinkUndeclaredOptions'):
+                    chunk_type = 'option'
+                elif tchunk.metadata.get('nix_category') == 'service':
+                    chunk_type = 'service_config'
+                elif tchunk.metadata.get('nix_category') == 'imports':
+                    chunk_type = 'imports'
+
             # Extract parent name and adjust chunk type for methods
             parent_name = tchunk.metadata.get('parent_name')
-            
+
             # If we have a parent_name and it's a function, it's actually a method
             if parent_name and chunk_type == 'function':
                 chunk_type = 'method'
@@ -206,7 +217,15 @@ class MultiLanguageChunker:
                 tags.append('generic')
             if tchunk.metadata.get('is_component'):
                 tags.append('component')
-            
+            if tchunk.metadata.get('is_option_declaration'):
+                tags.append('nixos-option')
+            if tchunk.metadata.get('is_conditional'):
+                tags.append('nixos-conditional')
+            if tchunk.metadata.get('is_merge'):
+                tags.append('nixos-merge')
+            if tchunk.metadata.get('nix_category'):
+                tags.append(f"nix-{tchunk.metadata['nix_category']}")
+
             # Add language tag
             tags.append(tchunk.language)
             

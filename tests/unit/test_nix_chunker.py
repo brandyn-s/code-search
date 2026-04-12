@@ -113,3 +113,156 @@ def test_nix_chunker_small_bindings_stay_grouped():
 """
     chunks = chunker.chunk_code(source)
     assert len(chunks) <= 2
+
+
+def test_nix_chunker_detects_mkOption_pattern():
+    """mkOption bindings should have nix_pattern and is_option_declaration metadata."""
+    chunker = NixChunker()
+    source = """
+{ config, lib, ... }:
+{
+  options.myservice.ip = lib.mkOption {
+    type = lib.types.str;
+    default = "192.168.1.1";
+    description = "IP address";
+  };
+}
+"""
+    chunks = chunker.chunk_code(source)
+    ip_chunks = [c for c in chunks if c.metadata.get("name", "").endswith("ip")]
+    assert len(ip_chunks) >= 1, f"No ip chunk found in {[c.metadata.get('name') for c in chunks]}"
+    ip = ip_chunks[0]
+    assert ip.metadata.get("nix_pattern") == "mkOption"
+    assert ip.metadata.get("is_option_declaration") is True
+
+
+def test_nix_chunker_detects_mkEnableOption_pattern():
+    """mkEnableOption bindings should be detected as option declarations."""
+    chunker = NixChunker()
+    # Binding must be >= 5 lines (MIN_CHUNK_LINES) to produce a chunk
+    source = """
+{ config, lib, ... }:
+{
+  options.myservice = {
+    enable = lib.mkEnableOption ''
+      my custom service for
+      doing important things
+      on the boat network
+    '';
+  };
+}
+"""
+    chunks = chunker.chunk_code(source)
+    enable_chunks = [c for c in chunks if "enable" in c.metadata.get("name", "")]
+    assert len(enable_chunks) >= 1, f"No enable chunk found in {[c.metadata.get('name') for c in chunks]}"
+    en = enable_chunks[0]
+    assert en.metadata.get("nix_pattern") == "mkEnableOption"
+    assert en.metadata.get("is_option_declaration") is True
+
+
+def test_nix_chunker_detects_mkIf_pattern():
+    """mkIf bindings should be detected as conditional."""
+    chunker = NixChunker()
+    source = """
+{ config, lib, ... }:
+let cfg = config.myservice; in
+{
+  config = lib.mkIf cfg.enable {
+    networking.firewall.allowedTCPPorts = [ 80 443 ];
+    systemd.services.myapp = {
+      wantedBy = [ "multi-user.target" ];
+    };
+  };
+}
+"""
+    chunks = chunker.chunk_code(source)
+    config_chunks = [c for c in chunks if c.metadata.get("name") == "config"]
+    # config may or may not appear depending on child coverage, check any chunk
+    mkif_chunks = [c for c in chunks if c.metadata.get("nix_pattern") == "mkIf"]
+    assert len(mkif_chunks) >= 1 or any(
+        c.metadata.get("is_conditional") for c in chunks
+    ), f"No mkIf pattern detected in {[c.metadata for c in chunks]}"
+
+
+def test_nix_chunker_detects_service_category():
+    """Bindings under services.* should get nix_category=service."""
+    chunker = NixChunker()
+    source = """
+{ config, lib, ... }:
+{
+  services.myapp = {
+    enable = true;
+    package = pkgs.myapp;
+    extraConfig = ''
+      listen 0.0.0.0:8080;
+    '';
+  };
+}
+"""
+    chunks = chunker.chunk_code(source)
+    svc_chunks = [c for c in chunks if c.metadata.get("nix_category") == "service"]
+    assert len(svc_chunks) >= 1, (
+        f"No service category found in {[c.metadata for c in chunks]}"
+    )
+
+
+def test_nix_chunker_detects_networking_category():
+    """Bindings under networking.* should get nix_category=networking."""
+    chunker = NixChunker()
+    source = """
+{ config, lib, ... }:
+{
+  networking.firewall = {
+    enable = true;
+    allowedTCPPorts = [ 80 443 8080 ];
+    allowedUDPPorts = [ 53 ];
+  };
+}
+"""
+    chunks = chunker.chunk_code(source)
+    net_chunks = [c for c in chunks if c.metadata.get("nix_category") == "networking"]
+    assert len(net_chunks) >= 1, (
+        f"No networking category found in {[c.metadata for c in chunks]}"
+    )
+
+
+def test_nix_chunker_detects_imports_category():
+    """imports = [...] bindings should get nix_category=imports."""
+    chunker = NixChunker()
+    source = """
+{ config, lib, ... }:
+{
+  imports = [
+    ./hardware.nix
+    ./networking.nix
+    ./services.nix
+  ];
+}
+"""
+    chunks = chunker.chunk_code(source)
+    import_chunks = [c for c in chunks if c.metadata.get("nix_category") == "imports"]
+    assert len(import_chunks) >= 1, (
+        f"No imports category found in {[c.metadata for c in chunks]}"
+    )
+
+
+def test_nix_chunker_detects_option_declaration_category():
+    """Bindings under options.* should get nix_category=option_declaration."""
+    chunker = NixChunker()
+    source = """
+{ config, lib, ... }:
+{
+  options.myservice = {
+    enable = lib.mkEnableOption "my service";
+    port = lib.mkOption {
+      type = lib.types.port;
+      default = 8080;
+    };
+  };
+}
+"""
+    chunks = chunker.chunk_code(source)
+    opt_chunks = [c for c in chunks if c.metadata.get("nix_category") == "option_declaration"]
+    assert len(opt_chunks) >= 1, (
+        f"No option_declaration category found in {[c.metadata for c in chunks]}"
+    )

@@ -177,3 +177,72 @@ def test_expand_query_no_double_expansion():
     expanded = expand_code_query("auth")
     tokens = expanded.lower().split()
     assert tokens.count("auth") <= 1
+
+
+def test_expand_query_nix_specific_terms():
+    """Nix-specific terms should expand to NixOS ecosystem synonyms."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("nix module")
+    lower = expanded.lower()
+    assert "nixos" in lower or "nixpkgs" in lower
+    assert "imports" in lower or "options" in lower
+
+
+def test_expand_query_nixos_enable():
+    """'enable service' should expand to mkEnableOption and systemd terms.
+
+    'enable' is a synonym of 'service', so it matches the service key first.
+    mkEnableOption is added via the service synonym list.
+    """
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("enable service")
+    lower = expanded.lower()
+    assert "mkenableoption" in lower
+    assert "systemd" in lower
+    assert "serviceconfig" in lower
+
+
+def test_expand_query_nix_derivation():
+    """'derivation' should expand to build-related Nix terms.
+
+    'derivation' is a synonym of 'package', so it matches the package key.
+    stdenv and mkDerivation are added via the package synonym list.
+    """
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("derivation build")
+    lower = expanded.lower()
+    assert "stdenv" in lower or "mkderivation" in lower
+    assert "buildinputs" in lower or "nativebuildinputs" in lower
+
+
+def test_expand_query_nix_firewall():
+    """'firewall' should expand to nftables and port terms."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("firewall rules")
+    lower = expanded.lower()
+    assert "nftables" in lower
+    assert "allowedtcpports" in lower or "allowedudpports" in lower
+
+
+def test_expand_query_nix_boot():
+    """'boot' should expand to bootloader terms."""
+    from search.searcher import expand_code_query
+
+    expanded = expand_code_query("boot configuration")
+    lower = expanded.lower()
+    assert "bootloader" in lower or "grub" in lower or "systemd-boot" in lower
+
+
+def test_chunk_type_boosts_nix_types():
+    """Nix-specific chunk types (option, service_config) should get boosted in code mode."""
+    from search.searcher import CHUNK_TYPE_BOOSTS
+
+    boosts = CHUNK_TYPE_BOOSTS["code"]
+    assert "option" in boosts, "option chunk type missing from code boosts"
+    assert "service_config" in boosts, "service_config chunk type missing from code boosts"
+    assert boosts["option"] > boosts["section"]
+    assert boosts["service_config"] > boosts["section"]

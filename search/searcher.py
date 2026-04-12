@@ -57,6 +57,9 @@ CHUNK_TYPE_BOOSTS = {
         "decorated_definition": 1.3,
         "let": 1.3,
         "binding": 1.3,
+        "option": 1.3,          # NixOS mkOption declarations
+        "service_config": 1.3,  # NixOS service configurations
+        "imports": 1.1,         # NixOS imports lists
         "section": 0.7,
         "document": 0.7,
         "module": 0.9,
@@ -82,10 +85,21 @@ CODE_SYNONYMS = {
     "rate": ["rate_limit", "throttle", "RPM", "TPM"],
     "middleware": ["ASGI", "middleware", "intercept"],
     "route": ["Route", "endpoint", "path", "handler", "Starlette"],
-    "network": ["networking", "internal-svc-19", "interface", "vlan", "firewall", "nftables"],
-    "service": ["systemd", "daemon", "enable", "wantedBy", "serviceConfig"],
-    "package": ["pkgs", "nix", "derivation", "buildInputs"],
+    "network": ["networking", "internal-svc-19", "interface", "vlan", "firewall", "nftables", "allowedTCPPorts"],
+    "service": ["systemd", "daemon", "enable", "wantedBy", "serviceConfig", "systemd.services", "mkEnableOption"],
+    "package": ["pkgs", "nix", "derivation", "buildInputs", "nativeBuildInputs", "stdenv", "mkDerivation", "fetchurl"],
     "option": ["mkOption", "mkEnableOption", "types", "default", "description"],
+    # NixOS-specific expansions
+    "nix": ["nixos", "nixpkgs", "derivation", "flake", "overlay"],
+    "module": ["nixos-module", "imports", "options", "mkIf"],
+    "derivation": ["stdenv", "mkDerivation", "buildInputs", "nativeBuildInputs", "fetchurl"],
+    "flake": ["flake.nix", "inputs", "outputs", "nixpkgs"],
+    "enable": ["mkEnableOption", "mkIf", "cfg.enable"],
+    "firewall": ["nftables", "allowedTCPPorts", "allowedUDPPorts", "networking.firewall"],
+    "systemd": ["systemd.services", "serviceConfig", "wantedBy", "ExecStart"],
+    "boot": ["bootloader", "grub", "systemd-boot", "initrd", "kernelModules"],
+    "nixos": ["nix", "nixpkgs", "nix-module", "mkOption"],
+    "environment": ["systemPackages", "environment.systemPackages"],
     # Corsair service domains
     "sensor": [
         "internal-svc-62",
