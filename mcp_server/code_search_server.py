@@ -113,15 +113,56 @@ class CodeSearchServer:
         except Exception:
             pass
 
-    def get_project_storage_dir(self, project_path: str) -> Path:
-        """Get or create project-specific storage directory."""
+    def get_project_storage_dir(self, project_path: str, provider: str = None) -> Path:
+        """Get or create project-specific storage directory.
+
+        Args:
+            project_path: Filesystem path to the project.
+            provider: Embedding provider override. When set, the provider is
+                included in the directory hash so multiple providers can coexist
+                for the same path (dual-model indexing). When None, falls back
+                to the legacy path-only hash for backward compatibility.
+        """
         base_dir = get_storage_dir()
         project_path_obj = Path(project_path).resolve()
         project_name = project_path_obj.name
-        project_hash = hashlib.md5(str(project_path_obj).encode()).hexdigest()[:8]
 
-        # Use common utils for base directory
-        project_dir = base_dir / "projects" / f"{project_name}_{project_hash}"
+        # Legacy hash: path only (backward-compatible with existing indexes)
+        legacy_hash = hashlib.md5(str(project_path_obj).encode()).hexdigest()[:8]
+        legacy_dir = base_dir / "projects" / f"{project_name}_{legacy_hash}"
+
+        if provider:
+            # Provider-aware hash: path + provider (enables dual-model indexes)
+            provider_hash = hashlib.md5(
+                f"{project_path_obj}:{provider}".encode()
+            ).hexdigest()[:8]
+            project_dir = base_dir / "projects" / f"{project_name}_{provider_hash}"
+            # If the provider-aware dir doesn't exist but the legacy dir does
+            # and its stored provider matches, migrate by renaming
+            if not project_dir.exists() and legacy_dir.exists():
+                legacy_info = legacy_dir / "project_info.json"
+                if legacy_info.exists():
+                    try:
+                        with open(legacy_info) as f:
+                            info = json.load(f)
+                        if info.get("embedding_provider") == provider:
+                            legacy_dir.rename(project_dir)
+                            # Update the stored hash
+                            info["project_hash"] = provider_hash
+                            with open(project_dir / "project_info.json", "w") as f:
+                                json.dump(info, f, indent=2)
+                            logger.info(
+                                f"Migrated {project_name} index from legacy hash "
+                                f"{legacy_hash} to provider-aware hash {provider_hash}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Legacy migration failed: {e}")
+            project_hash = provider_hash
+        else:
+            # No provider specified: use legacy hash (backward-compatible)
+            project_dir = legacy_dir
+            project_hash = legacy_hash
+
         project_dir.mkdir(parents=True, exist_ok=True)
 
         # Store project info
@@ -130,14 +171,15 @@ class CodeSearchServer:
             # Auto-select embedding provider from CONTENT_MODE if not explicitly set
             content_mode = os.environ.get("CONTENT_MODE", "code").lower()
             default_provider = "voyage-context" if content_mode == "docs" else "voyage"
+            effective_provider = provider or os.environ.get(
+                "EMBEDDING_PROVIDER", default_provider
+            )
             project_info = {
                 "project_name": project_name,
                 "project_path": str(project_path_obj),
                 "project_hash": project_hash,
                 "created_at": datetime.now().isoformat(),
-                "embedding_provider": os.environ.get(
-                    "EMBEDDING_PROVIDER", default_provider
-                ),
+                "embedding_provider": effective_provider,
                 "embedding_model": os.environ.get("EMBEDDING_MODEL", ""),
                 "content_mode": content_mode,
             }
@@ -239,7 +281,9 @@ class CodeSearchServer:
             logger.debug(f"Model preload scheduling skipped: {e}")
         return None
 
-    def get_index_manager(self, project_path: str = None) -> CodeIndexManager:
+    def get_index_manager(
+        self, project_path: str = None, provider: str = None
+    ) -> CodeIndexManager:
         """Get index manager for specific or current project."""
         if project_path is None:
             if self._current_project is None:
@@ -254,7 +298,7 @@ class CodeSearchServer:
             self._current_project = project_path
 
         if self._index_manager is None:
-            project_dir = self.get_project_storage_dir(project_path)
+            project_dir = self.get_project_storage_dir(project_path, provider=provider)
             index_dir = project_dir / "index"
             index_dir.mkdir(exist_ok=True)
             self._index_manager = CodeIndexManager(str(index_dir))
@@ -520,8 +564,20 @@ class CodeSearchServer:
         project_name: str = None,
         file_patterns: List[str] = None,
         incremental: bool = True,
+        provider: str = None,
     ) -> str:
-        """Start indexing a directory. Returns immediately with job status."""
+        """Start indexing a directory. Returns immediately with job status.
+
+        Args:
+            directory_path: Path to the directory to index.
+            project_name: Optional name override for the project.
+            file_patterns: Optional list of glob patterns to filter files.
+            incremental: If True, only re-index changed files (default True).
+            provider: Embedding provider override (e.g., 'voyage', 'voyage-context').
+                When set, creates a provider-specific index that coexists with
+                indexes from other providers for the same path. This enables
+                dual-model search in /code-explore.
+        """
         import threading
         import uuid
 
@@ -576,11 +632,27 @@ class CodeSearchServer:
             try:
                 from search.incremental_indexer import IncrementalIndexer
 
-                self._maybe_start_model_preload()
+                # If provider is specified, temporarily override env for embedder
+                _old_provider = None
+                if provider:
+                    _old_provider = os.environ.get("EMBEDDING_PROVIDER")
+                    os.environ["EMBEDDING_PROVIDER"] = provider
 
-                index_manager = self.get_index_manager(str(directory_path_obj))
-                embedder = self.embedder(str(directory_path_obj))
-                chunker = MultiLanguageChunker(str(directory_path_obj))
+                try:
+                    self._maybe_start_model_preload()
+
+                    index_manager = self.get_index_manager(
+                        str(directory_path_obj), provider=provider
+                    )
+                    embedder = self.embedder(str(directory_path_obj))
+                    chunker = MultiLanguageChunker(str(directory_path_obj))
+                finally:
+                    # Restore env even if setup fails
+                    if provider:
+                        if _old_provider is None:
+                            os.environ.pop("EMBEDDING_PROVIDER", None)
+                        else:
+                            os.environ["EMBEDDING_PROVIDER"] = _old_provider
 
                 incremental_indexer = IncrementalIndexer(
                     indexer=index_manager,
@@ -591,7 +663,9 @@ class CodeSearchServer:
 
                 # Pipeline version check: force full reindex if pipeline changed
                 effective_incremental = incremental
-                project_dir = self.get_project_storage_dir(str(directory_path_obj))
+                project_dir = self.get_project_storage_dir(
+                    str(directory_path_obj), provider=provider
+                )
                 info_file = project_dir / "project_info.json"
                 current_pipeline_version = get_pipeline_version()
                 if info_file.exists():
@@ -865,8 +939,15 @@ class CodeSearchServer:
             logger.error(f"Cross-project search failed: {e}")
             return json.dumps({"error": str(e)})
 
-    def switch_project(self, project_path: str) -> str:
-        """Implementation of switch_project tool."""
+    def switch_project(self, project_path: str, provider: str = None) -> str:
+        """Implementation of switch_project tool.
+
+        Args:
+            project_path: Filesystem path to the project.
+            provider: Embedding provider to switch to (e.g., 'voyage', 'voyage-context').
+                When set, switches to the provider-specific index for this path.
+                When None, uses the legacy (path-only) hash for backward compatibility.
+        """
         try:
             project_path = Path(project_path).resolve()
             if not project_path.exists():
@@ -874,14 +955,18 @@ class CodeSearchServer:
                     {"error": f"Project path does not exist: {project_path}"}
                 )
 
-            project_dir = self.get_project_storage_dir(str(project_path))
+            project_dir = self.get_project_storage_dir(
+                str(project_path), provider=provider
+            )
             index_dir = project_dir / "index"
 
             if not index_dir.exists() or not (index_dir / "code.index").exists():
                 return json.dumps(
                     {
-                        "error": f"Project not indexed: {project_path}",
-                        "suggestion": f"Run index_directory('{project_path}') first",
+                        "error": f"Project not indexed: {project_path}"
+                        + (f" (provider: {provider})" if provider else ""),
+                        "suggestion": f"Run index_directory('{project_path}'"
+                        + (f", provider='{provider}')" if provider else ")"),
                     }
                 )
 
@@ -895,12 +980,16 @@ class CodeSearchServer:
                 with open(info_file) as f:
                     project_info = json.load(f)
 
-            logger.info(f"Switched to project: {project_path.name}")
+            logger.info(
+                f"Switched to project: {project_path.name}"
+                + (f" (provider: {provider})" if provider else "")
+            )
 
             return json.dumps(
                 {
                     "success": True,
-                    "message": f"Switched to project: {project_path.name}",
+                    "message": f"Switched to project: {project_path.name}"
+                    + (f" ({provider})" if provider else ""),
                     "project_info": project_info,
                 }
             )
