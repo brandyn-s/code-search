@@ -14,6 +14,52 @@ This matters for AI coding assistants. Every irrelevant result consumes context 
 
 The search pipeline has three stages: **chunk**, **embed**, and **search**.
 
+```mermaid
+flowchart LR
+    subgraph Chunk["1. Chunk"]
+        A[Source Files] --> B[Tree-Sitter AST]
+        B --> C[Semantic Boundaries]
+        C --> D[Merge Small Chunks]
+    end
+    subgraph Embed["2. Embed"]
+        D --> E[Contextual Headers]
+        E --> F[Voyage AI voyage-4-large]
+        F --> G[FAISS int8 Index]
+    end
+    subgraph Search["3. Search"]
+        H[Query] --> I[Vector Search]
+        H --> J[BM25 Keyword]
+        I --> K[RRF Fusion]
+        J --> K
+        K --> L[Type Boost]
+        L --> M[Ranked Results]
+    end
+```
+
+
+```mermaid
+flowchart LR
+    subgraph Chunk["1. Chunk"]
+        A[Source Files] --> B[Tree-Sitter AST]
+        B --> C[Semantic Boundaries]
+        C --> D[Merge Small Chunks]
+    end
+    subgraph Embed["2. Embed"]
+        D --> E[Contextual Headers]
+        E --> F[Voyage AI voyage-4-large]
+        F --> G[FAISS int8 Index]
+    end
+    subgraph Search["3. Search"]
+        H[Query] --> I[Vector Search]
+        H --> J[BM25 Keyword]
+        I --> K[RRF Fusion]
+        J --> K
+        K --> L[Type Boost]
+        L --> M[Ranked Results]
+    end
+```
+
+
 ### 1. Chunking (Tree-Sitter AST)
 
 Source files are parsed into Abstract Syntax Trees using tree-sitter, then split at semantic boundaries — function definitions, class declarations, module sections. This means a search result is always a complete logical unit (a full function, a full class), never a random 500-character window that starts mid-expression.
@@ -118,6 +164,124 @@ Currently indexed APIs:
 | FastMCP | 60 | Server, client, auth, deployment, transforms, apps |
 
 All API docs are indexed under a single `api-docs` project, so a single search query can surface results across all indexed APIs. File paths include the API name (e.g., `microsoft-graph/audit-sign-in-logs.md`) so results are attributable.
+
+## Examples
+
+### Semantic search vs grep
+
+**grep** for "authentication" in the mcp-servers repo:
+```
+$ rg "authentication" --count
+shared/mcp_http.py:3
+msgraph/msgraph_mcp.py:8
+crowdstrike/crowdstrike_mcp.py:2
+tenable/tenable_mcp.py:1
+lever/lever_mcp.py:1
+docs/plans/auth-redesign.md:12
+...47 files, 200+ matches across comments, strings, variable names, docs
+```
+
+**code-search** for "authentication middleware token validation":
+```json
+{
+  "query": "authentication middleware token validation",
+  "results": [
+    {
+      "file": "shared/mcp_http.py",
+      "name": "_build_oauth",
+      "type": "function",
+      "lines": "45-72",
+      "score": 0.91,
+      "snippet": "async def _build_oauth(app, token_url, client_id, ...):\n    \"\"\"Build OAuth middleware for token validation...\""
+    },
+    {
+      "file": "msgraph/msgraph_mcp.py",
+      "name": "_auth_headers",
+      "type": "function",
+      "lines": "23-31",
+      "score": 0.87,
+      "snippet": "def _auth_headers():\n    \"\"\"Get auth headers from OBO token exchange...\""
+    }
+  ]
+}
+```
+
+The grep returns 200+ matches across 47 files — comments, string literals, documentation, and actual code all mixed together. code-search returns the 2 functions that actually implement authentication, ranked by relevance.
+
+### API documentation search
+
+After indexing Microsoft Graph docs with `/api-ingest`:
+```
+Query: "conditional access policy permissions required scopes"
+Project: api-docs/microsoft-graph
+
+Result #1: conditional-access-identity.md (score: 0.89)
+  "Required permissions: Policy.Read.All, Policy.ReadWrite.ConditionalAccess"
+
+Result #2: constraints.md (score: 0.84)
+  "Conditional Access: requires Policy.ReadWrite.ConditionalAccess for mutations"
+```
+
+This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, converted them to markdown, and code-search indexed them. Now Claude can look up the exact permissions needed before writing integration code, instead of guessing from training data.
+
+## Examples
+
+### Semantic search vs grep
+
+**grep** for "authentication" in the mcp-servers repo:
+```
+$ rg "authentication" --count
+shared/mcp_http.py:3
+msgraph/msgraph_mcp.py:8
+crowdstrike/crowdstrike_mcp.py:2
+tenable/tenable_mcp.py:1
+lever/lever_mcp.py:1
+docs/plans/auth-redesign.md:12
+...47 files, 200+ matches across comments, strings, variable names, docs
+```
+
+**code-search** for "authentication middleware token validation":
+```json
+{
+  "query": "authentication middleware token validation",
+  "results": [
+    {
+      "file": "shared/mcp_http.py",
+      "name": "_build_oauth",
+      "type": "function",
+      "lines": "45-72",
+      "score": 0.91,
+      "snippet": "async def _build_oauth(app, token_url, client_id, ...):\n    \"\"\"Build OAuth middleware for token validation...\""
+    },
+    {
+      "file": "msgraph/msgraph_mcp.py",
+      "name": "_auth_headers",
+      "type": "function",
+      "lines": "23-31",
+      "score": 0.87,
+      "snippet": "def _auth_headers():\n    \"\"\"Get auth headers from OBO token exchange...\""
+    }
+  ]
+}
+```
+
+The grep returns 200+ matches across 47 files — comments, string literals, documentation, and actual code all mixed together. code-search returns the 2 functions that actually implement authentication, ranked by relevance.
+
+### API documentation search
+
+After indexing Microsoft Graph docs with `/api-ingest`:
+```
+Query: "conditional access policy permissions required scopes"
+Project: api-docs/microsoft-graph
+
+Result #1: conditional-access-identity.md (score: 0.89)
+  "Required permissions: Policy.Read.All, Policy.ReadWrite.ConditionalAccess"
+
+Result #2: constraints.md (score: 0.84)
+  "Conditional Access: requires Policy.ReadWrite.ConditionalAccess for mutations"
+```
+
+This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, converted them to markdown, and code-search indexed them. Now Claude can look up the exact permissions needed before writing integration code, instead of guessing from training data.
 
 ## Installation
 
@@ -260,6 +424,54 @@ code-search/
 ```
 
 The evaluation harness runs each golden query, checks whether the expected file appears in the top-K results, and computes MRR per language. Results are saved as timestamped JSON for A/B comparison between configurations.
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| **Results are irrelevant** | Wrong embedding provider or stale index | Check `get_index_status` — if provider is `local`, switch to `voyage`. If index is >7 days old, re-run `index_directory`. |
+| **Empty results** | Wrong project active, or index doesn't exist | Run `list_projects` to see what's indexed. Run `switch_project` to the correct path. |
+| **"Indexing in progress"** | Auto-reindex triggered by stale detection | Wait 5-10 min for Voyage, or set `auto_reindex: false` to search the existing (possibly stale) index. |
+| **Slow indexing** | Using Jina on CPU | First run downloads ~1GB model. Subsequent runs: ~50 min for 3K chunks on CPU. Switch to `voyage` provider for 5-10 min indexing via API. |
+| **Wrong language detected** | File extension not in the 18 supported types | Check `chunking/available_languages.py`. Unsupported extensions fall back to generic line-based chunking. |
+| **Nix results are poor** | Missing domain synonyms | Ensure `QUERY_EXPANSION=on` and `CONTEXTUAL_HEADERS=on`. These features were specifically tuned for Nix syntax. |
+| **int8 index returns 0.0 similarity** | Index built with QT_8bit_direct (pre-2026-04-05 bug) | Delete the index (`clear_index`) and re-run `index_directory`. QT_8bit (trained) replaced QT_8bit_direct. |
+
+## Comparison to Alternatives
+
+| Tool | Strengths | Limitations | When to use instead of code-search |
+|------|-----------|-------------|-----------------------------------|
+| **grep / ripgrep** | Instant, exact, no indexing needed, regex support | No understanding of meaning — "auth" won't find "credential validation" | You know the exact string. Literal lookups. |
+| **GitHub Code Search** | Searches all of GitHub, regex, symbol-aware | Cloud-only, no private GHES support, no custom embeddings | Searching across public repos you don't have locally. |
+| **Sourcegraph** | Enterprise-grade, cross-repo, code intelligence | Requires deployment infrastructure, no local-first option | Large org with 100+ repos needing unified search. |
+| **IDE search (VS Code, JetBrains)** | Real-time, integrated in editor, symbol navigation | Single-repo, no semantic understanding, no cross-project | Navigating within a single file or project you have open. |
+| **code-graph** | Structural queries — call graphs, dead code, blast radius | No semantic/meaning-based search | "What calls this?" not "Where is the auth code?" |
+
+**code-search is best when**: You need to find code by meaning across a codebase, especially when you don't know the exact names. It's designed for AI assistants that need to quickly locate relevant code with minimal token waste.
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| **Results are irrelevant** | Wrong embedding provider or stale index | Check `get_index_status` — if provider is `local`, switch to `voyage`. If index is >7 days old, re-run `index_directory`. |
+| **Empty results** | Wrong project active, or index doesn't exist | Run `list_projects` to see what's indexed. Run `switch_project` to the correct path. |
+| **"Indexing in progress"** | Auto-reindex triggered by stale detection | Wait 5-10 min for Voyage, or set `auto_reindex: false` to search the existing (possibly stale) index. |
+| **Slow indexing** | Using Jina on CPU | First run downloads ~1GB model. Subsequent runs: ~50 min for 3K chunks on CPU. Switch to `voyage` provider for 5-10 min indexing via API. |
+| **Wrong language detected** | File extension not in the 18 supported types | Check `chunking/available_languages.py`. Unsupported extensions fall back to generic line-based chunking. |
+| **Nix results are poor** | Missing domain synonyms | Ensure `QUERY_EXPANSION=on` and `CONTEXTUAL_HEADERS=on`. These features were specifically tuned for Nix syntax. |
+| **int8 index returns 0.0 similarity** | Index built with QT_8bit_direct (pre-2026-04-05 bug) | Delete the index (`clear_index`) and re-run `index_directory`. QT_8bit (trained) replaced QT_8bit_direct. |
+
+## Comparison to Alternatives
+
+| Tool | Strengths | Limitations | When to use instead of code-search |
+|------|-----------|-------------|-----------------------------------|
+| **grep / ripgrep** | Instant, exact, no indexing needed, regex support | No understanding of meaning — "auth" won't find "credential validation" | You know the exact string. Literal lookups. |
+| **GitHub Code Search** | Searches all of GitHub, regex, symbol-aware | Cloud-only, no private GHES support, no custom embeddings | Searching across public repos you don't have locally. |
+| **Sourcegraph** | Enterprise-grade, cross-repo, code intelligence | Requires deployment infrastructure, no local-first option | Large org with 100+ repos needing unified search. |
+| **IDE search (VS Code, JetBrains)** | Real-time, integrated in editor, symbol navigation | Single-repo, no semantic understanding, no cross-project | Navigating within a single file or project you have open. |
+| **code-graph** | Structural queries — call graphs, dead code, blast radius | No semantic/meaning-based search | "What calls this?" not "Where is the auth code?" |
+
+**code-search is best when**: You need to find code by meaning across a codebase, especially when you don't know the exact names. It's designed for AI assistants that need to quickly locate relevant code with minimal token waste.
 
 ## How code-search and code-graph Work Together
 
