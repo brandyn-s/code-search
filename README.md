@@ -1,6 +1,123 @@
 # code-search
 
-Semantic code search MCP server for Claude Code. Hybrid BM25 + vector search with multiple embedding providers.
+Semantic code search MCP server for Claude Code. Ask natural language questions about your codebase and get ranked, relevant results instead of string matches.
+
+## Why This Exists
+
+Standard code search (grep, ripgrep, Glob) finds text patterns. Ask "where is the firewall configuration?" and you get every file containing the word "firewall" — hundreds of results across comments, variable names, tests, and documentation. The actual firewall config function is buried at position #47.
+
+Semantic search understands *meaning*. The same query returns the actual firewall config function at position #1 because the embedding model understands that `networking.firewall.allowedTCPPorts` is semantically related to "firewall configuration" even though the words don't match exactly.
+
+This matters for AI coding assistants. Every irrelevant result consumes context window tokens. A grep for "authentication" in a large monorepo returns thousands of lines. Semantic search returns the 10 most relevant functions, saving ~80K tokens per query. Over a multi-tool session, that's the difference between hitting compaction at 60% context and finishing the task with room to spare.
+
+## How It Works
+
+The search pipeline has three stages: **chunk**, **embed**, and **search**.
+
+### 1. Chunking (Tree-Sitter AST)
+
+Source files are parsed into Abstract Syntax Trees using tree-sitter, then split at semantic boundaries — function definitions, class declarations, module sections. This means a search result is always a complete logical unit (a full function, a full class), never a random 500-character window that starts mid-expression.
+
+**18 languages supported**: Python, JavaScript, TypeScript, JSX, TSX, Go, Rust, Java, C, C++, C#, Svelte, plus regex-based chunking for Markdown, TOML, YAML, HCL, Nix, and configuration files.
+
+**Chunk merging** (inspired by the cAST paper, CMU 2025): After AST splitting, a post-processing pass greedily merges adjacent small chunks up to a 1,500 non-whitespace character budget. This captures gap code — imports, constants, and comments that fall between semantic units — and prevents sub-100-token chunks that degrade embedding quality by 6-16% (Ekimetrics 2026 benchmark). The merge uses non-whitespace character count rather than line count because a 50-line file of blank lines and a 50-line file of dense code are not equivalent.
+
+**Contextual headers**: Before embedding, each chunk gets a header prepended: `# From <filepath> - <type> <name>`. This gives the embedding model critical context about what the chunk *is* (a function named `authenticate` in `auth/handlers.py`), improving retrieval accuracy by connecting the code content to its structural role. Adds +9.6% MRR on Nix files when combined with enriched sibling context.
+
+### 2. Embedding (Voyage AI)
+
+Each chunk is converted to a high-dimensional vector using [Voyage AI](https://voyageai.com)'s `voyage-4-large` model (MoE architecture, SOTA retrieval quality). The vectors are stored in a FAISS index with int8 quantization (4x smaller than float32, negligible quality loss on normalized vectors).
+
+Three embedding providers are available:
+
+| Provider | Model | Quality (MRR) | Data leaves machine? | Cost | Setup |
+|----------|-------|:---:|:---:|:---:|---|
+| **`voyage`** (recommended) | voyage-4-large | **0.828** | Yes (API call) | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
+| `jina` | jina-code-0.5b | 0.638-0.742 | **No** (runs locally) | **Free** | Nothing — downloads model on first run |
+| `local` | all-MiniLM-L6-v2 | ~0.35-0.45 | No | Free | Nothing |
+
+MRR (Mean Reciprocal Rank) is measured on 102 golden queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo. A score of 0.828 means the correct answer is almost always the #1 result.
+
+**Why Voyage over local models?** The quality gap is enormous. Local sentence-transformers (all-MiniLM-L6-v2) score 0.35-0.45 MRR — the right answer is typically at position #3-5. Voyage-4-large scores 0.828 — position #1 almost every time. For an AI assistant consuming results in a token-limited context window, the difference between "right answer at #1" and "right answer at #4" means 3-4x fewer wasted tokens per query.
+
+**Why not reranking?** Cross-encoder reranking (rerank-2.5) was tested and *degraded* quality by -30% MRR. The cross-encoder reshuffles well-ranked RRF output into a worse order. This was counterintuitive — reranking usually helps — but the golden eval confirmed it consistently across all 4 languages. The reranker code is preserved for future evaluation but disabled by default.
+
+### 3. Search (Hybrid BM25 + Vector with RRF Fusion)
+
+Queries run through two parallel search paths:
+
+1. **Vector search**: The query is embedded via Voyage, then FAISS finds the most similar chunk vectors by cosine similarity. This handles semantic matches — "authentication logic" finds `validate_jwt_token()`.
+
+2. **BM25 keyword search**: SQLite FTS5 full-text search finds exact keyword matches. This handles cases where you know the exact name — `validate_jwt_token` — and want direct string matching.
+
+3. **Reciprocal Rank Fusion (RRF)**: Both result lists are fused using weighted RRF (50/50 for code, 70/30 vector-heavy for docs). RRF combines the *rankings* from both systems rather than raw scores, which is robust to score scale differences between vector similarity and BM25 TF-IDF.
+
+4. **Chunk type boosting**: After fusion, results are boosted by type — functions and methods get 1.3x in code mode, sections and documents get 1.3x in docs mode. This ensures that searching for "authentication" surfaces the `authenticate()` function over the `# Authentication` markdown section when searching code.
+
+5. **Query expansion**: Domain-specific synonym maps expand query terms before BM25 search. "auth" expands to include "authentication", "oauth", "jwt", "token", "credential", "login". This bridges the vocabulary gap between how developers *ask* about code and how code *names* things.
+
+### Incremental Indexing (Merkle Trees)
+
+After initial indexing, only changed files are re-embedded. A Merkle DAG (directed acyclic graph) tracks content hashes for every file and directory. On re-index, the tree is diffed against the stored snapshot — only files whose hashes changed get re-chunked and re-embedded. For a 3,000-chunk repo where 5 files changed, this means re-embedding ~20 chunks instead of 3,000, completing in seconds instead of minutes.
+
+## Benchmarks
+
+Quality was measured using golden test sets — hand-verified query-to-expected-file mappings across 4 language sub-projects from a production monorepo:
+
+| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) | Weighted Avg |
+|----------|-------|:---:|:---:|:---:|:---:|:---:|
+| **`voyage`** | **voyage-4-large** | **0.826** | **0.917** | 0.861 | **0.683** | **0.828** |
+| `voyage-context` | voyage-context-3 | 0.792 | 0.783 | **0.861** | 0.662 | 0.775 |
+| `voyage` | voyage-4 | 0.803 | 0.892 | 0.861 | 0.650 | 0.806 |
+| **`jina`** (local) | jina-code-0.5b | 0.638 | 0.742 | ~0.86 | 0.660 | ~0.72 |
+| `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 | ~0.42 |
+
+### What the numbers mean
+
+- **0.828 MRR**: The correct file is typically the #1 result. A developer (or AI agent) reading just the top result gets the right answer 83% of the time.
+- **0.42 MRR**: The correct file is typically at position #3-5. The agent must read 3-5 results to find the right one, consuming 3-5x more context tokens.
+- **The Nix gap**: Nix has unusual syntax (`mkOption`, `mkEnableOption`, `imports = [...]`) that generic models struggle with. Contextual headers and domain synonym expansion were specifically added to close this gap — Nix MRR improved from 0.72 to 0.826 with these features.
+
+### Indexing performance
+
+| Provider | Time (3,000 chunks) | Notes |
+|----------|------|-------|
+| `voyage` (voyage-4-large) | ~5-10 min | API rate-limited, batched |
+| `jina` (local CPU) | ~50 min | First run downloads ~1GB model. GPU: ~5 min |
+| `local` | ~2-5 min | Small model, fast but low quality |
+
+## What It's Good For
+
+- **Codebase exploration**: "Where is the authentication middleware?" returns ranked results by relevance, not alphabetical file listing
+- **Cross-language search**: Same query works across Python, Rust, TypeScript, Nix — the embedding model understands all of them
+- **API documentation search**: Index API docs as markdown and search them semantically (see below)
+- **Large monorepos**: Handles 3,000+ chunk repos with incremental re-indexing. FAISS int8 quantization keeps indexes small.
+- **Multi-project workflows**: Switch between indexed projects instantly. A developer working across 5 repos can search any of them without re-indexing.
+
+## What It's Not Good For
+
+- **Exact string matching**: If you know the exact function name `validate_jwt_token_v2`, use grep. Semantic search adds latency for literal lookups (though BM25 hybrid mode handles this reasonably well).
+- **Structural queries**: "What functions call `authenticate()`?" is a graph question, not a search question. Use [code-graph](https://github.com/redacted-org/code-graph) for call chain analysis, dead code detection, and dependency tracing.
+- **Real-time editing feedback**: The index updates on re-index, not on every keystroke. For IDE-style "as you type" search, use your editor's built-in search.
+- **Binary files, images, PDFs**: Only text-based source files are indexed.
+
+## The API Documentation Pipeline
+
+A key lesson learned: pointing an AI assistant at raw API documentation is hit or miss. Usable OpenAPI specs are rarer than expected — most are incomplete, outdated, or missing critical details like auth flows, error shapes, and permission scopes.
+
+The solution: **crawl API docs with [Firecrawl](https://firecrawl.dev), convert to structured markdown, and index with code-search**. This creates a searchable, semantic API reference that the AI assistant can query during development — resulting in significantly better MCP server implementations.
+
+Currently indexed APIs:
+
+| API | Files | Key content |
+|-----|------:|-------------|
+| Microsoft Graph (GCC High) | 21 | 602+ endpoints across identity, devices, audit, compliance |
+| Slack | 176 | Web API, Events, Audit Logs, SCIM, Discovery, Legal Holds, Admin, GovSlack |
+| X.AI | 85 | Inference, Tools, Files, Collections, Management, REST Reference |
+| Claude Agent SDK | 31 | Agent loop, hooks, MCP, subagents, plugins, permissions |
+| FastMCP | 60 | Server, client, auth, deployment, transforms, apps |
+
+All API docs are indexed under a single `api-docs` project, so a single search query can surface results across all indexed APIs. File paths include the API name (e.g., `microsoft-graph/audit-sign-in-logs.md`) so results are attributable.
 
 ## Installation
 
@@ -18,17 +135,7 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
-### 2. Choose an embedding provider
-
-| Provider | Quality (MRR) | Data leaves machine? | Cost | Setup |
-|----------|:---:|:---:|:---:|---|
-| **`voyage`** | **0.828** | Yes | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
-| `jina` | 0.638-0.742 | **No** | **Free** | Nothing — downloads model on first run |
-| `local` | ~0.35-0.45 | No | Free | Nothing |
-
-MRR = weighted avg across 102 queries (Nix, Rust, TypeScript). `voyage` uses voyage-4-large. See [Model Comparison](#model-comparison).
-
-### 3. Configure Claude Code
+### 2. Configure Claude Code
 
 Add to your MCP settings (`.claude/settings.local.json` or project `.mcp.json`):
 
@@ -48,152 +155,125 @@ Add to your MCP settings (`.claude/settings.local.json` or project `.mcp.json`):
 }
 ```
 
-For local-only (no API key):
+For local-only (no API key, lower quality):
 ```json
 {
-  "mcpServers": {
-    "code-search": {
-      "type": "stdio",
-      "command": "/path/to/code-search/.venv/bin/python",
-      "args": ["-m", "mcp_server.server"],
-      "cwd": "/path/to/code-search",
-      "env": {
-        "EMBEDDING_PROVIDER": "jina"
-      }
-    }
+  "env": {
+    "EMBEDDING_PROVIDER": "jina"
   }
 }
 ```
 
 On Windows, use `.venv\Scripts\pythonw.exe` instead of `.venv/bin/python`.
 
-### 4. Index a repo
+### 3. Index a repo
 
-From Claude Code:
 ```
 mcp__code-search__index_directory(directory_path="/path/to/your/repo")
 ```
 
-Or if using the [codebase-search-plugin](https://github.com/redacted-org/codebase-search-plugin):
-```
-/index-repo /path/to/your/repo
-```
-
-### 5. Search
+### 4. Search
 
 ```
 mcp__code-search__search_code(query="authentication middleware")
 ```
 
-## What It Does
-
-Natural language queries against indexed codebases. "Find authentication logic" returns actual auth functions ranked by relevance, not string matches.
-
-- **Hybrid search**: Weighted RRF fusion of FAISS vector similarity + FTS5 BM25 keyword matching
-- **18+ file types**: Python, JS/TS/JSX/TSX, Go, Rust, Java, C/C++/C#, Nix, Svelte, Markdown, TOML, YAML, HCL
-- **Contextual chunk headers**: Prepends file path + type + name before embedding for better retrieval
-- **Incremental indexing**: Merkle tree change detection — only re-embeds changed files
-- **Per-project config**: Embedding provider and model stored per project. Server switches automatically.
-
 ## MCP Tools
 
 | Tool | Purpose |
 |------|---------|
-| `search_code` | Semantic + keyword hybrid search |
-| `find_similar_code` | Find chunks similar to a given result |
-| `index_directory` | Background indexing with progress polling |
-| `get_indexing_progress` | Poll index job status |
-| `clear_index` | Delete current project's index |
-| `switch_project` | Change active project context |
-| `list_projects` | Show all indexed projects |
-| `get_index_status` | Index stats and model info |
-
-## Model Comparison
-
-Measured on 102 queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo:
-
-| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) | Avg |
-|----------|-------|:---:|:---:|:---:|:---:|:---:|
-| **`voyage`** | **voyage-4-large** | **0.826** | **0.917** | 0.861 | **0.683** | **0.828** |
-| `voyage-context` | voyage-context-3 | 0.792 | 0.783 | **0.861** | 0.662 | 0.775 |
-| `voyage` | voyage-4 | 0.803 | 0.892 | 0.861 | 0.650 | 0.806 |
-| **`jina`** (enriched) | jina-code-0.5b | 0.638 | 0.742 | ~0.86 | 0.660 | — |
-| `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 | — |
-
-### What the numbers mean
-
-- **MRR** (Mean Reciprocal Rank): How often the correct file appears at position #1 in results. 0.826 means the right answer is typically the top result. 0.662 means it's typically at position #2.
-- Values measured using golden test sets with verified expected files.
-
-### Key findings
-
-- **`voyage-4-large` wins 3 of 4 languages** (+0.053 weighted avg MRR over voyage-context-3). Uses MoE architecture via standard `/embeddings` endpoint.
-- **`jina-code-0.5b` with enriched context** runs fully on-device with no data exfiltration. Good fallback for air-gapped environments.
-- **Reranking hurts quality.** Cross-encoder reranking was tested and disabled (-30% MRR).
-
-### Indexing time (3,000 chunks)
-
-| Provider | Time | Notes |
-|----------|------|-------|
-| `voyage` (voyage-4-large) | ~5-10 min | API rate-limited |
-| `jina` | ~50 min (CPU) | First run downloads ~1GB model. GPU: ~5 min |
-| `local` | ~2-5 min | Small model, fast |
+| `search_code` | Semantic + keyword hybrid search across the active project |
+| `find_similar_code` | Find chunks structurally similar to a given search result |
+| `index_directory` | Index a directory in the background (with progress polling) |
+| `get_indexing_progress` | Poll the status of a background indexing job |
+| `clear_index` | Delete the active project's index entirely |
+| `switch_project` | Change which indexed project is active for search |
+| `list_projects` | Show all indexed projects with metadata |
+| `get_index_status` | Index statistics — chunk count, embedding model, staleness |
 
 ## Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set), else `local` | Embedding provider (voyage uses voyage-4-large) |
+| `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set), else `local` | Embedding provider selection |
 | `VOYAGE_API_KEY` | - | Voyage AI API key ([get one](https://dash.voyageai.com)) |
 | `LOCAL_EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-0.5b` | Model for `jina` provider |
-| `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for Jina (0.5b: 64-896) |
-| `CONTENT_MODE` | `code` | `code` or `docs` — affects search weights |
-| `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
-| `ENRICHED_CONTEXT` | `on` (jina/local), `off` (voyage-context) | Add sibling chunk names to headers (+9.6% MRR on Nix) |
-| `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
+| `JINA_TRUNCATE_DIM` | - | Matryoshka dimension truncation for Jina (0.5b: 64-896) |
+| `CONTENT_MODE` | `code` | `code` (boost functions/methods) or `docs` (boost sections/documents) |
+| `CONTEXTUAL_HEADERS` | `on` | Prepend structural context headers before embedding |
+| `ENRICHED_CONTEXT` | `on` (jina/local), `off` (voyage-context) | Include sibling chunk names in headers (+9.6% MRR on Nix) |
+| `QUERY_EXPANSION` | `on` | Expand queries with domain-specific synonyms before BM25 |
 | `QUANTIZATION` | `int8` | FAISS index type: `int8` (4x smaller), `float32`, `binary` (32x smaller) |
-| `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory for indexes |
+| `VOYAGE_BATCH_API` | `off` | Use Voyage Batch API for full reindexes (33% cheaper, 1000+ chunks) |
+| `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory for all indexes |
 
 ## Architecture
 
 ```
 code-search/
-├── chunking/                       # Multi-language AST chunking (18+ file types)
-│   └── languages/                  # Per-language chunkers
+├── chunking/                       # Multi-language AST chunking (18 file types)
+│   ├── tree_sitter.py              # Tree-sitter grammar loading and AST parsing
+│   ├── chunk_merging.py            # cAST-style post-processing merge (400-1500 NWS budget)
+│   ├── multi_language_chunker.py   # Language detection and chunker dispatch
+│   └── languages/                  # Per-language chunkers (Python, Rust, Go, TS, etc.)
 ├── embeddings/
-│   ├── embedder.py                 # Provider routing, contextual headers
-│   ├── voyage_context_embedder.py  # Voyage contextualized API
-│   ├── jina_code_embedder.py       # Jina local code embeddings
-│   ├── openai_embedder.py          # OpenAI + Voyage standard API
-│   └── sentence_transformer.py     # Local sentence-transformers
+│   ├── embedder.py                 # Provider routing, contextual header prepending
+│   ├── openai_embedder.py          # Voyage AI + OpenAI standard /embeddings API
+│   ├── voyage_context_embedder.py  # Voyage contextualized embeddings (legacy)
+│   ├── voyage_batch_embedder.py    # Voyage Batch API for bulk indexing (33% cheaper)
+│   ├── jina_code_embedder.py       # Jina local code embeddings (on-device)
+│   └── sentence_transformer.py     # Local sentence-transformers fallback
 ├── search/
-│   ├── indexer.py                  # FAISS index + SQLite metadata
-│   ├── searcher.py                 # Hybrid BM25+vector with RRF fusion
-│   └── incremental_indexer.py      # Merkle tree change detection
+│   ├── indexer.py                  # FAISS vector index + SQLite FTS5 metadata store
+│   ├── searcher.py                 # Hybrid BM25+vector search with RRF fusion
+│   ├── query_rewriter.py           # Domain synonym expansion
+│   └── incremental_indexer.py      # Merkle-tree-based change detection
+├── merkle/
+│   ├── merkle_dag.py               # Content-hash Merkle DAG for file change tracking
+│   ├── change_detector.py          # Diff between Merkle snapshots
+│   └── snapshot_manager.py         # Snapshot persistence and lifecycle
 ├── mcp_server/
-│   └── code_search_server.py       # MCP server, per-project switching
+│   ├── server.py                   # MCP stdio entry point
+│   └── code_search_server.py       # Business logic, per-project config, tool handlers
 ├── benchmarks/
-│   ├── golden_nix.json             # Eval: 44 Nix queries
-│   ├── golden_rust_assetman.json   # Eval: 20 Rust service queries
-│   ├── golden_rust_libnet.json     # Eval: 18 Rust library queries
-│   ├── golden_typescript_mithrandir.json  # Eval: 20 TypeScript queries
-│   └── run_multilang_eval.py       # Cross-language A/B eval harness
+│   ├── golden_nix.json             # 44 hand-verified Nix queries
+│   ├── golden_rust_assetman.json   # 20 Rust service queries
+│   ├── golden_rust_libnet.json     # 18 Rust library queries
+│   ├── golden_typescript_mithrandir.json  # 20 TypeScript queries
+│   └── run_multilang_eval.py       # Cross-language A/B evaluation harness
 └── tests/
-    └── unit/                       # 34+ unit tests
+    ├── unit/                       # 34+ unit tests
+    └── integration/                # Full-flow, incremental indexing, MCP tool tests
 ```
 
-## Development
+## Testing
 
 ```bash
-# Run all tests
+# All unit tests
 .venv/Scripts/python.exe -m pytest tests/unit/ -v
 
-# Run the multi-language eval
+# Multi-language benchmark evaluation (requires indexed repos)
 .venv/Scripts/python.exe benchmarks/run_multilang_eval.py --lang rust-assetman
 
-# Run full eval (all languages, ~2 hours with Jina CPU)
+# Full eval across all 4 languages (~2 hours with Jina CPU)
 .venv/Scripts/python.exe benchmarks/run_multilang_eval.py
 ```
+
+The evaluation harness runs each golden query, checks whether the expected file appears in the top-K results, and computes MRR per language. Results are saved as timestamped JSON for A/B comparison between configurations.
+
+## How code-search and code-graph Work Together
+
+These two tools are complementary — **code-search finds things by meaning, code-graph finds things by structure**.
+
+| Question | Use |
+|----------|-----|
+| "Where is the authentication middleware?" | **code-search** — semantic query, meaning-based |
+| "What functions call `authenticate()`?" | **code-graph** — structural query, call graph traversal |
+| "Find code related to rate limiting" | **code-search** — conceptual search across the codebase |
+| "What's the blast radius if I change `User.validate()`?" | **code-graph** — dependency analysis, change impact |
+| "Show me how error handling works" | **code-search** first (find the patterns), then **code-graph** (trace through call chains) |
+
+The `get_relevant_context` tool in code-graph uses both: it takes the files you plan to modify, finds their callers, callees, tests, and change-coupled files via the graph, giving you everything needed to make a safe change — in ~500 tokens instead of ~80K from file-by-file exploration.
 
 ## License
 
