@@ -78,3 +78,56 @@ def test_voyage_context_dimension():
 
     model = VoyageContextEmbedder(api_key="test-key")
     assert model.get_embedding_dimension() == 1024
+
+
+def test_voyage_context_batches_use_full_api_capacity():
+    """Batches should pack many small groups, not cap at 4.
+
+    Regression for the 2026-04-17 incident where _prepare_voyage_batches
+    capped at 4 groups per request — 250x below the Voyage contextualized
+    API limit of 1000 inputs/request. Small-file repos took hours instead
+    of minutes because each request only sent 4 files.
+    """
+    from embeddings.voyage_context_embedder import _prepare_voyage_batches
+
+    # 100 small groups, each well under token cap — should pack efficiently.
+    small_groups = [["short chunk"] for _ in range(100)]
+    batches = _prepare_voyage_batches(small_groups)
+
+    # Before fix: 100 / 4 = 25 batches. After fix: 1 batch (all fit under
+    # both token cap and input cap).
+    assert len(batches) == 1, (
+        f"Expected 1 batch for 100 small groups, got {len(batches)}. "
+        "The group-count cap is throttling voyage-context throughput."
+    )
+    assert len(batches[0]) == 100
+
+
+def test_voyage_context_respects_input_cap():
+    """When inputs exceed the API's 1000-input limit, split into batches."""
+    from embeddings.voyage_context_embedder import (
+        _prepare_voyage_batches,
+        _VOYAGE_MAX_INPUTS_PER_BATCH,
+    )
+
+    # Build N small groups where N > _VOYAGE_MAX_INPUTS_PER_BATCH
+    n = _VOYAGE_MAX_INPUTS_PER_BATCH + 50
+    small_groups = [["short"] for _ in range(n)]
+    batches = _prepare_voyage_batches(small_groups)
+
+    assert len(batches) >= 2, "Must split when exceeding input cap"
+    # First batch should be at the cap
+    assert len(batches[0]) == _VOYAGE_MAX_INPUTS_PER_BATCH
+
+
+def test_voyage_context_respects_token_cap():
+    """When tokens exceed per-batch cap, split even if input count is small."""
+    from embeddings.voyage_context_embedder import _prepare_voyage_batches
+
+    # 3 groups each ~50K tokens — should split (total 150K > 100K cap)
+    # 50K tokens ≈ 200K chars
+    large_group = ["x" * 200_000]
+    batches = _prepare_voyage_batches([large_group, large_group, large_group])
+
+    # 3 groups × 50K = 150K tokens, exceeds 100K cap → at least 2 batches
+    assert len(batches) >= 2

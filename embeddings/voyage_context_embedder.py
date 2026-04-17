@@ -13,8 +13,18 @@ logger = logging.getLogger(__name__)
 
 
 # --- Voyage batch token management ---
+# API limits (verified from docs.voyageai.com/reference/contextualized-embeddings-api):
+#   - 1,000 inputs per request
+#   - 120K tokens per request
+#   - 16K chunks across inputs
+# Headroom: tokens at 100K, inputs at 500 (half of 1000). The previous cap of
+# 4 was unjustified and throttled throughput by ~100x on repos with many small
+# files (2026-04-17 incident: 10,993 chunks took 3+ hours at the 4-group cap
+# while GHES with larger files completed in 15 min because groups hit the
+# token cap before the group-count cap).
 _VOYAGE_MAX_TOKENS_PER_DOC = 30_000   # API limit 32K, leave headroom
 _VOYAGE_MAX_TOKENS_PER_BATCH = 100_000  # API limit 120K, leave headroom
+_VOYAGE_MAX_INPUTS_PER_BATCH = 500  # API limit 1000, leave headroom
 
 
 def _estimate_tokens(texts: list[str]) -> int:
@@ -62,7 +72,7 @@ def _prepare_voyage_batches(grouped_texts: list[list[str]]) -> list[list[list[st
     for group in split_groups:
         group_tokens = _estimate_tokens(group)
         if current_batch and (current_tokens + group_tokens > _VOYAGE_MAX_TOKENS_PER_BATCH
-                              or len(current_batch) >= 4):
+                              or len(current_batch) >= _VOYAGE_MAX_INPUTS_PER_BATCH):
             batches.append(current_batch)
             current_batch = [group]
             current_tokens = group_tokens
