@@ -226,7 +226,15 @@ class IncrementalIndexer:
 
             # Embed chunks — use Batch API for large full reindexes if enabled
             all_embedding_results = []
-            embed_batch_size = 64
+            # Batch ceiling matches Voyage's hard API limits (1000 inputs,
+            # 120K tokens). Provider-specific embedders (voyage-context,
+            # openai_embedder) enforce their own token-aware sub-batching, so
+            # this is an upper bound not a target size. Prior value of 64 was
+            # ~16x below even the inner voyage-context cap, causing Voyage
+            # API's fixed ~20s per-call overhead to dominate throughput on
+            # large repos (2026-04-17 incident: 10,993 chunks took hours at
+            # 64 instead of ~20 min at 1000).
+            embed_batch_size = 1000
             self._progress_fn("embedding", 0, len(all_chunks))
 
             use_batch = (
