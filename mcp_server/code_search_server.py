@@ -64,6 +64,11 @@ class CodeSearchServer:
         self._index_manager: Optional[CodeIndexManager] = None
         self._searcher: Optional[IntelligentSearcher] = None
         self._current_project: Optional[str] = None
+        # Track the active provider so downstream helpers resolve the
+        # correct provider-aware storage dir. Without this, switch_project
+        # selects the provider-aware index but subsequent search_code calls
+        # fall back to the legacy (path-only) hash and return empty results.
+        self._current_provider: Optional[str] = None
         self._indexing_job = (
             None  # {job_id, status, phase, current, total, errors, result}
         )
@@ -211,25 +216,37 @@ class CodeSearchServer:
             logger.warning(f"Failed to check/auto-index project {project_path}: {e}")
             return False
 
-    def embedder(self, project_path: str = None) -> CodeEmbedder:
-        """Get embedder for a project, using its stored model config if available."""
+    def embedder(self, project_path: str = None, provider: str = None) -> CodeEmbedder:
+        """Get embedder for a project, using its stored model config if available.
+
+        Args:
+            project_path: Project path. Used to resolve the storage dir whose
+                project_info.json supplies the embedding provider/model.
+            provider: When set, the provider-aware storage dir is resolved so
+                the project_info.json matches the caller's intent. Without
+                this, we fall back to the legacy (path-only) hash and read
+                whatever provider was stored first, which can clobber
+                provider-specific indexes during dual-model workflows.
+        """
         cache_dir = get_storage_dir() / "models"
         cache_dir.mkdir(exist_ok=True)
 
         # Read project's stored embedding config if project_path given
-        provider = ""
+        stored_provider = ""
         model_name = ""
         if project_path:
-            project_dir = self.get_project_storage_dir(project_path)
+            project_dir = self.get_project_storage_dir(project_path, provider=provider)
             info_file = project_dir / "project_info.json"
             if info_file.exists():
                 try:
                     with open(info_file, "r") as f:
                         info = json.load(f)
-                    provider = info.get("embedding_provider", "")
+                    stored_provider = info.get("embedding_provider", "")
                     model_name = info.get("embedding_model", "")
                 except Exception:
                     pass
+        # Caller-supplied provider overrides anything stored
+        provider = provider or stored_provider
 
         # Override env vars temporarily if project has stored config
         env_overrides = {}
@@ -284,7 +301,12 @@ class CodeSearchServer:
     def get_index_manager(
         self, project_path: str = None, provider: str = None
     ) -> CodeIndexManager:
-        """Get index manager for specific or current project."""
+        """Get index manager for specific or current project.
+
+        Invalidates the cached manager when either the project path or the
+        provider changes, so dual-model workflows (voyage + voyage-context)
+        don't reuse one provider's index dir for the other provider's reads.
+        """
         if project_path is None:
             if self._current_project is None:
                 project_path = os.getcwd()
@@ -293,33 +315,63 @@ class CodeSearchServer:
             else:
                 project_path = self._current_project
 
-        if self._current_project != project_path:
+        # Default to the server's active provider when caller didn't pass one.
+        # Explicit None is distinguished from "use active": we only fall back
+        # to _current_provider when provider arg was omitted.
+        effective_provider = provider if provider is not None else self._current_provider
+
+        if (
+            self._current_project != project_path
+            or self._current_provider != effective_provider
+        ):
             self._index_manager = None
             self._current_project = project_path
+            self._current_provider = effective_provider
 
         if self._index_manager is None:
-            project_dir = self.get_project_storage_dir(project_path, provider=provider)
+            project_dir = self.get_project_storage_dir(
+                project_path, provider=effective_provider
+            )
             index_dir = project_dir / "index"
             index_dir.mkdir(exist_ok=True)
             self._index_manager = CodeIndexManager(str(index_dir))
-            logger.info(f"Index manager initialized for: {Path(project_path).name}")
+            logger.info(
+                f"Index manager initialized for: {Path(project_path).name}"
+                + (f" (provider: {effective_provider})" if effective_provider else "")
+            )
 
         return self._index_manager
 
-    def get_searcher(self, project_path: str = None) -> IntelligentSearcher:
-        """Get searcher for specific or current project."""
+    def get_searcher(
+        self, project_path: str = None, provider: str = None
+    ) -> IntelligentSearcher:
+        """Get searcher for specific or current project.
+
+        Invalidates the cached searcher when either project path or provider
+        changes. Without this, switching from voyage to voyage-context reuses
+        the voyage searcher (wrong embedder + wrong index dir) and returns
+        empty results.
+        """
         if project_path is None and self._current_project is None:
             project_path = os.getcwd()
             logger.info(f"No active project. Using cwd: {project_path}")
             self.ensure_project_indexed(project_path)
 
-        if self._current_project != project_path or self._searcher is None:
+        effective_provider = provider if provider is not None else self._current_provider
+
+        if (
+            self._current_project != project_path
+            or self._current_provider != effective_provider
+            or self._searcher is None
+        ):
+            # get_index_manager updates _current_project and _current_provider
             self._searcher = IntelligentSearcher(
-                self.get_index_manager(project_path),
-                self.embedder(self._current_project),
+                self.get_index_manager(project_path, provider=effective_provider),
+                self.embedder(self._current_project, provider=effective_provider),
             )
             logger.info(
                 f"Searcher initialized for: {Path(self._current_project).name if self._current_project else 'unknown'}"
+                + (f" (provider: {effective_provider})" if effective_provider else "")
             )
 
         return self._searcher
@@ -366,8 +418,16 @@ class CodeSearchServer:
                     f"Checking if index needs refresh (max age: {max_age_minutes} minutes)"
                 )
 
-                index_manager = self.get_index_manager(self._current_project)
-                embedder = self.embedder(self._current_project)
+                # Pass _current_provider so auto-reindex writes to the same
+                # provider-aware dir the searcher is reading from. Without
+                # this, auto-reindex runs against the legacy hash and the
+                # fresh embeddings never reach the searcher's index.
+                index_manager = self.get_index_manager(
+                    self._current_project, provider=self._current_provider
+                )
+                embedder = self.embedder(
+                    self._current_project, provider=self._current_provider
+                )
                 chunker = MultiLanguageChunker(self._current_project)
 
                 incremental_indexer = IncrementalIndexer(
@@ -641,10 +701,18 @@ class CodeSearchServer:
                 try:
                     self._maybe_start_model_preload()
 
+                    # Reset cached manager/searcher so this index job gets a
+                    # fresh manager bound to the provider-aware dir even if a
+                    # previous run left one cached for a different provider.
+                    self._index_manager = None
+                    self._searcher = None
+
                     index_manager = self.get_index_manager(
                         str(directory_path_obj), provider=provider
                     )
-                    embedder = self.embedder(str(directory_path_obj))
+                    embedder = self.embedder(
+                        str(directory_path_obj), provider=provider
+                    )
                     chunker = MultiLanguageChunker(str(directory_path_obj))
                 finally:
                     # Restore env even if setup fails
@@ -971,6 +1039,11 @@ class CodeSearchServer:
                 )
 
             self._current_project = str(project_path)
+            # Persist the active provider so subsequent search_code /
+            # find_similar_code calls resolve to the same storage dir
+            # selected here. Without this the downstream helpers fall back
+            # to the legacy (path-only) hash and return empty results.
+            self._current_provider = provider
             self._index_manager = None
             self._searcher = None
 
@@ -1063,8 +1136,18 @@ class CodeSearchServer:
             logger.error(error_msg, exc_info=True)
             return json.dumps({"error": error_msg})
 
-    def delete_project(self, project_name: str) -> str:
-        """Delete a project and all its data from storage."""
+    def delete_project(self, project_name: str, project_hash: str = None) -> str:
+        """Delete a project and all its data from storage.
+
+        Args:
+            project_name: Project directory basename (matches the
+                `project_name` field in project_info.json or the directory
+                name prefix before `_<hash>`).
+            project_hash: Optional 8-char hash to disambiguate when multiple
+                indexes exist for the same name (e.g., dual-model workflows
+                where voyage and voyage-context coexist). Full directory
+                names like `my-project_a1b2c3d4` are accepted and parsed.
+        """
         try:
             base_dir = get_storage_dir()
             projects_dir = base_dir / "projects"
@@ -1072,28 +1155,50 @@ class CodeSearchServer:
             if not projects_dir.exists():
                 return json.dumps({"success": False, "error": f"Project not found: {project_name}"})
 
-            # Find project directory by scanning project_info.json or directory prefix
+            # Accept "name_hash" as the combined identifier in project_name
+            if project_hash is None and "_" in project_name:
+                maybe_name, _, maybe_hash = project_name.rpartition("_")
+                if maybe_name and len(maybe_hash) == 8 and all(
+                    c in "0123456789abcdef" for c in maybe_hash
+                ):
+                    project_name, project_hash = maybe_name, maybe_hash
+
+            # Sort deterministically so repeated delete calls without an
+            # explicit hash walk through matches in a predictable order
+            # instead of relying on filesystem-specific iterdir order.
+            candidates = sorted(
+                (d for d in projects_dir.iterdir() if d.is_dir()),
+                key=lambda d: d.name,
+            )
+
+            # Exact-match first when a hash was supplied
             target_dir = None
             target_project_path = None
-            for project_dir in projects_dir.iterdir():
-                if not project_dir.is_dir():
-                    continue
-                # Check by directory name prefix
-                if project_dir.name.startswith(f"{project_name}_"):
-                    target_dir = project_dir
-                    break
-                # Check by project_info.json content
-                info_file = project_dir / "project_info.json"
-                if info_file.exists():
-                    try:
-                        with open(info_file) as f:
-                            info = json.load(f)
-                        if info.get("project_name") == project_name:
-                            target_dir = project_dir
-                            target_project_path = info.get("project_path")
-                            break
-                    except Exception:
-                        continue
+            if project_hash:
+                exact_name = f"{project_name}_{project_hash}"
+                for project_dir in candidates:
+                    if project_dir.name == exact_name:
+                        target_dir = project_dir
+                        break
+
+            if target_dir is None:
+                for project_dir in candidates:
+                    # Check by directory name prefix
+                    if project_dir.name.startswith(f"{project_name}_"):
+                        target_dir = project_dir
+                        break
+                    # Check by project_info.json content
+                    info_file = project_dir / "project_info.json"
+                    if info_file.exists():
+                        try:
+                            with open(info_file) as f:
+                                info = json.load(f)
+                            if info.get("project_name") == project_name:
+                                target_dir = project_dir
+                                target_project_path = info.get("project_path")
+                                break
+                        except Exception:
+                            continue
 
             if target_dir is None:
                 return json.dumps({"success": False, "error": f"Project not found: {project_name}"})
@@ -1113,6 +1218,7 @@ class CodeSearchServer:
             if self._current_project and target_project_path:
                 if str(Path(self._current_project).resolve()) == str(Path(target_project_path).resolve()):
                     self._current_project = None
+                    self._current_provider = None
                     self._index_manager = None
                     self._searcher = None
 
