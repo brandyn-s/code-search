@@ -1014,7 +1014,9 @@ class CodeSearchServer:
             project_path: Filesystem path to the project.
             provider: Embedding provider to switch to (e.g., 'voyage', 'voyage-context').
                 When set, switches to the provider-specific index for this path.
-                When None, uses the legacy (path-only) hash for backward compatibility.
+                When None, auto-resolves from the stored project_info.json of the
+                legacy-hash dir. Falls back to the legacy hash only when the
+                stored config says so.
         """
         try:
             project_path = Path(project_path).resolve()
@@ -1023,8 +1025,55 @@ class CodeSearchServer:
                     {"error": f"Project path does not exist: {project_path}"}
                 )
 
+            # Auto-resolve provider from the legacy-hash project_info.json when
+            # the caller didn't specify one. This prevents the failure mode
+            # where switch_project routes to a corrupted / stub legacy dir
+            # while the real index lives under the provider-aware hash. Affects
+            # any project indexed with a non-None provider before the
+            # provider-aware hash was introduced (or re-indexed since).
+            effective_provider = provider
+            if effective_provider is None:
+                legacy_hash = hashlib.md5(
+                    str(project_path).encode()
+                ).hexdigest()[:8]
+                legacy_info = (
+                    get_storage_dir()
+                    / "projects"
+                    / f"{project_path.name}_{legacy_hash}"
+                    / "project_info.json"
+                )
+                if legacy_info.exists():
+                    try:
+                        with open(legacy_info) as f:
+                            stored = json.load(f)
+                        stored_provider = stored.get("embedding_provider")
+                        if stored_provider:
+                            # Prefer provider-aware dir when it exists and has
+                            # a real index; only fall back to the legacy dir
+                            # if the provider-aware dir is missing or empty.
+                            provider_hash = hashlib.md5(
+                                f"{project_path}:{stored_provider}".encode()
+                            ).hexdigest()[:8]
+                            provider_dir = (
+                                get_storage_dir()
+                                / "projects"
+                                / f"{project_path.name}_{provider_hash}"
+                            )
+                            provider_code_index = provider_dir / "index" / "code.index"
+                            if provider_code_index.exists():
+                                effective_provider = stored_provider
+                                logger.info(
+                                    f"Auto-resolved provider={stored_provider} from "
+                                    f"project_info.json (legacy dir may be stale)"
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to auto-resolve provider from "
+                            f"{legacy_info}: {e}"
+                        )
+
             project_dir = self.get_project_storage_dir(
-                str(project_path), provider=provider
+                str(project_path), provider=effective_provider
             )
             index_dir = project_dir / "index"
 
@@ -1032,9 +1081,17 @@ class CodeSearchServer:
                 return json.dumps(
                     {
                         "error": f"Project not indexed: {project_path}"
-                        + (f" (provider: {provider})" if provider else ""),
+                        + (
+                            f" (provider: {effective_provider})"
+                            if effective_provider
+                            else ""
+                        ),
                         "suggestion": f"Run index_directory('{project_path}'"
-                        + (f", provider='{provider}')" if provider else ")"),
+                        + (
+                            f", provider='{effective_provider}')"
+                            if effective_provider
+                            else ")"
+                        ),
                     }
                 )
 
@@ -1043,7 +1100,7 @@ class CodeSearchServer:
             # find_similar_code calls resolve to the same storage dir
             # selected here. Without this the downstream helpers fall back
             # to the legacy (path-only) hash and return empty results.
-            self._current_provider = provider
+            self._current_provider = effective_provider
             self._index_manager = None
             self._searcher = None
 
@@ -1055,14 +1112,18 @@ class CodeSearchServer:
 
             logger.info(
                 f"Switched to project: {project_path.name}"
-                + (f" (provider: {provider})" if provider else "")
+                + (
+                    f" (provider: {effective_provider})"
+                    if effective_provider
+                    else ""
+                )
             )
 
             return json.dumps(
                 {
                     "success": True,
                     "message": f"Switched to project: {project_path.name}"
-                    + (f" ({provider})" if provider else ""),
+                    + (f" ({effective_provider})" if effective_provider else ""),
                     "project_info": project_info,
                 }
             )

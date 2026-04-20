@@ -166,6 +166,131 @@ def test_delete_project_accepts_combined_name_hash(server, tmp_path, monkeypatch
     assert (tmp_path / "projects" / "myrepo_bbbbbbbb").exists()
 
 
+def test_switch_project_auto_resolves_provider_from_legacy_info(
+    server, tmp_path, monkeypatch
+):
+    """switch_project(path) without provider must read the legacy-dir's
+    project_info.json and route to the provider-aware index if one exists.
+
+    Regression: 2026-04-20. The legacy dir's on-disk index became corrupted
+    (chunk_ids.pkl wiped to [], stats.json zeroed) while the provider-aware
+    index stayed intact. switch_project(path) resolved to the stub legacy
+    dir and every subsequent search_code raised "list index out of range".
+    Fix: when provider is None, read legacy dir's project_info.json and
+    switch to the provider-aware hash if the provider-aware dir has a
+    populated index.
+    """
+    from mcp_server import code_search_server as mod
+
+    monkeypatch.setattr(mod, "get_storage_dir", lambda: tmp_path)
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    import hashlib
+
+    path_resolved = str(repo.resolve())
+    legacy_hash = hashlib.md5(path_resolved.encode()).hexdigest()[:8]
+    voyage_hash = hashlib.md5(f"{path_resolved}:voyage".encode()).hexdigest()[:8]
+
+    # Legacy dir: has project_info.json pointing at "voyage" provider,
+    # but a STUB index (no code.index) — this is the corrupted state.
+    legacy_dir = tmp_path / "projects" / f"myrepo_{legacy_hash}"
+    (legacy_dir / "index").mkdir(parents=True)
+    (legacy_dir / "project_info.json").write_text(
+        json.dumps(
+            {
+                "project_name": "myrepo",
+                "project_path": path_resolved,
+                "project_hash": legacy_hash,
+                "embedding_provider": "voyage",
+                "embedding_model": "",
+                "content_mode": "code",
+            }
+        )
+    )
+    # Note: legacy dir has NO code.index, simulating the corrupted state.
+
+    # Provider-aware dir: fully populated.
+    _make_populated_dir(tmp_path, "myrepo", voyage_hash, "voyage")
+
+    result = json.loads(server.switch_project(str(repo)))
+    assert result.get("success") is True, (
+        f"switch_project without provider should have auto-resolved to "
+        f"the provider-aware dir (voyage), got: {result}"
+    )
+    # Critical: _current_provider must be set to "voyage" so subsequent
+    # search_code / get_index_manager calls target the real index.
+    assert server._current_provider == "voyage", (
+        f"auto-resolve failed: _current_provider={server._current_provider}, "
+        f"expected 'voyage'. Legacy dir's stored provider should have been "
+        f"consulted."
+    )
+
+
+def test_switch_project_without_info_falls_back_to_legacy(
+    server, tmp_path, monkeypatch
+):
+    """When no legacy project_info.json exists, switch_project(path) uses
+    the legacy hash directly. Preserves backward-compat for old indexes
+    that pre-date provider-aware hashing.
+    """
+    from mcp_server import code_search_server as mod
+
+    monkeypatch.setattr(mod, "get_storage_dir", lambda: tmp_path)
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    import hashlib
+
+    path_resolved = str(repo.resolve())
+    legacy_hash = hashlib.md5(path_resolved.encode()).hexdigest()[:8]
+
+    # Populate legacy dir with a working index but NO project_info.json
+    # (simulates a pre-provider-aware index).
+    legacy_dir = tmp_path / "projects" / f"myrepo_{legacy_hash}"
+    (legacy_dir / "index").mkdir(parents=True)
+    (legacy_dir / "index" / "code.index").write_bytes(b"\x00" * 128)
+
+    result = json.loads(server.switch_project(str(repo)))
+    assert result.get("success") is True, f"switch failed: {result}"
+    assert server._current_provider is None, (
+        "no provider info => stay on legacy hash (backward-compat)"
+    )
+
+
+def test_switch_project_auto_resolve_skips_when_provider_dir_missing(
+    server, tmp_path, monkeypatch
+):
+    """Auto-resolve must only kick in when the provider-aware dir has a
+    real index. If legacy project_info.json points at a provider whose
+    dir doesn't exist, fall through to the legacy dir (don't go wrong).
+    """
+    from mcp_server import code_search_server as mod
+
+    monkeypatch.setattr(mod, "get_storage_dir", lambda: tmp_path)
+
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    import hashlib
+
+    path_resolved = str(repo.resolve())
+    legacy_hash = hashlib.md5(path_resolved.encode()).hexdigest()[:8]
+
+    # Populated legacy dir; project_info.json names a provider whose dir
+    # does not exist.
+    _make_populated_dir(tmp_path, "myrepo", legacy_hash, "voyage")
+    # No _make_populated_dir for the voyage provider-aware hash.
+
+    result = json.loads(server.switch_project(str(repo)))
+    assert result.get("success") is True, f"switch failed: {result}"
+    assert server._current_provider is None, (
+        "provider-aware dir missing => must NOT auto-switch; stays on legacy"
+    )
+
+
 def test_delete_project_deterministic_without_hash(server, tmp_path, monkeypatch):
     """Without a hash, delete picks sorted-first for repeatability."""
     from mcp_server import code_search_server as mod
