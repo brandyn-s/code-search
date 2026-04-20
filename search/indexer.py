@@ -135,10 +135,78 @@ class CodeIndexManager:
             if self.chunk_id_path.exists():
                 with open(self.chunk_id_path, 'rb') as f:
                     self._chunk_ids = pickle.load(f)
+
+            # Detect and repair chunk_ids.pkl corruption: if FAISS has vectors
+            # but chunk_ids is missing/empty/shorter than expected, rebuild
+            # from metadata.db. Each metadata value is a dict with 'index_id'
+            # giving its FAISS position; we reconstruct the ordered list.
+            self._maybe_rebuild_chunk_ids()
         else:
             self._logger.info("Creating new index")
             self._index = None
             self._chunk_ids = []
+
+    def _maybe_rebuild_chunk_ids(self):
+        """Rebuild chunk_ids.pkl from metadata.db if it's missing or out of sync.
+
+        Guards against the failure mode where chunk_ids.pkl gets truncated to
+        an empty list (5 bytes: empty pickle) by a failed load path, causing
+        every subsequent search to raise `list index out of range`. The FAISS
+        index and metadata database are still intact; only the parallel
+        chunk-id list is lost. Recovery is lossless as long as metadata.db
+        still holds an `index_id` for every row.
+        """
+        if self._index is None:
+            return
+        faiss_n = self._index.ntotal
+        chunk_n = len(self._chunk_ids)
+        if faiss_n == 0:
+            return
+        if chunk_n == faiss_n:
+            return
+        if not self.metadata_path.exists():
+            self._logger.warning(
+                "chunk_ids mismatch (faiss=%d, chunk_ids=%d) but metadata.db missing — "
+                "cannot auto-rebuild; reindex required",
+                faiss_n, chunk_n,
+            )
+            return
+        self._logger.warning(
+            "chunk_ids out of sync with FAISS (faiss=%d, chunk_ids=%d) — rebuilding from metadata.db",
+            faiss_n, chunk_n,
+        )
+        rebuilt = [None] * faiss_n
+        filled = 0
+        for chunk_id, entry in self.metadata_db.items():
+            idx = entry.get("index_id") if isinstance(entry, dict) else None
+            if not isinstance(idx, int) or idx < 0 or idx >= faiss_n:
+                continue
+            if rebuilt[idx] is None:
+                rebuilt[idx] = chunk_id
+                filled += 1
+        missing = faiss_n - filled
+        if missing > 0:
+            self._logger.error(
+                "chunk_ids rebuild incomplete: %d of %d slots still missing — reindex recommended",
+                missing, faiss_n,
+            )
+            # Leave self._chunk_ids as-is rather than shipping a half-rebuilt list
+            # that would mismatch FAISS positions.
+            return
+        # Back up the corrupted pkl (if present) before overwriting.
+        if self.chunk_id_path.exists() and chunk_n != faiss_n:
+            import time
+            bak = self.chunk_id_path.with_suffix(
+                f".pkl.bak.{time.strftime('%Y%m%dT%H%M%S')}"
+            )
+            try:
+                bak.write_bytes(self.chunk_id_path.read_bytes())
+            except OSError as exc:
+                self._logger.warning("could not back up corrupted chunk_ids.pkl: %s", exc)
+        self._chunk_ids = rebuilt
+        with open(self.chunk_id_path, "wb") as f:
+            pickle.dump(self._chunk_ids, f)
+        self._logger.info("chunk_ids rebuilt and persisted (%d entries)", faiss_n)
     
     def create_index(self, embedding_dimension: int, index_type: str = "flat"):
         """Create a new FAISS index.
