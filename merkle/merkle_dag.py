@@ -1,6 +1,37 @@
 """Merkle DAG (Directed Acyclic Graph) implementation for file change tracking."""
 
 import hashlib
+
+# Extensions whose content should be hashed body-only, skipping any leading
+# YAML frontmatter. Scoped tight — only the markdown variants that commonly
+# carry ``---`` metadata blocks. New formats go here explicitly rather than a
+# broad heuristic, so non-markdown files (e.g. code with stray leading dashes)
+# can't accidentally get their top trimmed.
+_MD_EXTENSIONS = frozenset({".md", ".mdx", ".markdown"})
+
+
+def _body_content(content: bytes) -> bytes:
+    """Return the Markdown body, stripping a leading YAML frontmatter block.
+
+    A frontmatter block is identified by a file starting with ``---\\n`` and
+    a closing ``\\n---`` delimiter. If either marker is missing, the content
+    is returned unchanged — there is no frontmatter, or the file is not a
+    markdown-frontmatter-bearing doc.
+
+    Decoding uses errors='replace' so a binary file accidentally routed here
+    (extension wrong) cannot raise UnicodeDecodeError; the worst-case result
+    is a hash that differs slightly from the raw bytes, which still produces
+    a deterministic cache key.
+    """
+    text = content.decode(errors="replace")
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            # Include the closing marker so we land on the character after
+            # ``\n---``. The trailing newline after ``---`` is left in the
+            # body — it's part of the content separator, not frontmatter.
+            return text[end + 4:].encode()
+    return content
 import json
 import os
 from dataclasses import dataclass, field
@@ -90,25 +121,43 @@ class MerkleDAG:
     
     def hash_file(self, file_path: Path) -> Tuple[str, int]:
         """Calculate SHA-256 hash of a file.
-        
+
+        For Markdown files (.md, .mdx, .markdown) the hash is taken over the
+        body only, stripping any leading YAML frontmatter (``---`` block at
+        the top). This stops metadata-only edits — ``reviewed:`` dates,
+        ``tags:``, ``status:``, etc. — from invalidating the cache and
+        forcing a full re-chunk + re-embed of unchanged content. The size
+        returned is still the raw on-disk file size for accurate filesystem
+        accounting in the Merkle DAG.
+
         Args:
             file_path: Path to file
-            
+
         Returns:
             Tuple of (hash, file_size)
         """
         sha256 = hashlib.sha256()
         size = 0
-        
+
         try:
-            with open(file_path, 'rb') as f:
-                while chunk := f.read(8192):
-                    sha256.update(chunk)
-                    size += len(chunk)
+            ext = file_path.suffix.lower()
+            if ext in _MD_EXTENSIONS:
+                # Small memory blast is acceptable: markdown files are typically
+                # well under 1MB. The body-only hash matters for the common
+                # case of api-docs/*.md where every edit to a metadata field
+                # would otherwise force a Voyage re-embed.
+                raw = file_path.read_bytes()
+                size = len(raw)
+                sha256.update(_body_content(raw))
+            else:
+                with open(file_path, 'rb') as f:
+                    while chunk := f.read(8192):
+                        sha256.update(chunk)
+                        size += len(chunk)
         except (IOError, OSError):
             # Handle permission errors or broken symlinks
             sha256.update(str(file_path).encode())
-            
+
         return sha256.hexdigest(), size
     
     def hash_directory(self, dir_path: Path, child_hashes: List[str]) -> str:
