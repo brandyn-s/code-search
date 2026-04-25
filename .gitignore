@@ -217,3 +217,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Benchmark eval outputs (test artifacts, not source)
+benchmarks/eval_*/
+benchmarks/_query_batch.json
+benchmarks/_transforms.json
