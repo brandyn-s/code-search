@@ -1,0 +1,35 @@
+name: Mirror to personal account
+
+on:
+  push:
+    branches: ['**']
+  delete:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push mirror to personal account
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          DEST_REPO: redacted-brandyn/${{ github.event.repository.name }}
+        run: |
+          if [ -z "$MIRROR_TOKEN" ]; then
+            echo "::error::MIRROR_TOKEN secret not set. Generate a fine-grained PAT at"
+            echo "::error::  https://github.com/settings/personal-access-tokens/new"
+            echo "::error::with Contents:Write permission on redacted-brandyn/* repos, then"
+            echo "::error::set it as MIRROR_TOKEN secret on this repo."
+            exit 1
+          fi
+          git remote add personal "https://x-access-token:$MIRROR_TOKEN@github.com/$DEST_REPO.git"
+          git push personal --mirror
