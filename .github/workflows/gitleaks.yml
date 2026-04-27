@@ -9,7 +9,7 @@ on:
 
 jobs:
   gitleaks:
-    uses: redacted-org/.github/.github/workflows/gitleaks.yml@main
+    uses: redacted-org/.github/.github/workflows/gitleaks.yml@8c54bdaf3fb46d8bbabb228d2740c050dfe60986 # main
     permissions:
       contents: read
       security-events: write
