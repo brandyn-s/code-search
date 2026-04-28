@@ -6,6 +6,15 @@ on:
   delete:
   workflow_dispatch:
 
+# Serialize mirror runs per ref so concurrent pushes don't race on the
+# personal-fork remote. Without this, two pushes within the same second
+# both fetch from the source then both try to push, and the second one
+# fails with "cannot lock ref ... is at X but expected Y" because the
+# target moved between the second runner's fetch and its push.
+concurrency:
+  group: mirror-${{ github.ref }}
+  cancel-in-progress: false  # let in-flight finish; queue the next
+
 permissions:
   contents: read
 
@@ -32,11 +41,8 @@ jobs:
             exit 1
           fi
           git remote add personal "https://x-access-token:$MIRROR_TOKEN@github.com/$DEST_REPO.git"
-          # Mirror semantics: make the target match the source. Use plain --force,
-          # not --force-with-lease — the lease check requires a local ref that
-          # tracks the target's history, which we don't have. Without --force,
-          # any divergence on the personal repo (including a different HEAD) is
-          # rejected. We do NOT use --mirror because that tries to delete the
-          # target's HEAD branch, which GitHub refuses.
+          # Mirror semantics: source = truth, target follows. Plain --force is
+          # correct (no local lease ref to compare against on the cross-org
+          # target). Concurrency group above prevents two runners racing.
           git push personal --all --force
           git push personal --tags --force
