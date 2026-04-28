@@ -32,9 +32,11 @@ jobs:
             exit 1
           fi
           git remote add personal "https://x-access-token:$MIRROR_TOKEN@github.com/$DEST_REPO.git"
-          # Use --all + --tags instead of --mirror; --mirror tries to delete the
-          # target's HEAD branch (main) which GitHub refuses. --force-with-lease
-          # handles cases where the personal repo has its own commits we should
-          # overwrite (mirror semantics) while still being safer than --force.
-          git push personal --all --force-with-lease
-          git push personal --tags --force-with-lease
+          # Mirror semantics: make the target match the source. Use plain --force,
+          # not --force-with-lease — the lease check requires a local ref that
+          # tracks the target's history, which we don't have. Without --force,
+          # any divergence on the personal repo (including a different HEAD) is
+          # rejected. We do NOT use --mirror because that tries to delete the
+          # target's HEAD branch, which GitHub refuses.
+          git push personal --all --force
+          git push personal --tags --force
