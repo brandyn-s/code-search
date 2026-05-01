@@ -9,7 +9,7 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    if: ${{ (github.event.pull_request.user.login == 'dependabot[bot]') && (github.repository_owner != 'redacted-brandyn') }}
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
