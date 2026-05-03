@@ -34,12 +34,13 @@ DEFAULT_TIMEOUT = 8.0
 DEFAULT_RERANK_K = 15  # rerank top-15, return top-k of those (D4b validated)
 FAILURE_TOLERANCE = 0.3  # if >30% of calls fail, abort and use input order
 # If max Sonnet score across the candidate pool is below this threshold,
-# Sonnet has not identified anything as "Highly relevant" (7-9 in the prompt
-# scale). When the judge is uncertain, Sonnet's score-tie-breaking pushes
-# canonical files down via chunk-keyword density. Falling back to hybrid
-# order in those cases recovers MRR/HR. Validated on n=183 simulation:
-# +0.011 HR@5, +0.016 HR@1, +0.007 MRR vs pure rerank (PR #95+).
-DEFAULT_HYBRID_PRIOR_THRESHOLD = 7
+# Sonnet has not identified anything confidently relevant. When the judge
+# is uncertain, Sonnet's score-tie-breaking pushes canonical files down
+# via chunk-keyword density. Falling back to hybrid order in those cases
+# recovers MRR/HR. Threshold=6 ("Partially relevant or above") empirically
+# beats 5 and 7 on n=183 multi-target real_session — see eval_v4/run_a0c_*.
+# Default=7 (PR #95) was too aggressive; tuned to 6 in PR #96.
+DEFAULT_HYBRID_PRIOR_THRESHOLD = 6
 
 JUDGE_PROMPT = """You are evaluating whether a code chunk is relevant to a developer search query.
 
