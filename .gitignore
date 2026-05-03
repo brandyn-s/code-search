@@ -226,3 +226,7 @@ benchmarks/_grow_run_*/
 benchmarks/_harvested_search_cache.json
 benchmarks/_harvested_label_cache.json
 benchmarks/golden_harvested_labeled.json.backup
+benchmarks/_exp2_work/
+benchmarks/_exp3_symbol_data/
+benchmarks/_a1_work/
+benchmarks/_inspect_gold.py
