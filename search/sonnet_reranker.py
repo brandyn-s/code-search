@@ -33,6 +33,13 @@ MAX_CONTENT_CHARS = 4000
 DEFAULT_TIMEOUT = 8.0
 DEFAULT_RERANK_K = 15  # rerank top-15, return top-k of those (D4b validated)
 FAILURE_TOLERANCE = 0.3  # if >30% of calls fail, abort and use input order
+# If max Sonnet score across the candidate pool is below this threshold,
+# Sonnet has not identified anything as "Highly relevant" (7-9 in the prompt
+# scale). When the judge is uncertain, Sonnet's score-tie-breaking pushes
+# canonical files down via chunk-keyword density. Falling back to hybrid
+# order in those cases recovers MRR/HR. Validated on n=183 simulation:
+# +0.011 HR@5, +0.016 HR@1, +0.007 MRR vs pure rerank (PR #95+).
+DEFAULT_HYBRID_PRIOR_THRESHOLD = 7
 
 JUDGE_PROMPT = """You are evaluating whether a code chunk is relevant to a developer search query.
 
@@ -95,6 +102,7 @@ async def _rerank_async(
     candidates: list[dict],
     top_k: int,
     timeout: float,
+    hybrid_prior_threshold: int,
 ) -> list[dict]:
     """Score candidates in parallel, sort by score, return top-k.
     Falls back to input[:top_k] on timeout, too-many-failures, or any exception.
@@ -124,11 +132,22 @@ async def _rerank_async(
         LOG.warning(f"Sonnet reranker {n_failed}/{len(scores)} failed; using hybrid order")
         return candidates[:top_k]
 
+    # Hybrid-prior fallback: if the max Sonnet score across the candidate pool
+    # is below the threshold (default 7 = "Highly relevant" boundary in
+    # JUDGE_PROMPT), Sonnet hasn't identified anything as confidently relevant.
+    # Tie-breaking on uniformly-low scores favors keyword-dense chunks over
+    # canonical implementations. Preserve hybrid order in that case.
+    valid_scores = [s for s in scores if s is not None]
+    if valid_scores and max(valid_scores) < hybrid_prior_threshold:
+        LOG.debug(f"Sonnet max score {max(valid_scores)} < {hybrid_prior_threshold}; "
+                  f"using hybrid order")
+        return candidates[:top_k]
+
     # Sort: higher score wins; None scores sink to bottom; preserve original
     # order on ties (stable sort)
     indexed = list(enumerate(zip(scores, candidates)))
     indexed.sort(key=lambda x: (x[1][0] is None, -(x[1][0] or -1), x[0]))
-    return [c for _, (_s, c) in indexed[:top_k]]
+    return [c for _, (_, c) in indexed[:top_k]]
 
 
 def rerank_with_sonnet(
@@ -166,7 +185,15 @@ def rerank_with_sonnet(
             timeout = DEFAULT_TIMEOUT
 
     try:
-        return asyncio.run(_rerank_async(query, candidates, top_k, timeout))
+        threshold = int(os.environ.get(
+            "SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD",
+            DEFAULT_HYBRID_PRIOR_THRESHOLD,
+        ))
+    except ValueError:
+        threshold = DEFAULT_HYBRID_PRIOR_THRESHOLD
+
+    try:
+        return asyncio.run(_rerank_async(query, candidates, top_k, timeout, threshold))
     except RuntimeError as e:
         # asyncio.run fails if already in an event loop; in that case
         # caller is async — we don't have a sync fallback here, so just

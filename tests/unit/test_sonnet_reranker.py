@@ -86,3 +86,63 @@ def test_preserves_extra_keys(monkeypatch, sample_candidates):
     for r in result:
         assert "_orig" in r
         assert r["_orig"].startswith("marker_")
+
+
+@pytest.mark.asyncio
+async def test_hybrid_prior_threshold_low_max_uses_input_order(monkeypatch):
+    """When max Sonnet score < threshold, return input order (hybrid prior fallback)."""
+    from search.sonnet_reranker import _rerank_async
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(5)
+    ]
+    # Monkey-patch _score_one to return uniform low scores (max=3, below default threshold=7)
+    async def fake_score(client, query, file_path, content):
+        return 3
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    result = await _rerank_async("q", candidates, top_k=3, timeout=8.0,
+                                  hybrid_prior_threshold=7)
+    # Hybrid order preserved (chunks 0, 1, 2 in original order)
+    assert [c["chunk_id"] for c in result] == ["c0", "c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_prior_threshold_high_max_uses_rerank(monkeypatch):
+    """When max Sonnet score >= threshold, apply rerank ordering."""
+    from search.sonnet_reranker import _rerank_async
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(3)
+    ]
+    # Mock: c2 scores highest (8), c0 mid (5), c1 low (3) — max=8 above threshold=7
+    scores_iter = iter([5, 3, 8])
+    async def fake_score(client, query, file_path, content):
+        return next(scores_iter)
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    result = await _rerank_async("q", candidates, top_k=3, timeout=8.0,
+                                  hybrid_prior_threshold=7)
+    # Rerank order: c2 (8), c0 (5), c1 (3)
+    assert [c["chunk_id"] for c in result] == ["c2", "c0", "c1"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_prior_threshold_disabled_when_zero(monkeypatch):
+    """threshold=0 disables the hybrid-prior fallback (always rerank)."""
+    from search.sonnet_reranker import _rerank_async
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(3)
+    ]
+    # Mock: uniform low scores (max=2)
+    scores_iter = iter([1, 2, 1])
+    async def fake_score(client, query, file_path, content):
+        return next(scores_iter)
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    # threshold=0: max=2 >= 0 (always true), so rerank applied
+    result = await _rerank_async("q", candidates, top_k=3, timeout=8.0,
+                                  hybrid_prior_threshold=0)
+    # Rerank order: c1 (2), c0 (1), c2 (1) — c0 wins tie (lower input index)
+    assert [c["chunk_id"] for c in result] == ["c1", "c0", "c2"]
