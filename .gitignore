@@ -230,4 +230,6 @@ benchmarks/_exp2_work/
 benchmarks/_exp3_symbol_data/
 benchmarks/_a1_work/
 benchmarks/_a1b_work/
+benchmarks/_d4b_work/
 benchmarks/_inspect_gold.py
+benchmarks/_inspect_codegraph.py

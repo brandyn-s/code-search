@@ -45,7 +45,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 | `CONTENT_MODE` | `code` | `code` or `docs` - affects search weights and provider auto-select |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
-| `RERANKER` | `off` | Cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`). **Disabled** — golden eval (2026-03-22) showed reranking degrades quality: HR 0.700→1.000, MRR 0.527→0.783 with reranker off. The cross-encoder reshuffles well-ranked RRF output into a worse order. Code preserved for future evaluation. |
+| `RERANKER` | `sonnet` | Reranker mode. `sonnet` (default, 2026-05-03+): Sonnet 4.6 query-time reranker, validated +0.087 MRR / +0.137 HR@1 on n=183 multi-target real_session (D4b, PR #93+). Reranks top-15 hybrid candidates via Anthropic API. **Always-on graceful fallback**: missing `ANTHROPIC_API_KEY`, timeout (>8s), or any error → silently returns hybrid order. Cost ~$0.005/query, latency +1-2s. `cross-encoder`: legacy MiniLM cross-encoder (off-by-default since 2026-03-22 A/B showed quality regression). `off`: skip reranking, return RRF+boost order. |
 | `QUANTIZATION` | `int8` | Index type: `int8` (QT_8bit trained, 4x smaller, default), `float32` (legacy), `binary` (32x smaller, opt-in for 100K+ chunks). **Note**: QT_8bit requires a training step (learns value range). Indexes built before 2026-04-05 used QT_8bit_direct which silently returned 0.0 similarities — must reindex. |
 | `VOYAGE_BATCH_API` | `off` | `on` to use Batch API for full reindex (33% cheaper, 1000+ chunk threshold) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |

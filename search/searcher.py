@@ -436,8 +436,45 @@ class IntelligentSearcher:
                 path_boost = 1.0 + (path_boost - 1.0) * 3.0
             result.similarity_score *= path_boost
 
-        # Optional cross-encoder reranking
-        if os.environ.get("RERANKER", "off") == "on" and candidates:
+        # Reranking. Default mode is "sonnet" (validated 2026-05-03 PR #93+:
+        # +0.087 MRR, +0.137 HR@1 on n=183 multi-target real_session). The
+        # Sonnet reranker is graceful: on missing ANTHROPIC_API_KEY, timeout,
+        # or any error, it silently returns input candidates unchanged.
+        # Disable explicitly with RERANKER=off. Legacy cross-encoder via
+        # RERANKER=cross-encoder (off-by-default since A/B showed quality
+        # regression).
+        rerank_mode = os.environ.get("RERANKER", "sonnet").lower()
+        if rerank_mode == "sonnet" and len(candidates) > k:
+            from search.sonnet_reranker import rerank_with_sonnet
+
+            # Rerank only the top-15 candidates (D4b validated: top-30 is
+            # equivalent to top-15 with 2x cost). Build dicts with
+            # full_content so the LLM scores against actual code, not
+            # 200-char snippets.
+            n_to_rerank = min(15, len(candidates))
+            top_candidates = candidates[:n_to_rerank]
+            rerank_input = []
+            for r in top_candidates:
+                meta = metadata_lookup.get(r.chunk_id, {}) or {}
+                full = (meta.get("full_content")
+                        or meta.get("content")
+                        or r.content_preview
+                        or "")
+                rerank_input.append({
+                    "chunk_id": r.chunk_id,
+                    "file_path": r.relative_path,
+                    "full_content": full,
+                    "_orig": r,
+                })
+            reranked = rerank_with_sonnet(query, rerank_input, top_k=k)
+            # Extract original SearchResult objects in new order; tail any
+            # candidates beyond top-15 in their existing order.
+            new_top = [d["_orig"] for d in reranked]
+            tail = candidates[n_to_rerank:]
+            candidates = new_top + tail
+        elif rerank_mode == "cross-encoder" and candidates:
+            # Legacy cross-encoder path (off by default; degrades quality
+            # per 2026-03-22 A/B eval but kept for fallback/comparison).
             from search.reranker import rerank_results
 
             rerank_input = [
@@ -451,13 +488,12 @@ class IntelligentSearcher:
             ]
             reranked = rerank_results(query, rerank_input, top_k=k)
             candidates = [item["result"] for item in reranked]
-            # Update scores from reranker
             for item, candidate in zip(reranked, candidates):
                 candidate.similarity_score = item.get(
                     "rerank_score", candidate.similarity_score
                 )
-
-        if os.environ.get("RERANKER", "off") != "on":
+        else:
+            # rerank_mode == "off" or empty candidates
             candidates.sort(key=lambda r: r.similarity_score, reverse=True)
         return candidates[:k]
 
