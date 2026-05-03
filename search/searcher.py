@@ -43,7 +43,7 @@ def reciprocal_rank_fusion(
 
 # Content mode configurations: (vector_weight, bm25_weight)
 CONTENT_MODE_WEIGHTS = {
-    "code": (0.5, 0.5),  # Tuned 2026-03-22: vw=0.5/k=20 wins over vw=0.4/k=60 (MRR +4.1%)
+    "code": (0.65, 0.35),  # Tuned 2026-05-03: vw=0.65 wins over vw=0.5 by MRR +0.016 on n=99 multi-target gold (B2 per-arm sweep, PR #90)
     "docs": (0.7, 0.3),
     "all": (0.5, 0.5),
 }
