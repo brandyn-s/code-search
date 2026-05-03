@@ -222,3 +222,7 @@ __marimo__/
 benchmarks/eval_*/
 benchmarks/_query_batch.json
 benchmarks/_transforms.json
+benchmarks/_grow_run_*/
+benchmarks/_harvested_search_cache.json
+benchmarks/_harvested_label_cache.json
+benchmarks/golden_harvested_labeled.json.backup
