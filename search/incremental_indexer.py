@@ -104,18 +104,47 @@ class IncrementalIndexer:
         if not project_name:
             project_name = Path(project_path).name
 
+        # REINDEX PROGRESS: structured milestones land in the file-sidecar
+        # logger (~/.claude/logs/code-search-mcp.log) so an operator can
+        # `tail -f` and see liveness during long auto_reindex calls. The
+        # MCP server's pythonw.exe discards stderr, so without this the
+        # call is invisibly slow.
+        logger.warning(
+            "[REINDEX_PROGRESS] incremental_index: starting project=%s force_full=%s",
+            project_name, force_full,
+        )
+
         try:
             # Check if we should do full index
             if force_full or not self.snapshot_manager.has_snapshot(project_path):
-                logger.info(f"Performing full index for {project_name}")
+                logger.warning(
+                    "[REINDEX_PROGRESS] incremental_index: dispatching to _full_index "
+                    "project=%s",
+                    project_name,
+                )
                 return self._full_index(project_path, project_name, start_time)
 
-            # Detect changes
-            logger.info(f"Detecting changes in {project_name}")
+            # Detect changes — Merkle-hashing every file in the tree;
+            # this is the slowest single step on large projects.
+            t_detect = time.time()
+            logger.warning(
+                "[REINDEX_PROGRESS] detect_changes: starting project=%s",
+                project_name,
+            )
             changes, current_dag = self.detect_changes(project_path)
+            logger.warning(
+                "[REINDEX_PROGRESS] detect_changes: done in %.1fs project=%s "
+                "added=%d removed=%d modified=%d",
+                time.time() - t_detect, project_name,
+                len(changes.added), len(changes.removed), len(changes.modified),
+            )
 
             if not changes.has_changes():
-                logger.info(f"No changes detected in {project_name}")
+                logger.warning(
+                    "[REINDEX_PROGRESS] incremental_index: no changes "
+                    "project=%s elapsed=%.1fs",
+                    project_name, time.time() - start_time,
+                )
                 return IncrementalIndexResult(
                     files_added=0,
                     files_removed=0,
@@ -126,15 +155,30 @@ class IncrementalIndexer:
                     success=True,
                 )
 
-            # Log changes
-            logger.info(
-                f"Changes detected - Added: {len(changes.added)}, "
-                f"Removed: {len(changes.removed)}, Modified: {len(changes.modified)}"
+            # Process changes
+            t_remove = time.time()
+            logger.warning(
+                "[REINDEX_PROGRESS] _remove_old_chunks: starting "
+                "files_to_remove=%d project=%s",
+                len(changes.removed) + len(changes.modified), project_name,
+            )
+            chunks_removed = self._remove_old_chunks(changes, project_name)
+            logger.warning(
+                "[REINDEX_PROGRESS] _remove_old_chunks: done in %.1fs removed=%d",
+                time.time() - t_remove, chunks_removed,
             )
 
-            # Process changes
-            chunks_removed = self._remove_old_chunks(changes, project_name)
+            t_add = time.time()
+            logger.warning(
+                "[REINDEX_PROGRESS] _add_new_chunks: starting "
+                "files_to_index=%d project=%s",
+                len(changes.added) + len(changes.modified), project_name,
+            )
             chunks_added = self._add_new_chunks(changes, project_path, project_name)
+            logger.warning(
+                "[REINDEX_PROGRESS] _add_new_chunks: done in %.1fs added=%d",
+                time.time() - t_add, chunks_added,
+            )
 
             # Update snapshot
             self.snapshot_manager.save_snapshot(
@@ -150,6 +194,12 @@ class IncrementalIndexer:
 
             # Update index
             self.indexer.save_index()
+            logger.warning(
+                "[REINDEX_PROGRESS] incremental_index: done in %.1fs "
+                "project=%s chunks_added=%d chunks_removed=%d",
+                time.time() - start_time, project_name,
+                chunks_added, chunks_removed,
+            )
 
             return IncrementalIndexResult(
                 files_added=len(changes.added),
@@ -503,14 +553,42 @@ class IncrementalIndexer:
 
         Returns:
             IncrementalIndexResult with statistics
+
+        Env escape hatch:
+            CODE_SEARCH_DISABLE_AUTO_REINDEX=1 makes this a no-op. Useful
+            when auto_reindex is hitting a large project (~10K+ chunks)
+            whose detect_changes pass is multi-minute and the caller
+            doesn't want to block the search call. The MCP user can run
+            `mcp__code-search__index_directory(incremental=false)` later
+            to refresh deliberately.
         """
         import time
 
         start_time = time.time()
 
+        if os.environ.get("CODE_SEARCH_DISABLE_AUTO_REINDEX", "").lower() in (
+            "1", "true", "yes", "on"
+        ):
+            logger.warning(
+                "[REINDEX_PROGRESS] auto_reindex_if_needed: SKIPPED via "
+                "CODE_SEARCH_DISABLE_AUTO_REINDEX project=%s",
+                project_name,
+            )
+            return IncrementalIndexResult(
+                files_added=0,
+                files_removed=0,
+                files_modified=0,
+                chunks_added=0,
+                chunks_removed=0,
+                time_taken=time.time() - start_time,
+                success=True,
+            )
+
         if self.needs_reindex(project_path, max_age_minutes):
-            logger.info(
-                f"Auto-reindexing {project_path} (index older than {max_age_minutes} minutes)"
+            logger.warning(
+                "[REINDEX_PROGRESS] auto_reindex_if_needed: needs_reindex "
+                "project=%s max_age_minutes=%s -> dispatching to incremental_index",
+                project_name, max_age_minutes,
             )
             return self.incremental_index(project_path, project_name)
         else:

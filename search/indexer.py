@@ -12,18 +12,27 @@ from sqlitedict import SqliteDict
 from embeddings.embedder import EmbeddingResult
 
 
-def _install_chunk_id_diag_file_handler() -> None:
-    """Attach a FileHandler that captures [CHUNK_ID_DIAG] lines to disk.
+def _install_search_file_handler() -> None:
+    """Attach a FileHandler that captures structured diagnostic lines to disk.
 
     The MCP server runs under pythonw.exe, which has no console — stderr
-    is discarded. The diagnostic logging in `_load_index` and `save_index`
-    is otherwise invisible. This sidecar appends every [CHUNK_ID_DIAG]
-    line (and only those lines) to ~/.claude/logs/code-search-mcp.log so
-    Phase A of the chunk-truncation root-cause arc can read them.
+    is discarded. Without a file handler, structured logs from the search
+    package (chunk-truncation diagnostics, incremental-reindex progress)
+    are invisible to the operator.
 
-    Idempotent: checks for an existing handler with the same target
-    before adding. Degrades silently if the log directory cannot be
-    created (we never want logging setup to break the indexer).
+    Captured prefixes (filter accepts any line containing one of these):
+      [CHUNK_ID_DIAG]      — load/save state diagnostics in indexer
+      [REINDEX_PROGRESS]   — incremental_index progress milestones
+
+    Attaches to the `search` parent logger so children
+    (`search.indexer`, `search.incremental_indexer`) propagate up and
+    share the handler. Idempotent: a marker attribute on the handler
+    prevents stacking on re-import.
+
+    Output: ~/.claude/logs/code-search-mcp.log (one line per event).
+
+    Degrades silently if the log directory cannot be created (we never
+    want logging setup to break the indexer).
     """
     try:
         log_dir = Path.home() / ".claude" / "logs"
@@ -32,7 +41,9 @@ def _install_chunk_id_diag_file_handler() -> None:
     except Exception:
         return
 
-    logger = logging.getLogger(__name__)
+    # Attach to the package logger so both indexer and incremental_indexer
+    # log lines flow to the same sidecar.
+    logger = logging.getLogger("search")
     target = str(log_path.resolve())
     for h in logger.handlers:
         if isinstance(h, logging.FileHandler) and getattr(h, "_chunk_id_diag", False):
@@ -47,15 +58,17 @@ def _install_chunk_id_diag_file_handler() -> None:
     handler._chunk_id_diag = True  # type: ignore[attr-defined]
     handler.setLevel(logging.DEBUG)
 
-    class _ChunkIdDiagFilter(logging.Filter):
+    _ACCEPTED_PREFIXES = ("[CHUNK_ID_DIAG]", "[REINDEX_PROGRESS]")
+
+    class _SearchDiagFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             try:
                 msg = record.getMessage()
             except Exception:
                 return False
-            return "[CHUNK_ID_DIAG]" in msg
+            return any(p in msg for p in _ACCEPTED_PREFIXES)
 
-    handler.addFilter(_ChunkIdDiagFilter())
+    handler.addFilter(_SearchDiagFilter())
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     )
@@ -64,7 +77,10 @@ def _install_chunk_id_diag_file_handler() -> None:
         logger.setLevel(logging.WARNING)
 
 
-_install_chunk_id_diag_file_handler()
+# Public alias for backward compat with tests that imported the v1 name.
+_install_chunk_id_diag_file_handler = _install_search_file_handler
+
+_install_search_file_handler()
 
 
 class CodeIndexManager:
