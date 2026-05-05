@@ -12,6 +12,61 @@ from sqlitedict import SqliteDict
 from embeddings.embedder import EmbeddingResult
 
 
+def _install_chunk_id_diag_file_handler() -> None:
+    """Attach a FileHandler that captures [CHUNK_ID_DIAG] lines to disk.
+
+    The MCP server runs under pythonw.exe, which has no console — stderr
+    is discarded. The diagnostic logging in `_load_index` and `save_index`
+    is otherwise invisible. This sidecar appends every [CHUNK_ID_DIAG]
+    line (and only those lines) to ~/.claude/logs/code-search-mcp.log so
+    Phase A of the chunk-truncation root-cause arc can read them.
+
+    Idempotent: checks for an existing handler with the same target
+    before adding. Degrades silently if the log directory cannot be
+    created (we never want logging setup to break the indexer).
+    """
+    try:
+        log_dir = Path.home() / ".claude" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "code-search-mcp.log"
+    except Exception:
+        return
+
+    logger = logging.getLogger(__name__)
+    target = str(log_path.resolve())
+    for h in logger.handlers:
+        if isinstance(h, logging.FileHandler) and getattr(h, "_chunk_id_diag", False):
+            return
+        if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == target:
+            return
+
+    try:
+        handler = logging.FileHandler(target, mode="a", encoding="utf-8")
+    except Exception:
+        return
+    handler._chunk_id_diag = True  # type: ignore[attr-defined]
+    handler.setLevel(logging.DEBUG)
+
+    class _ChunkIdDiagFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            try:
+                msg = record.getMessage()
+            except Exception:
+                return False
+            return "[CHUNK_ID_DIAG]" in msg
+
+    handler.addFilter(_ChunkIdDiagFilter())
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    logger.addHandler(handler)
+    if logger.level == logging.NOTSET or logger.level > logging.WARNING:
+        logger.setLevel(logging.WARNING)
+
+
+_install_chunk_id_diag_file_handler()
+
+
 class CodeIndexManager:
     """Manages FAISS vector index and metadata storage for code chunks."""
     
@@ -118,6 +173,20 @@ class CodeIndexManager:
         self._is_binary = False
         float_store_path = self.storage_dir / "float_store.npy"
 
+        # CHUNK_ID DIAGNOSTIC (2026-05-05): tracks the load-side state so we
+        # can spot when chunk_ids.pkl is empty or out-of-sync with FAISS.
+        # The hypothesis under investigation: post-MCP-restart, the lazy
+        # load sees an empty/short chunk_ids.pkl, then a subsequent
+        # incremental save dumps the truncated list, overwriting prior
+        # healthy state. Logging at every load + save lets us catch the
+        # transition.
+        self._logger.warning(
+            "[CHUNK_ID_DIAG] _load_index pre-load: index_path=%s exists=%s "
+            "chunk_id_path=%s exists=%s",
+            self.index_path, self.index_path.exists(),
+            self.chunk_id_path, self.chunk_id_path.exists(),
+        )
+
         if self.index_path.exists():
             # Detect binary mode: float_store.npy exists alongside the index
             if float_store_path.exists():
@@ -136,13 +205,33 @@ class CodeIndexManager:
                 with open(self.chunk_id_path, 'rb') as f:
                     self._chunk_ids = pickle.load(f)
 
+            # CHUNK_ID DIAGNOSTIC: log the state right after load.
+            self._logger.warning(
+                "[CHUNK_ID_DIAG] _load_index post-load: faiss.ntotal=%s "
+                "chunk_ids_len=%s chunk_id_pkl_size=%s",
+                self._index.ntotal if self._index else None,
+                len(self._chunk_ids),
+                self.chunk_id_path.stat().st_size if self.chunk_id_path.exists() else 0,
+            )
+
             # Detect and repair chunk_ids.pkl corruption: if FAISS has vectors
             # but chunk_ids is missing/empty/shorter than expected, rebuild
             # from metadata.db. Each metadata value is a dict with 'index_id'
             # giving its FAISS position; we reconstruct the ordered list.
             self._maybe_rebuild_chunk_ids()
+
+            # CHUNK_ID DIAGNOSTIC: log post-repair state, in case rebuild
+            # fired and changed chunk_ids_len.
+            self._logger.warning(
+                "[CHUNK_ID_DIAG] _load_index post-repair: faiss.ntotal=%s "
+                "chunk_ids_len=%s",
+                self._index.ntotal if self._index else None,
+                len(self._chunk_ids),
+            )
         else:
-            self._logger.info("Creating new index")
+            self._logger.warning(
+                "[CHUNK_ID_DIAG] _load_index: no existing index, starting fresh"
+            )
             self._index = None
             self._chunk_ids = []
 
@@ -533,6 +622,27 @@ class CodeIndexManager:
     
     def save_index(self):
         """Save the FAISS index and chunk IDs to disk."""
+        # CHUNK_ID DIAGNOSTIC (2026-05-05): log pre-save state to catch the
+        # hypothesized failure mode where save_index dumps a truncated
+        # _chunk_ids over a previously healthy on-disk pkl. If the on-disk
+        # pkl was 10K entries and we're about to save 12, that's the bug.
+        try:
+            existing_pkl_size = (
+                self.chunk_id_path.stat().st_size
+                if self.chunk_id_path.exists()
+                else 0
+            )
+        except Exception:
+            existing_pkl_size = -1
+        self._logger.warning(
+            "[CHUNK_ID_DIAG] save_index pre-save: in_memory_chunk_ids_len=%s "
+            "faiss.ntotal=%s on_disk_pkl_size=%s caller_path=%s",
+            len(self._chunk_ids),
+            self._index.ntotal if self._index else None,
+            existing_pkl_size,
+            self.chunk_id_path,
+        )
+
         if self._index is not None:
             try:
                 if getattr(self, '_is_binary', False):
@@ -559,7 +669,19 @@ class CodeIndexManager:
         # Save chunk IDs
         with open(self.chunk_id_path, 'wb') as f:
             pickle.dump(self._chunk_ids, f)
-        
+
+        # CHUNK_ID DIAGNOSTIC: log post-save state.
+        try:
+            new_pkl_size = self.chunk_id_path.stat().st_size
+        except Exception:
+            new_pkl_size = -1
+        self._logger.warning(
+            "[CHUNK_ID_DIAG] save_index post-save: chunk_ids_len=%s "
+            "new_pkl_size=%s",
+            len(self._chunk_ids),
+            new_pkl_size,
+        )
+
         self._update_stats()
     
     def _update_stats(self):
@@ -620,13 +742,13 @@ class CodeIndexManager:
         })
         
         # Save stats
-        with open(self.stats_path, 'w') as f:
+        with open(self.stats_path, 'w', encoding='utf-8') as f:
             json.dump(stats, f, indent=2)
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get index statistics."""
         if self.stats_path.exists():
-            with open(self.stats_path, 'r') as f:
+            with open(self.stats_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         else:
             return {
