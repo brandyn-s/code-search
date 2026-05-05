@@ -50,6 +50,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 | `QUANTIZATION` | `int8` | Index type: `int8` (QT_8bit trained, 4x smaller, default), `float32` (legacy), `binary` (32x smaller, opt-in for 100K+ chunks). **Note**: QT_8bit requires a training step (learns value range). Indexes built before 2026-04-05 used QT_8bit_direct which silently returned 0.0 similarities — must reindex. |
 | `VOYAGE_BATCH_API` | `off` | `on` to use Batch API for full reindex (33% cheaper, 1000+ chunk threshold) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |
+| `CODE_SEARCH_DISABLE_AUTO_REINDEX` | unset | Set to `1`/`true`/`yes`/`on` to make `auto_reindex_if_needed` a no-op. Useful for large projects (10K+ chunks, 2000+ files) where `detect_changes` is multi-minute. Refresh on demand via `index_directory(incremental=false)` instead. Logs `[REINDEX_PROGRESS] auto_reindex_if_needed: SKIPPED` to `~/.claude/logs/code-search-mcp.log` when active. |
 
 ## Voyage AI Integration
 
