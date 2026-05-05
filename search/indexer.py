@@ -675,22 +675,42 @@ class CodeIndexManager:
         # add_embeddings created a fresh empty FAISS instead of loading the
         # existing one. The lazy-load fix in add_embeddings/remove_file_chunks
         # closes that path; this guard catches any future variant.
-        # Threshold: in-memory has fewer entries than 50% of on-disk pkl size
-        # while the on-disk pkl is non-trivial (>200 bytes ~= 5+ entries).
+        #
+        # Threshold by COUNT, not bytes: load the existing pkl and compare
+        # entry counts. Bytes-per-entry varies widely with chunk_id length
+        # (~30 bytes for short paths, 150+ for nested ones), so a fixed
+        # bytes-per-entry constant produced false positives on real data
+        # (.claude with 10093 entries / 1.46MB = ~144 bytes/entry, not 32 —
+        # a healthy 10114-entry save was rejected because 10114 * 32 < pkl
+        # bytes / 2). Counting entries is robust and the load cost (~50ms
+        # for a 10K-entry pkl) is trivial relative to a save_index call.
         in_memory_len = len(self._chunk_ids)
-        TRUNCATION_GUARD_MIN_PKL_SIZE = 200
-        TRUNCATION_GUARD_RATIO = 0.5
+        existing_count = -1  # unknown
+        if self.chunk_id_path.exists():
+            try:
+                with open(self.chunk_id_path, "rb") as f:
+                    existing_chunk_ids = pickle.load(f)
+                if isinstance(existing_chunk_ids, list):
+                    existing_count = len(existing_chunk_ids)
+            except Exception:
+                # Corrupt or partial pkl — let the save proceed; the
+                # rebuild paths in _load_index handle recovery.
+                existing_count = -1
+
+        TRUNCATION_GUARD_MIN_COUNT = 5  # only guard when on-disk has >= 5 entries
+        TRUNCATION_GUARD_RATIO = 0.5  # refuse if in-memory < 50% of on-disk
         if (
             not force
-            and existing_pkl_size > TRUNCATION_GUARD_MIN_PKL_SIZE
-            and in_memory_len * 32 < existing_pkl_size * TRUNCATION_GUARD_RATIO
+            and existing_count >= TRUNCATION_GUARD_MIN_COUNT
+            and in_memory_len < existing_count * TRUNCATION_GUARD_RATIO
         ):
             self._logger.error(
                 "[CHUNK_ID_DIAG] save_index REFUSED: in_memory_chunk_ids_len=%s "
-                "would clobber healthy on_disk_pkl_size=%s. This is the "
+                "would clobber healthy on_disk_chunk_ids_count=%s "
+                "(on_disk_pkl_size=%s bytes). This is the "
                 "chunk-truncation regression shape. Pass force=True to "
                 "override (e.g., after clear_index or intentional reset).",
-                in_memory_len, existing_pkl_size,
+                in_memory_len, existing_count, existing_pkl_size,
             )
             return
 

@@ -199,9 +199,75 @@ def test_save_index_allows_growth():
         _close(mgr2)
 
 
+def test_save_index_allows_realistic_large_growth_with_long_chunk_ids():
+    """Pin the false-positive case observed on .claude (10093 → 10114).
+
+    The first guard implementation used `in_memory_len * 32 < pkl_size * 0.5`.
+    Real-world chunk_ids have nested paths (e.g.
+    'plugins/marketplace/.../skills/foo/SKILL.md:1-50:section:Description')
+    averaging ~144 bytes per pickled entry, not 32. So a healthy save with
+    10114 in-memory entries (1.46MB pkl) was incorrectly refused — the
+    formula treated 144 bytes/entry data as if it were 32 bytes/entry,
+    underestimating in-memory by 4.5x.
+
+    Count-based threshold (in_memory_len < existing_count * 0.5) doesn't
+    care about bytes-per-entry and correctly allows this growth.
+    """
+    long_prefix = (
+        "plugins/marketplace/anthropic-agent-skills/document-skills/"
+        "powerpoint/references/"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        # Seed 200 entries with realistic long chunk_ids (~150 bytes each).
+        mgr = CodeIndexManager(tmp)
+        mgr.create_index(embedding_dimension=384)
+        mgr.add_embeddings(
+            [
+                _make_result(
+                    f"{long_prefix}slide_{i:04d}.md:1-50:section:LongSectionName_{i}"
+                )
+                for i in range(200)
+            ]
+        )
+        mgr.save_index()
+        chunk_id_path = mgr.chunk_id_path
+        seed_pkl_size = chunk_id_path.stat().st_size
+        # If this assertion fails the realism is off; tune the prefix.
+        assert seed_pkl_size > 200 * 80, (
+            f"seed pkl too small ({seed_pkl_size} bytes) — chunk_ids not "
+            f"realistic enough to reproduce the false-positive case"
+        )
+        _close(mgr)
+
+        # Open fresh manager, add 5 more (200 → 205 — small healthy growth).
+        mgr2 = CodeIndexManager(tmp)
+        mgr2.add_embeddings(
+            [
+                _make_result(
+                    f"{long_prefix}slide_new_{i:04d}.md:1-50:section:NewSection_{i}"
+                )
+                for i in range(5)
+            ]
+        )
+        assert len(mgr2._chunk_ids) == 205, (
+            f"add_embeddings did not auto-load: got {len(mgr2._chunk_ids)}"
+        )
+
+        mgr2.save_index()
+
+        # The save MUST proceed — pkl on disk should now contain 205 entries.
+        with open(chunk_id_path, "rb") as f:
+            on_disk_ids = pickle.load(f)
+        assert len(on_disk_ids) == 205, (
+            f"guard incorrectly refused legitimate growth: pkl has "
+            f"{len(on_disk_ids)} entries, expected 205"
+        )
+        _close(mgr2)
+
+
 def test_save_index_allows_small_legitimate_shrinks():
     """Removing one file from a 30-chunk index should still save (in-memory
-    29, on-disk 30 → ratio 29*32=928 vs 966*0.5=483, 928 > 483 → no trip)."""
+    30, on-disk 30 → 30 >= 30*0.5=15 → no trip on count-based threshold)."""
     with tempfile.TemporaryDirectory() as tmp:
         seed = _seed_30(tmp)
         _close(seed)
