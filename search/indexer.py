@@ -340,7 +340,17 @@ class CodeIndexManager:
         """Add embeddings to the index and metadata to the database."""
         if not embedding_results:
             return
-        
+
+        # Load existing on-disk index BEFORE deciding to create a new one.
+        # Without this, a fresh CodeIndexManager (e.g., after switch_project)
+        # whose `_index` is still None will fall through to create_index()
+        # and start an empty FAISS while the on-disk index already holds
+        # 30+ vectors. The next save_index then dumps that empty in-memory
+        # state over the healthy on-disk pkl/index — the chunk-truncation
+        # regression observed 2026-05-04/05.
+        if self._index is None and self.index_path.exists():
+            self._load_index()
+
         # Initialize index if needed
         if self._index is None:
             embedding_dim = embedding_results[0].embedding.shape[0]
@@ -574,16 +584,24 @@ class CodeIndexManager:
     
     def remove_file_chunks(self, file_path: str, project_name: Optional[str] = None) -> int:
         """Remove all chunks from a specific file.
-        
+
         Args:
             file_path: Path to the file (relative or absolute)
             project_name: Optional project name filter
-            
+
         Returns:
             Number of chunks removed
         """
+        # Load existing on-disk state BEFORE iterating _chunk_ids. Without
+        # this, a fresh CodeIndexManager (e.g., after switch_project) sees
+        # an empty in-memory _chunk_ids and silently removes nothing —
+        # the file's old chunks become orphans the next save will not
+        # preserve. See add_embeddings for the symmetric fix.
+        if self._index is None and self.index_path.exists():
+            self._load_index()
+
         chunks_to_remove = []
-        
+
         # Find chunks to remove
         for chunk_id in self._chunk_ids:
             metadata_entry = self.metadata_db.get(chunk_id)
@@ -620,8 +638,15 @@ class CodeIndexManager:
             pass
         return len(chunks_to_remove)
     
-    def save_index(self):
-        """Save the FAISS index and chunk IDs to disk."""
+    def save_index(self, force: bool = False):
+        """Save the FAISS index and chunk IDs to disk.
+
+        Args:
+            force: Bypass the chunk-truncation guard. Set True only by
+                callers that legitimately shrink the index (clear_index,
+                full reindex with deletions, explicit user reset). Default
+                False so accidental truncation aborts loudly.
+        """
         # CHUNK_ID DIAGNOSTIC (2026-05-05): log pre-save state to catch the
         # hypothesized failure mode where save_index dumps a truncated
         # _chunk_ids over a previously healthy on-disk pkl. If the on-disk
@@ -642,6 +667,32 @@ class CodeIndexManager:
             existing_pkl_size,
             self.chunk_id_path,
         )
+
+        # Defense-in-depth: refuse to clobber a healthy on-disk pkl with a
+        # dramatically smaller in-memory list unless the caller explicitly
+        # opted in via force=True. The 2026-05-04/05 chunk-truncation
+        # regression dumped 1 entry over a 966-byte (30-entry) pkl because
+        # add_embeddings created a fresh empty FAISS instead of loading the
+        # existing one. The lazy-load fix in add_embeddings/remove_file_chunks
+        # closes that path; this guard catches any future variant.
+        # Threshold: in-memory has fewer entries than 50% of on-disk pkl size
+        # while the on-disk pkl is non-trivial (>200 bytes ~= 5+ entries).
+        in_memory_len = len(self._chunk_ids)
+        TRUNCATION_GUARD_MIN_PKL_SIZE = 200
+        TRUNCATION_GUARD_RATIO = 0.5
+        if (
+            not force
+            and existing_pkl_size > TRUNCATION_GUARD_MIN_PKL_SIZE
+            and in_memory_len * 32 < existing_pkl_size * TRUNCATION_GUARD_RATIO
+        ):
+            self._logger.error(
+                "[CHUNK_ID_DIAG] save_index REFUSED: in_memory_chunk_ids_len=%s "
+                "would clobber healthy on_disk_pkl_size=%s. This is the "
+                "chunk-truncation regression shape. Pass force=True to "
+                "override (e.g., after clear_index or intentional reset).",
+                in_memory_len, existing_pkl_size,
+            )
+            return
 
         if self._index is not None:
             try:
