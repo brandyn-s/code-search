@@ -15,10 +15,17 @@ from embeddings.embedder import EmbeddingResult
 def _install_search_file_handler() -> None:
     """Attach a FileHandler that captures structured diagnostic lines to disk.
 
-    The MCP server runs under pythonw.exe, which has no console — stderr
-    is discarded. Without a file handler, structured logs from the search
-    package (chunk-truncation diagnostics, incremental-reindex progress)
-    are invisible to the operator.
+    Cross-platform sidecar logger (Plan-2 A2 audit, 2026-05-05): works on
+    Windows, Linux, and macOS via portable `Path.home()` resolution. See
+    docs/cross_platform_observability.md for the full audit.
+
+    Why a sidecar (not just stderr):
+      Windows: the MCP server runs under pythonw.exe with no console; stderr
+        is discarded entirely.
+      Linux/macOS: stderr IS captured by the parent (Claude Code or another
+        MCP transport), but it's interleaved with the rest of the process
+        output and is ephemeral. The sidecar gives operators a persistent,
+        filtered, `tail -f`-able log file regardless of platform.
 
     Captured prefixes (filter accepts any line containing one of these):
       [CHUNK_ID_DIAG]      — load/save state diagnostics in indexer
@@ -29,7 +36,10 @@ def _install_search_file_handler() -> None:
     share the handler. Idempotent: a marker attribute on the handler
     prevents stacking on re-import.
 
-    Output: ~/.claude/logs/code-search-mcp.log (one line per event).
+    Output (all platforms): ~/.claude/logs/code-search-mcp.log
+      Windows: C:\\Users\\<user>\\.claude\\logs\\code-search-mcp.log
+      Linux:   /home/<user>/.claude/logs/code-search-mcp.log
+      macOS:   /Users/<user>/.claude/logs/code-search-mcp.log
 
     Degrades silently if the log directory cannot be created (we never
     want logging setup to break the indexer).
