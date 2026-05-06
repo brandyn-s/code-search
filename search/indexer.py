@@ -30,6 +30,7 @@ def _install_search_file_handler() -> None:
     Captured prefixes (filter accepts any line containing one of these):
       [CHUNK_ID_DIAG]      — load/save state diagnostics in indexer
       [REINDEX_PROGRESS]   — incremental_index progress milestones
+      [ANTHROPIC_DIAG]     — per-call Sonnet rerank latency (Plan D1-Pass-2 A.1)
 
     Attaches to the `search` parent logger so children
     (`search.indexer`, `search.incremental_indexer`) propagate up and
@@ -68,7 +69,7 @@ def _install_search_file_handler() -> None:
     handler._chunk_id_diag = True  # type: ignore[attr-defined]
     handler.setLevel(logging.DEBUG)
 
-    _ACCEPTED_PREFIXES = ("[CHUNK_ID_DIAG]", "[REINDEX_PROGRESS]")
+    _ACCEPTED_PREFIXES = ("[CHUNK_ID_DIAG]", "[REINDEX_PROGRESS]", "[ANTHROPIC_DIAG]")
 
     class _SearchDiagFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
@@ -85,6 +86,16 @@ def _install_search_file_handler() -> None:
     logger.addHandler(handler)
     if logger.level == logging.NOTSET or logger.level > logging.WARNING:
         logger.setLevel(logging.WARNING)
+
+    # [ANTHROPIC_DIAG] is INFO-level (per Plan D1-Pass-2 A.1). The parent
+    # `search` logger above stays at WARNING so unrelated INFO chatter
+    # doesn't fill the sidecar; we elevate ONLY the reranker child logger
+    # to INFO so its [ANTHROPIC_DIAG] records can reach the sidecar handler.
+    # The filter still gates on the prefix, so other reranker INFO logs
+    # (judge prompts, etc.) are dropped.
+    sonnet_logger = logging.getLogger("search.sonnet_reranker")
+    if sonnet_logger.level == logging.NOTSET or sonnet_logger.level > logging.INFO:
+        sonnet_logger.setLevel(logging.INFO)
 
 
 # Public alias for backward compat with tests that imported the v1 name.
