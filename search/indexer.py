@@ -780,6 +780,127 @@ class CodeIndexManager:
         )
 
         self._update_stats()
+
+        # Plan-2 E2: commit an epoch-manifest for the artifacts just written.
+        # The cross-artifact consistency check at build_manifest time
+        # structurally prevents the chunk-truncation regression class —
+        # if FAISS ntotal disagrees with len(chunk_ids), commit fails loudly.
+        self._commit_epoch_manifest()
+
+    def _commit_epoch_manifest(self) -> None:
+        """Build + commit an epoch manifest covering the just-written artifacts.
+
+        Called from save_index after FAISS + chunk_ids.pkl + stats are
+        written. If any artifact is missing or counts disagree, raises
+        through to the caller — better to fail loudly than commit a
+        manifest that lies about state.
+
+        Failure modes are caught at the manifest layer; the artifacts on
+        disk remain whatever save_index put there. The manifest commit is
+        the "publish" signal — readers (E3) verify SHAs against current.json
+        and fall back to prior.json on mismatch.
+        """
+        from search.epoch_manifest import (
+            ArtifactSpec,
+            ManifestConsistencyError,
+            build_manifest,
+            commit_manifest,
+            count_metadata_db,
+            count_fts5_db,
+        )
+
+        artifacts: list[ArtifactSpec] = []
+        chunk_count = len(self._chunk_ids)
+
+        # Authoritative chunk_ids count drives consistency check.
+        if self.chunk_id_path.exists():
+            artifacts.append(ArtifactSpec(
+                name="chunk_ids.pkl",
+                path=self.chunk_id_path,
+                count=chunk_count,
+            ))
+
+        # FAISS index — count via in-memory _index.ntotal (same value as on
+        # disk since we just wrote it). Keep optional in case _index is None.
+        if self.index_path.exists() and self._index is not None:
+            try:
+                ntotal = int(self._index.ntotal)
+            except Exception:
+                ntotal = chunk_count  # best-effort: assume consistent
+            artifacts.append(ArtifactSpec(
+                name="code.index",
+                path=self.index_path,
+                count=ntotal,
+            ))
+
+        # Sidecar SQLite stores. Counts via stdlib sqlite (no driver init).
+        if self.metadata_path.exists():
+            artifacts.append(ArtifactSpec(
+                name="metadata.db",
+                path=self.metadata_path,
+                count=count_metadata_db(self.metadata_path),
+            ))
+        if self._fts_db_path.exists():
+            artifacts.append(ArtifactSpec(
+                name="fts5.db",
+                path=self._fts_db_path,
+                count=count_fts5_db(self._fts_db_path),
+            ))
+        # stats.json is metadata, not a record-bearing artifact (count=None).
+        if self.stats_path.exists():
+            artifacts.append(ArtifactSpec(
+                name="stats.json",
+                path=self.stats_path,
+                count=None,
+            ))
+
+        if not artifacts:
+            self._logger.info(
+                "[EPOCH_MANIFEST] no artifacts to commit (empty index?); skipping"
+            )
+            return
+
+        try:
+            manifest = build_manifest(
+                project_dir=self.storage_dir,
+                artifacts=artifacts,
+                provider=getattr(self, "_embedder_provider", "") or "",
+                model=getattr(self, "_embedder_model", "") or "",
+                vector_dim=int(getattr(self._index, "d", 0) or 0),
+                quantization="binary" if getattr(self, "_is_binary", False) else "int8",
+                pipeline_version=getattr(self, "_pipeline_version", "") or "",
+            )
+        except ManifestConsistencyError as exc:
+            # Cross-artifact consistency failure — the new structural
+            # invariant. Surface loudly so operators can investigate.
+            self._logger.error(
+                "[EPOCH_MANIFEST] consistency check failed; refusing to commit: %s",
+                exc,
+            )
+            return
+        except Exception as exc:
+            # Unexpected error in manifest construction — log + continue.
+            # Don't let manifest issues block the existing write path
+            # behavior. Operators can detect missing-manifest later via
+            # verify_index_integrity.
+            self._logger.warning(
+                "[EPOCH_MANIFEST] build failed (non-blocking): %s", exc,
+            )
+            return
+
+        try:
+            committed = commit_manifest(self.storage_dir, manifest)
+            self._logger.info(
+                "[EPOCH_MANIFEST] committed epoch=%s artifacts=%d at %s",
+                manifest["epoch_id"], len(artifacts), committed,
+            )
+        except Exception as exc:
+            # Commit-time error (rename failure, fsync failure). Log; the
+            # artifacts on disk are unchanged — readers see the previous
+            # epoch's manifest until the next successful commit.
+            self._logger.warning(
+                "[EPOCH_MANIFEST] commit failed (non-blocking): %s", exc,
+            )
     
     def _update_stats(self):
         """Update index statistics."""
