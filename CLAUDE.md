@@ -52,6 +52,53 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |
 | `CODE_SEARCH_DISABLE_AUTO_REINDEX` | unset | Set to `1`/`true`/`yes`/`on` to make `auto_reindex_if_needed` a no-op. Useful for large projects (10K+ chunks, 2000+ files) where `detect_changes` is multi-minute. Refresh on demand via `index_directory(incremental=false)` instead. Logs `[REINDEX_PROGRESS] auto_reindex_if_needed: SKIPPED` to `~/.claude/logs/code-search-mcp.log` when active. |
 
+## Search Response Metadata
+
+Every `search_code` response includes a `_metadata` envelope with structured
+observability fields. Currently surfaces reranker outcome; future PRs will
+add freshness (Phase F2) and provenance (Plan 1).
+
+```json
+{
+  "query": "find auth handler",
+  "results": [...],
+  "_metadata": {
+    "reranker": {
+      "applied": true,
+      "reason": "ok",
+      "latency_ms": 1842
+    }
+  }
+}
+```
+
+**Reasons** (stable string vocabulary):
+
+| Reason | applied | Meaning |
+|--------|---------|---------|
+| `ok` | true | Sonnet rerank applied successfully |
+| `empty_input` | false | No candidates passed to reranker (rare) |
+| `api_key_missing` | false | `ANTHROPIC_API_KEY` not set — fell back to hybrid |
+| `package_not_installed` | false | `anthropic` SDK not installed |
+| `timeout` | false | Total timeout exceeded OR per-call timeouts dominated |
+| `rate_limit` | false | Anthropic rate-limit responses dominated — back off |
+| `too_many_failures` | false | >30% per-call failures (HTTP, parse) |
+| `hybrid_prior_fallback` | false | Max Sonnet score below threshold; hybrid order used |
+| `disabled_by_env` | false | `RERANKER=off` |
+| `not_invoked_keyword_mode` | false | `search_mode=keyword` skipped reranking |
+| `not_invoked_semantic_mode` | false | `search_mode=semantic` skipped reranking |
+| `not_invoked_cross_encoder_mode` | false | `RERANKER=cross-encoder` legacy path |
+| `not_invoked_no_candidates` | false | Index returned 0 candidates |
+| `not_invoked_insufficient_candidates` | false | Fewer candidates than `k`; rerank skipped |
+| `async_context` | false | Reranker called from async context (unsupported) |
+| `unexpected_error` | false | Catch-all (logged) |
+
+**Why this matters**: a sustained `applied: false` rate on production traffic
+is the canary for a rotated `ANTHROPIC_API_KEY`, sustained rate-limiting, or
+prompt-coverage issues (high `hybrid_prior_fallback` rate). Without this
+metadata, silent fallback was indistinguishable from successful rerank — see
+roundtable Disagreement 1 (META_SYNTHESIS, 2026-05-05).
+
 ## Voyage AI Integration
 
 code-search uses [Voyage AI](https://voyageai.com) embedding models to convert code chunks into vectors for semantic similarity search. When you search "where is the firewall config?", your query and every indexed chunk are compared as vectors — chunks whose vectors point in similar directions are returned as results.

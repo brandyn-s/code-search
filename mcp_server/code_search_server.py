@@ -10,7 +10,7 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from functools import lru_cache
 
@@ -148,13 +148,13 @@ class CodeSearchServer:
                 legacy_info = legacy_dir / "project_info.json"
                 if legacy_info.exists():
                     try:
-                        with open(legacy_info) as f:
+                        with open(legacy_info, encoding="utf-8") as f:
                             info = json.load(f)
                         if info.get("embedding_provider") == provider:
                             legacy_dir.rename(project_dir)
                             # Update the stored hash
                             info["project_hash"] = provider_hash
-                            with open(project_dir / "project_info.json", "w") as f:
+                            with open(project_dir / "project_info.json", "w", encoding="utf-8") as f:
                                 json.dump(info, f, indent=2)
                             logger.info(
                                 f"Migrated {project_name} index from legacy hash "
@@ -188,7 +188,7 @@ class CodeSearchServer:
                 "embedding_model": os.environ.get("EMBEDDING_MODEL", ""),
                 "content_mode": content_mode,
             }
-            with open(project_info_file, "w") as f:
+            with open(project_info_file, "w", encoding="utf-8") as f:
                 json.dump(project_info, f, indent=2)
 
         return project_dir
@@ -239,7 +239,7 @@ class CodeSearchServer:
             info_file = project_dir / "project_info.json"
             if info_file.exists():
                 try:
-                    with open(info_file, "r") as f:
+                    with open(info_file, "r", encoding="utf-8") as f:
                         info = json.load(f)
                     stored_provider = info.get("embedding_provider", "")
                     model_name = info.get("embedding_model", "")
@@ -523,6 +523,27 @@ class CodeSearchServer:
 
             response = {"query": query, "results": formatted_results}
 
+            # PR Plan-2 A1 (2026-05-05): structured response metadata. The
+            # `_metadata` envelope groups observability fields the MCP
+            # consumer (LLM agent) can read to detect silent fallback or
+            # degraded mode. Currently surfaces `reranker.{applied, reason,
+            # latency_ms}`. Future PRs add freshness (Phase F2),
+            # provenance/confidence (Plan 1).
+            response_metadata: Dict[str, Any] = {}
+            try:
+                rerank_meta = getattr(searcher, "last_reranker_metadata", None)
+                if rerank_meta and isinstance(rerank_meta, dict):
+                    response_metadata["reranker"] = {
+                        "applied": bool(rerank_meta.get("applied", False)),
+                        "reason": str(rerank_meta.get("reason", "unknown")),
+                        "latency_ms": int(rerank_meta.get("latency_ms", 0)),
+                    }
+            except Exception as e:
+                # Never let metadata propagation break a search response.
+                logger.debug(f"reranker metadata propagation failed: {e}")
+            if response_metadata:
+                response["_metadata"] = response_metadata
+
             # Staleness warning
             if self._current_project:
                 try:
@@ -738,7 +759,7 @@ class CodeSearchServer:
                 current_pipeline_version = get_pipeline_version()
                 if info_file.exists():
                     try:
-                        with open(info_file, "r") as f:
+                        with open(info_file, "r", encoding="utf-8") as f:
                             info = json.load(f)
                         stored_version = info.get("pipeline_version", "")
                         if stored_version and stored_version != current_pipeline_version:
@@ -758,10 +779,10 @@ class CodeSearchServer:
                 # Store pipeline version after successful indexing
                 if info_file.exists():
                     try:
-                        with open(info_file, "r") as f:
+                        with open(info_file, "r", encoding="utf-8") as f:
                             info = json.load(f)
                         info["pipeline_version"] = current_pipeline_version
-                        with open(info_file, "w") as f:
+                        with open(info_file, "w", encoding="utf-8") as f:
                             json.dump(info, f, indent=2)
                     except Exception as ve:
                         logger.warning(f"Failed to store pipeline version: {ve}")
@@ -915,12 +936,12 @@ class CodeSearchServer:
                 if project_dir.is_dir():
                     info_file = project_dir / "project_info.json"
                     if info_file.exists():
-                        with open(info_file) as f:
+                        with open(info_file, encoding="utf-8") as f:
                             project_info = json.load(f)
 
                         stats_file = project_dir / "index" / "stats.json"
                         if stats_file.exists():
-                            with open(stats_file) as f:
+                            with open(stats_file, encoding="utf-8") as f:
                                 stats = json.load(f)
                             project_info["index_stats"] = stats
 
@@ -969,7 +990,7 @@ class CodeSearchServer:
                     continue
 
                 try:
-                    with open(info_file) as f:
+                    with open(info_file, encoding="utf-8") as f:
                         info = json.load(f)
                     project_path = info.get("project_path", "")
                     project_name = info.get("project_name", project_dir.name)
@@ -1044,7 +1065,7 @@ class CodeSearchServer:
                 )
                 if legacy_info.exists():
                     try:
-                        with open(legacy_info) as f:
+                        with open(legacy_info, encoding="utf-8") as f:
                             stored = json.load(f)
                         stored_provider = stored.get("embedding_provider")
                         if stored_provider:
@@ -1107,7 +1128,7 @@ class CodeSearchServer:
             info_file = project_dir / "project_info.json"
             project_info = {}
             if info_file.exists():
-                with open(info_file) as f:
+                with open(info_file, encoding="utf-8") as f:
                     project_info = json.load(f)
 
             logger.info(
@@ -1252,7 +1273,7 @@ class CodeSearchServer:
                     info_file = project_dir / "project_info.json"
                     if info_file.exists():
                         try:
-                            with open(info_file) as f:
+                            with open(info_file, encoding="utf-8") as f:
                                 info = json.load(f)
                             if info.get("project_name") == project_name:
                                 target_dir = project_dir
@@ -1269,7 +1290,7 @@ class CodeSearchServer:
                 info_file = target_dir / "project_info.json"
                 if info_file.exists():
                     try:
-                        with open(info_file) as f:
+                        with open(info_file, encoding="utf-8") as f:
                             info = json.load(f)
                         target_project_path = info.get("project_path")
                     except Exception:

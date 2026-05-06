@@ -197,6 +197,17 @@ class IntelligentSearcher:
         self.embedder = embedder
         self._logger = logging.getLogger(__name__)
         self._query_embedding_cache: Dict[str, Any] = {}  # normalized_query -> embedding
+        # PR Plan-2 A1 (2026-05-05): structured reranker metadata from the
+        # most recent search() call. MCP layer reads this and emits
+        # `_metadata.reranker = {applied, reason, latency_ms}` so LLM agents
+        # can detect silent fallback (rotated API key, sustained rate-limit,
+        # prolonged hybrid-prior fallback). Reset at the top of every
+        # search() call. See docstring of rerank_with_sonnet for reason vocab.
+        self.last_reranker_metadata: Dict[str, Any] = {
+            "applied": False,
+            "reason": "not_invoked",
+            "latency_ms": 0,
+        }
 
         # Query patterns for intent detection
         self.query_patterns = {
@@ -288,11 +299,24 @@ class IntelligentSearcher:
 
         mode = search_mode or os.environ.get("SEARCH_MODE", "hybrid")
 
+        # Reset reranker metadata for this call. _hybrid_search overwrites with
+        # the actual reason+latency from rerank_with_sonnet. Other modes leave
+        # the "not_invoked_<mode>" sentinel so the MCP layer can distinguish
+        # "Sonnet was skipped because mode=keyword" from "Sonnet failed for X".
         if mode == "keyword":
+            self.last_reranker_metadata = {
+                "applied": False, "reason": "not_invoked_keyword_mode", "latency_ms": 0,
+            }
             return self._keyword_search(query, k)
         elif mode == "semantic":
+            self.last_reranker_metadata = {
+                "applied": False, "reason": "not_invoked_semantic_mode", "latency_ms": 0,
+            }
             return self._semantic_search(query, k, context_depth, filters)
-        else:  # hybrid
+        else:  # hybrid — _hybrid_search will populate metadata
+            self.last_reranker_metadata = {
+                "applied": False, "reason": "not_invoked", "latency_ms": 0,
+            }
             return self._hybrid_search(query, k, context_depth, filters)
 
     def _semantic_search(
@@ -444,6 +468,17 @@ class IntelligentSearcher:
         # RERANKER=cross-encoder (off-by-default since A/B showed quality
         # regression).
         rerank_mode = os.environ.get("RERANKER", "sonnet").lower()
+        # Surface "no candidates" as the most specific signal, regardless of
+        # mode. This catches empty-index searches; downstream consumers don't
+        # need to disambiguate "no candidates because mode=off" vs "no
+        # candidates because index empty" — the latter is the real signal.
+        if not candidates:
+            self.last_reranker_metadata = {
+                "applied": False,
+                "reason": "not_invoked_no_candidates",
+                "latency_ms": 0,
+            }
+            return []
         if rerank_mode == "sonnet" and len(candidates) > k:
             from search.sonnet_reranker import rerank_with_sonnet
 
@@ -466,12 +501,25 @@ class IntelligentSearcher:
                     "full_content": full,
                     "_orig": r,
                 })
-            reranked = rerank_with_sonnet(query, rerank_input, top_k=k)
+            # PR Plan-2 A1: opt into structured metadata so the MCP layer
+            # can surface reranker outcome to LLM agents.
+            reranked, rerank_meta = rerank_with_sonnet(
+                query, rerank_input, top_k=k, return_metadata=True,
+            )
+            self.last_reranker_metadata = rerank_meta
             # Extract original SearchResult objects in new order; tail any
             # candidates beyond top-15 in their existing order.
             new_top = [d["_orig"] for d in reranked]
             tail = candidates[n_to_rerank:]
             candidates = new_top + tail
+        elif rerank_mode == "sonnet" and len(candidates) <= k:
+            # Sonnet path entered but no reranking needed (candidate pool
+            # is already <= k). Surface as a non-error reason.
+            self.last_reranker_metadata = {
+                "applied": False,
+                "reason": "not_invoked_insufficient_candidates",
+                "latency_ms": 0,
+            }
         elif rerank_mode == "cross-encoder" and candidates:
             # Legacy cross-encoder path (off by default; degrades quality
             # per 2026-03-22 A/B eval but kept for fallback/comparison).
@@ -492,8 +540,23 @@ class IntelligentSearcher:
                 candidate.similarity_score = item.get(
                     "rerank_score", candidate.similarity_score
                 )
+            # PR Plan-2 A1: cross-encoder path doesn't invoke Sonnet — surface
+            # explicit reason so MCP consumers don't misinterpret a default
+            # "not_invoked".
+            self.last_reranker_metadata = {
+                "applied": False,
+                "reason": "not_invoked_cross_encoder_mode",
+                "latency_ms": 0,
+            }
         else:
-            # rerank_mode == "off" or empty candidates
+            # rerank_mode == "off" — explicit disable. The empty-candidates
+            # path is handled earlier and returns immediately, so candidates
+            # is non-empty here.
+            self.last_reranker_metadata = {
+                "applied": False,
+                "reason": "disabled_by_env",
+                "latency_ms": 0,
+            }
             candidates.sort(key=lambda r: r.similarity_score, reverse=True)
         return candidates[:k]
 
