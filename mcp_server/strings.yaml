@@ -35,6 +35,9 @@ tools:
   cancel_indexing: |
     Request cancellation of the currently running index_directory background job. The job stops at the next progress checkpoint (between chunk batches), so cancellation is not instant. Returns JSON with success status and job_id. If no indexing job is active, returns an error. After cancellation, the index may be partially built - run index_directory again for a complete index.
 
+  verify_index_integrity: |
+    Verify per-project consistency between the canonical chunk_ids.pkl and the dependent artifacts (fts5.db, metadata.db, stats.json) for every indexed project (or one project if `project` prefix is given). Treats chunk_ids.pkl as the single source of truth — surfaces fts5 orphans, metadata orphans, and stats.json drift as actionable counts. Returns JSON with per-project entries (status: clean | inconsistent | unscannable) and a summary block. When inconsistencies exist, the response includes a `remediation` field pointing at `scripts/cleanup_index_orphans.py --apply-all` (run with the MCP server quiesced). Read-only — never modifies state.
+
 help: |
   # Find similar code
 

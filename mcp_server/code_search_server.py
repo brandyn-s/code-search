@@ -959,6 +959,141 @@ class CodeSearchServer:
             logger.error(f"Error listing projects: {e}")
             return json.dumps({"error": str(e)})
 
+    def verify_index_integrity(
+        self,
+        project: Optional[str] = None,
+    ) -> str:
+        """Implementation of verify_index_integrity tool.
+
+        Reports per-project consistency between chunk_ids.pkl (the single
+        source of truth), fts5.db, metadata.db, and stats.json. The same
+        scan as `scripts/cleanup_index_orphans.py --dry-run`, exposed as a
+        structured JSON tool an LLM agent can call.
+
+        Args:
+            project: Optional directory name PREFIX to limit the scan to one
+                project. Empty/None scans every indexed project.
+
+        Returns JSON: {"projects": [...], "summary": {...}}
+        Each per-project entry has:
+            name (str), valid_chunks (int), fts5_orphans (int),
+            metadata_orphans (int), stats_drift (int — signed; positive
+            means stats.json claims more chunks than the pkl), status
+            (one of "clean", "inconsistent", "unscannable").
+        """
+        try:
+            # Lazy import: scripts.cleanup_index_orphans is the single source
+            # of truth for the orphan-detection logic (PR #103). Reusing it
+            # here keeps the MCP tool and admin script in sync.
+            from scripts.cleanup_index_orphans import (
+                find_fts5_orphans,
+                find_metadata_orphans,
+                load_chunk_ids,
+                project_index_dir,
+                stats_drift,
+            )
+
+            base_dir = get_storage_dir()
+            projects_dir = base_dir / "projects"
+            if not projects_dir.is_dir():
+                return json.dumps({
+                    "projects": [],
+                    "summary": {
+                        "total_projects": 0, "clean": 0,
+                        "inconsistent": 0, "unscannable": 0,
+                        "total_fts5_orphans": 0,
+                        "total_metadata_orphans": 0,
+                        "total_stats_drift": 0,
+                    },
+                    "message": "No indexed projects found.",
+                })
+
+            project_dirs = sorted(p for p in projects_dir.iterdir() if p.is_dir())
+            if project:
+                project_dirs = [p for p in project_dirs if p.name.startswith(project)]
+                if not project_dirs:
+                    return json.dumps({
+                        "error": f"No project matched prefix: {project}",
+                        "projects": [],
+                    })
+
+            results: List[Dict[str, Any]] = []
+            totals = {
+                "clean": 0, "inconsistent": 0, "unscannable": 0,
+                "total_fts5_orphans": 0,
+                "total_metadata_orphans": 0,
+                "total_stats_drift": 0,
+            }
+
+            for proj in project_dirs:
+                idx_dir = project_index_dir(proj)
+                if idx_dir is None:
+                    results.append({
+                        "name": proj.name,
+                        "status": "unscannable",
+                        "reason": "no index/ subdir",
+                    })
+                    totals["unscannable"] += 1
+                    continue
+
+                chunk_ids = load_chunk_ids(idx_dir)
+                if chunk_ids is None:
+                    results.append({
+                        "name": proj.name,
+                        "status": "unscannable",
+                        "reason": "no chunk_ids.pkl or unreadable",
+                    })
+                    totals["unscannable"] += 1
+                    continue
+
+                valid_set = set(chunk_ids)
+                valid_count = len(chunk_ids)
+                fts_count, fts_sample = find_fts5_orphans(idx_dir / "fts5.db", valid_set)
+                meta_count, meta_sample = find_metadata_orphans(
+                    idx_dir / "metadata.db", valid_set
+                )
+                drift = stats_drift(idx_dir / "stats.json", valid_count)
+
+                anything_off = bool(fts_count or meta_count or drift)
+                entry: Dict[str, Any] = {
+                    "name": proj.name,
+                    "valid_chunks": valid_count,
+                    "fts5_orphans": fts_count,
+                    "metadata_orphans": meta_count,
+                    "stats_drift": drift,
+                    "status": "inconsistent" if anything_off else "clean",
+                }
+                # Surface samples only when inconsistent — gives the operator
+                # something concrete to grep without bloating the output.
+                if anything_off:
+                    if fts_sample:
+                        entry["fts5_sample"] = fts_sample
+                    if meta_sample:
+                        entry["metadata_sample"] = meta_sample
+                    totals["inconsistent"] += 1
+                    totals["total_fts5_orphans"] += fts_count
+                    totals["total_metadata_orphans"] += meta_count
+                    totals["total_stats_drift"] += abs(drift)
+                else:
+                    totals["clean"] += 1
+
+                results.append(entry)
+
+            return json.dumps({
+                "projects": results,
+                "summary": {
+                    "total_projects": len(results),
+                    **totals,
+                },
+                "remediation": (
+                    "Run `python scripts/cleanup_index_orphans.py --apply-all` "
+                    "(quiesce the MCP server first) to fix inconsistencies."
+                ) if totals["inconsistent"] else None,
+            })
+        except Exception as e:
+            logger.error(f"verify_index_integrity failed: {e}", exc_info=True)
+            return json.dumps({"error": f"verify_index_integrity failed: {e}"})
+
     def search_all_projects(self, query: str, k: int = 3) -> str:
         """Search across ALL indexed projects, returning results tagged by project.
 
