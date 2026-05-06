@@ -33,9 +33,74 @@ _PIPELINE_COMPONENTS = [
     "contextual_bm25=on",  # prepend metadata headers to FTS5 (+0.128 MRR TS combined w/ rewrite)
 ]
 
+# tree-sitter grammar packages whose installed version contributes to the
+# pipeline fingerprint. When any of these upgrade, chunk boundaries can
+# shift (a new grammar may parse a construct differently), so previously-
+# embedded chunks become semantically stale relative to fresh queries.
+# Plan-2 B3 (2026-05-05).
+#
+# Listed explicitly rather than discovered via importlib.metadata pattern
+# match because:
+#   1. Predictable surface — new grammars must be added intentionally.
+#   2. Deterministic ordering for the hash regardless of install order.
+#   3. Distinct from non-grammar tree-sitter packages that don't affect
+#      chunking output (`tree-sitter` core, py-tree-sitter, etc.).
+_GRAMMAR_PACKAGES = (
+    "tree-sitter-c",
+    "tree-sitter-c-sharp",
+    "tree-sitter-cpp",
+    "tree-sitter-go",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-markdown",
+    "tree-sitter-nix",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-svelte",
+    "tree-sitter-typescript",
+)
+
+
+@lru_cache(maxsize=1)
+def _grammar_fingerprint() -> str:
+    """Stable hash of installed tree-sitter grammar versions.
+
+    Computed once per process via lru_cache (importlib.metadata is slow on
+    large environments). Returns a short hex digest. Missing packages
+    contribute the literal string "missing" so adding a new grammar
+    package later changes the fingerprint deterministically.
+    """
+    try:
+        import importlib.metadata as md
+    except Exception:
+        return "no_importlib_metadata"
+    parts: list[str] = []
+    for pkg in _GRAMMAR_PACKAGES:
+        try:
+            ver = md.version(pkg)
+        except Exception:
+            ver = "missing"
+        parts.append(f"{pkg}=={ver}")
+    return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
+
 
 def get_pipeline_version() -> str:
-    """Hash of pipeline config. Changes when re-embedding is needed."""
+    """Hash of pipeline config. Changes when re-embedding is needed.
+
+    Inputs:
+      - chunker version, overlap, contextual headers/bm25 (constants)
+      - EMBEDDING_PROVIDER + EMBEDDING_MODEL (env vars)
+      - CONTENT_MODE (env var)
+      - tree-sitter grammar versions (Plan-2 B3, 2026-05-05) — when a
+        grammar upgrades, chunk boundaries can shift; previously-embedded
+        chunks become semantically stale.
+
+    NOT covered (silent-degradation paths the operator must handle manually):
+      - Server-side embedding model upgrades (Voyage rotating
+        voyage-4-large weights without changing the model id). No
+        client-visible signal. Workaround: schedule a quarterly full
+        reindex if your provider publishes silent updates.
+    """
     provider = os.environ.get("EMBEDDING_PROVIDER", "voyage-context")
     model = os.environ.get("EMBEDDING_MODEL", "")
     content_mode = os.environ.get("CONTENT_MODE", "code")
@@ -43,6 +108,7 @@ def get_pipeline_version() -> str:
         f"provider={provider}",
         f"model={model}",
         f"content_mode={content_mode}",
+        f"grammars={_grammar_fingerprint()}",
     ]
     return hashlib.md5("|".join(sorted(components)).encode()).hexdigest()[:16]
 
