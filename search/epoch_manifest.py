@@ -255,6 +255,86 @@ def verify_manifest(project_dir: Path, manifest: Dict[str, Any]) -> Optional[str
     return None
 
 
+@dataclass
+class ReadResult:
+    """Outcome of read_with_fallback. Stable string vocabulary in `freshness`.
+
+    Plan-2 E3 (2026-05-05).
+    """
+    manifest: Optional[Dict[str, Any]]
+    freshness: str  # "fresh" | "stale_using_prior_epoch" | "missing" | "corrupt"
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """Whether the caller has a usable manifest."""
+        return self.manifest is not None
+
+
+def read_with_fallback(project_dir: Path) -> ReadResult:
+    """Read the current epoch with downgrade-tolerance to the prior epoch.
+
+    Algorithm (Plan-2 E3):
+      1. Load `current.json`.
+         - Missing: try prior.json. If also missing → ReadResult(None, "missing").
+      2. Verify current's artifact checksums.
+         - Pass: return ReadResult(current, "fresh").
+         - Fail: log warning, try prior.json.
+      3. Load `prior.json`.
+         - Missing → ReadResult(None, "corrupt", detail=verify error).
+      4. Verify prior's artifact checksums.
+         - Pass: return ReadResult(prior, "stale_using_prior_epoch").
+         - Fail: ReadResult(None, "corrupt", detail="both failed").
+
+    Critically: never falls open to a partial / in-progress epoch. Either
+    the caller gets a verified manifest (current OR prior) or an explicit
+    error indication that points at verify_index_integrity for repair.
+
+    Returned `freshness` strings are intended for caller-side propagation
+    into `_metadata.freshness` on search responses. Stable vocabulary —
+    downstream consumers may pattern-match.
+    """
+    # Step 1: load current
+    try:
+        current = read_current(project_dir)
+    except ManifestMissing:
+        # No current at all. Try prior as last resort.
+        prior = read_prior(project_dir)
+        if prior is None:
+            return ReadResult(None, "missing", detail="no current or prior manifest")
+        prior_err = verify_manifest(project_dir, prior)
+        if prior_err is None:
+            return ReadResult(
+                prior, "stale_using_prior_epoch",
+                detail="current.json missing; using prior",
+            )
+        return ReadResult(
+            None, "corrupt",
+            detail=f"current missing, prior failed: {prior_err}",
+        )
+
+    # Step 2: verify current
+    err = verify_manifest(project_dir, current)
+    if err is None:
+        return ReadResult(current, "fresh")
+
+    # Step 3-4: current failed verify, fall back to prior
+    LOG.warning("current manifest failed verification: %s; trying prior", err)
+    prior = read_prior(project_dir)
+    if prior is None:
+        return ReadResult(None, "corrupt", detail=f"current failed: {err}; no prior")
+    prior_err = verify_manifest(project_dir, prior)
+    if prior_err is None:
+        return ReadResult(
+            prior, "stale_using_prior_epoch",
+            detail=f"current failed: {err}",
+        )
+    return ReadResult(
+        None, "corrupt",
+        detail=f"both failed — current: {err} | prior: {prior_err}",
+    )
+
+
 def cleanup_stale_candidate(project_dir: Path) -> bool:
     """Remove a stale candidate.json (e.g., from a crashed prior write).
 
