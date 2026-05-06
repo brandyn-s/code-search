@@ -83,12 +83,29 @@ def _get_api_key() -> Optional[str]:
     key_file = os.path.expanduser("~/.anthropic/api_key")
     if os.path.exists(key_file):
         try:
-            with open(key_file, "r") as f:
+            with open(key_file, "r", encoding="utf-8") as f:
                 return f.read().strip()
         except Exception:
             pass
 
     return None
+
+
+# Default Haiku alias used when BM25_REWRITE_MODEL env var is unset.
+# Bumped 2026-05-06 from `claude-3-haiku-20240307` (deprecated, returns 404)
+# after PR #124 found the silent-fallback failure mode: operators set
+# BM25_REWRITE=on without overriding the model env, the API returned 404,
+# the graceful-fallback path swallowed the error, and the rewriter
+# silently returned the original query. PR #124's empirical test
+# confirmed BM25_REWRITE=off-vs-on produced Δ MRR=0.0000 (no-op) until
+# the model was overridden via BM25_REWRITE_MODEL.
+DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
+# Sentinel — log a warning the FIRST time the rewriter falls back to
+# original query in a session, so operators see deprecation-shaped
+# silent-no-ops instead of having them swallowed entirely. Re-set on
+# module reload (test isolation).
+_warned_fallback = False
 
 
 def _call_haiku(query: str) -> Optional[str]:
@@ -111,6 +128,7 @@ def _call_haiku(query: str) -> Optional[str]:
     except ImportError:
         pass  # urllib3 not installed, socket patch is sufficient
 
+    model = os.environ.get("BM25_REWRITE_MODEL", DEFAULT_HAIKU_MODEL)
     resp = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -119,7 +137,7 @@ def _call_haiku(query: str) -> Optional[str]:
             "content-type": "application/json",
         },
         json={
-            "model": os.environ.get("BM25_REWRITE_MODEL", "claude-3-haiku-20240307"),
+            "model": model,
             "max_tokens": 100,
             "messages": [{
                 "role": "user",
@@ -136,11 +154,31 @@ def _call_haiku(query: str) -> Optional[str]:
         timeout=5.0,
     )
 
+    global _warned_fallback
     if resp.status_code == 200:
         data = resp.json()
         text = data.get("content", [{}])[0].get("text", "").strip()
         # Sanity check: rewrite shouldn't be empty or excessively long
         if text and len(text) < 500:
             return text
+        # 200 but unparseable. Log the first occurrence so it isn't silent.
+        if not _warned_fallback:
+            _warned_fallback = True
+            logger.warning(
+                "BM25 rewriter received 200 but empty/unparseable response; "
+                "falling back to original query. model=%s", model,
+            )
+        return None
 
+    # Non-200: surface the deprecation-shaped failure mode that caused
+    # PR #124's silent no-op. Log the FIRST occurrence per session so
+    # operators see "model deprecated" rather than debug a silent gap.
+    if not _warned_fallback:
+        _warned_fallback = True
+        logger.warning(
+            "BM25 rewriter API call failed (status=%d); falling back to "
+            "original query. model=%s. Override via BM25_REWRITE_MODEL env. "
+            "Body: %s",
+            resp.status_code, model, resp.text[:200] if resp.text else "(empty)",
+        )
     return None
