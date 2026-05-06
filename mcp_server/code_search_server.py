@@ -999,9 +999,44 @@ class CodeSearchServer:
         )
 
     def get_indexing_progress(self) -> str:
-        """Get current indexing job progress."""
+        """Get current indexing job progress.
+
+        Surfaces TWO concurrent flows (Plan-2 F3, 2026-05-05):
+        1. Foreground `index_directory` jobs (`_indexing_job` state)
+        2. Background reindex thread from `search_code` when
+           `CODE_SEARCH_NONBLOCKING_SEARCH=1` (Plan-2 F2)
+
+        Response always includes `background_reindex_active: bool` so an
+        LLM agent can detect the non-blocking case even when a foreground
+        job is also active.
+
+        Status values:
+          - "idle": no work in progress
+          - "indexing": foreground index_directory job running
+          - "completed" / "failed": foreground job ended; result attached
+          - "background_reindex_active": only F2's background thread runs
+        """
+        bg_active = bool(getattr(self, "_background_reindex_active", False))
+
         if not self._indexing_job:
-            return json.dumps({"status": "idle", "message": "No indexing job running"})
+            if bg_active:
+                # No foreground job, but background reindex IS running.
+                return json.dumps({
+                    "status": "background_reindex_active",
+                    "background_reindex_active": True,
+                    "message": (
+                        "Search-time background reindex in progress "
+                        "(CODE_SEARCH_NONBLOCKING_SEARCH=1). search_code "
+                        "calls return last-good-index results with "
+                        "_metadata.freshness=stale_reindex_in_progress "
+                        "until this completes."
+                    ),
+                })
+            return json.dumps({
+                "status": "idle",
+                "background_reindex_active": False,
+                "message": "No indexing job running",
+            })
 
         job = self._indexing_job
         response = {
@@ -1010,6 +1045,7 @@ class CodeSearchServer:
             "phase": job["phase"],
             "directory": job.get("directory", ""),
             "project_name": job.get("project_name", ""),
+            "background_reindex_active": bg_active,
         }
 
         if job["total"] > 0:
