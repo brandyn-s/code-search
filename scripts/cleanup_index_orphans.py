@@ -31,6 +31,15 @@ Modes:
 
   --project <prefix>         limit to one project (matches dir name prefix)
 
+Plan-2 E2-4 (PR #123): after any --apply-* mode actually changes disk,
+the script ALSO commits a fresh epoch manifest so verify_index_integrity
+reports `manifest_status: fresh` instead of `stale_using_prior_epoch`
+(or `corrupt`, if the prior manifest's recorded SHAs no longer match the
+post-cleanup artifact bytes). Stale `manifest/candidate.json` files
+(crash residue from a prior interrupted commit) are removed before the
+new commit. Skipped on dry-run and on projects where no cleanup was
+needed.
+
 Designed to run on a quiesced index — close any active code-search MCP
 server first, since fts5.db / metadata.db are SQLite files with WAL.
 Honors CODE_SEARCH_STORAGE env var (matches the MCP server's behavior).
@@ -293,6 +302,116 @@ def stats_drift(stats_path: Path, valid_count: int) -> int:
     return int(s.get("total_chunks", 0)) - valid_count
 
 
+# ──────────────────── post-cleanup manifest ────────────────────
+# Plan-2 E2-4 (PR #123): after cleanup mutates disk, the prior manifest's
+# recorded SHAs no longer match the artifact bytes. Without a fresh
+# commit, verify_index_integrity reports `manifest_corrupt` until the
+# next regular save_index. This helper closes that gap by re-publishing
+# a manifest covering the post-recovery state, so cleanup leaves the
+# project in a consistent + verified state.
+
+
+def commit_post_cleanup_manifest(
+    index_dir: Path, valid_chunk_ids: list[str]
+) -> str | None:
+    """Build + commit a fresh epoch manifest for the post-cleanup artifacts.
+
+    Called after any --apply-* mode that actually mutated disk. The
+    manifest covers chunk_ids.pkl, code.index, metadata.db, fts5.db, and
+    stats.json — whichever of those exist on disk now. Returns the
+    epoch_id on success, None if no manifest could be committed (e.g.,
+    no artifacts present, consistency check failed).
+
+    Stale `candidate.json` files from a prior interrupted commit are
+    removed before the new commit (cleanup_stale_candidate is idempotent).
+    """
+    # Lazy import: keep the module importable in test contexts that don't
+    # need the manifest layer (and avoid pulling FAISS at import time).
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        ManifestConsistencyError,
+        build_manifest,
+        cleanup_stale_candidate,
+        commit_manifest,
+        count_fts5_db,
+        count_metadata_db,
+    )
+
+    cleanup_stale_candidate(index_dir)
+
+    chunk_count = len(valid_chunk_ids)
+    artifacts: list[ArtifactSpec] = []
+
+    chunk_id_path = index_dir / "chunk_ids.pkl"
+    if chunk_id_path.exists():
+        artifacts.append(ArtifactSpec(
+            name="chunk_ids.pkl", path=chunk_id_path, count=chunk_count,
+        ))
+
+    code_index_path = index_dir / "code.index"
+    if code_index_path.exists():
+        # Read FAISS ntotal directly to confirm consistency at commit time.
+        try:
+            import faiss
+            idx = faiss.read_index(str(code_index_path))
+            ntotal = int(idx.ntotal)
+        except Exception:
+            ntotal = chunk_count  # best-effort
+        artifacts.append(ArtifactSpec(
+            name="code.index", path=code_index_path, count=ntotal,
+        ))
+
+    meta_path = index_dir / "metadata.db"
+    if meta_path.exists():
+        artifacts.append(ArtifactSpec(
+            name="metadata.db", path=meta_path,
+            count=count_metadata_db(meta_path),
+        ))
+
+    fts_path = index_dir / "fts5.db"
+    if fts_path.exists():
+        artifacts.append(ArtifactSpec(
+            name="fts5.db", path=fts_path,
+            count=count_fts5_db(fts_path),
+        ))
+
+    stats_path = index_dir / "stats.json"
+    if stats_path.exists():
+        artifacts.append(ArtifactSpec(
+            name="stats.json", path=stats_path, count=None,
+        ))
+
+    if not artifacts:
+        return None
+
+    try:
+        manifest = build_manifest(index_dir, artifacts)
+    except ManifestConsistencyError as exc:
+        print(
+            f"  !! manifest commit skipped: cross-artifact consistency check "
+            f"failed: {exc}",
+            file=sys.stderr,
+        )
+        return None
+    except Exception as exc:
+        print(
+            f"  !! manifest commit skipped (unexpected error): {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        commit_manifest(index_dir, manifest)
+    except Exception as exc:
+        print(
+            f"  !! manifest commit-rename failed: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    return manifest.get("epoch_id")
+
+
 # ───────────────────────── main ─────────────────────────
 
 
@@ -344,6 +463,7 @@ def main() -> int:
         "fts5_orphans": 0, "fts5_deleted": 0,
         "meta_orphans": 0, "meta_deleted": 0,
         "stats_drift": 0, "stats_rewritten": 0,
+        "manifests_committed": 0,
     }
     for proj in project_dirs:
         idx_dir = project_index_dir(proj)
@@ -382,14 +502,19 @@ def main() -> int:
                 f" (stats.total_chunks={valid_count + drift}, pkl={valid_count})"
             )
 
+        # Track whether this project was actually mutated; gate manifest
+        # commit on real disk changes (skip on dry-run).
+        mutated = False
         if args.apply_fts5 and fts_count:
             n = remove_fts5_orphans(idx_dir / "fts5.db", valid_set)
             totals["fts5_deleted"] += n
             print(f"  -> fts5 deleted: {n}")
+            mutated = True
         if args.apply_metadata and meta_count:
             n = remove_metadata_orphans(idx_dir / "metadata.db", valid_set)
             totals["meta_deleted"] += n
             print(f"  -> metadata deleted: {n}")
+            mutated = True
         if args.apply_stats and drift:
             new_stats = compute_stats_from_truth(idx_dir, chunk_ids)
             if new_stats is None:
@@ -404,6 +529,20 @@ def main() -> int:
                     f"  -> stats.json rewritten "
                     f"(total_chunks {valid_count + drift} -> {valid_count})"
                 )
+                mutated = True
+
+        # Plan-2 E2-4 (PR #123): commit a fresh manifest after cleanup so
+        # the post-recovery state is the published epoch. Without this,
+        # the prior manifest's recorded SHAs would no longer match the
+        # artifact bytes and verify_index_integrity would report
+        # `manifest_corrupt` until the next regular save_index call.
+        if mutated:
+            epoch_id = commit_post_cleanup_manifest(idx_dir, chunk_ids)
+            if epoch_id:
+                totals["manifests_committed"] += 1
+                print(f"  -> manifest committed: epoch_id={epoch_id}")
+            else:
+                print("  -> manifest commit skipped (see stderr)")
 
     print()
     print("=== Summary ===")
@@ -419,6 +558,9 @@ def main() -> int:
         )
         print(
             f"  stats.json files rewritten:{totals['stats_rewritten']}"
+        )
+        print(
+            f"  manifests committed:       {totals['manifests_committed']}"
         )
     else:
         print(
