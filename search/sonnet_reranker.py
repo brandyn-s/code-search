@@ -194,51 +194,60 @@ async def _rerank_async(
         LOG.warning("anthropic package not installed; reranker disabled")
         return _emit(candidates[:top_k], False, REASON_PACKAGE_NOT_INSTALLED)
 
-    client = anthropic.AsyncAnthropic()
-    tasks = []
-    for c in candidates:
-        full = c.get("full_content") or c.get("content") or c.get("content_preview") or ""
-        file_path = c.get("file_path") or c.get("file") or c.get("relative_path") or ""
-        tasks.append(_score_one(client, query, file_path, full))
+    # Plan-2 (2026-05-06 roundtable rec #1): wrap AsyncAnthropic in `async with`
+    # so its underlying httpx AsyncClient is fully closed before this coroutine
+    # returns. Without the explicit close, asyncio.run() tears down the event
+    # loop while the client's connection-pool cleanup tasks are still scheduled,
+    # producing "RuntimeError: Event loop is closed" warnings on every call.
+    # This is cosmetic in long-lived MCP servers (the loop never closes) but
+    # accumulates catastrophically in eval drivers that call asyncio.run per
+    # query (~150+ warnings stalled D1 Pass 2 on 2026-05-06). The async-with
+    # block guarantees client.aclose() completes inside this loop's lifetime.
+    async with anthropic.AsyncAnthropic() as client:
+        tasks = []
+        for c in candidates:
+            full = c.get("full_content") or c.get("content") or c.get("content_preview") or ""
+            file_path = c.get("file_path") or c.get("file") or c.get("relative_path") or ""
+            tasks.append(_score_one(client, query, file_path, full))
 
-    try:
-        scores = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=False),
-                                          timeout=timeout)
-    except asyncio.TimeoutError:
-        LOG.warning(f"Sonnet reranker timeout >{timeout}s; using hybrid order")
-        return _emit(candidates[:top_k], False, REASON_TIMEOUT)
+        try:
+            scores = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=False),
+                                              timeout=timeout)
+        except asyncio.TimeoutError:
+            LOG.warning(f"Sonnet reranker timeout >{timeout}s; using hybrid order")
+            return _emit(candidates[:top_k], False, REASON_TIMEOUT)
 
-    # _score_one returns: int (success), None (legacy parse/empty paths), or str (_ERR_*).
-    failures = [s for s in scores if isinstance(s, str)]
-    n_failed = sum(1 for s in scores if not isinstance(s, int))
-    if len(scores) > 0 and n_failed > len(scores) * FAILURE_TOLERANCE:
-        reason = _aggregate_failure_reason(failures) if failures else REASON_TOO_MANY_FAILURES
-        LOG.warning(f"Sonnet reranker {n_failed}/{len(scores)} failed ({reason}); using hybrid order")
-        return _emit(candidates[:top_k], False, reason)
+        # _score_one returns: int (success), None (legacy parse/empty paths), or str (_ERR_*).
+        failures = [s for s in scores if isinstance(s, str)]
+        n_failed = sum(1 for s in scores if not isinstance(s, int))
+        if len(scores) > 0 and n_failed > len(scores) * FAILURE_TOLERANCE:
+            reason = _aggregate_failure_reason(failures) if failures else REASON_TOO_MANY_FAILURES
+            LOG.warning(f"Sonnet reranker {n_failed}/{len(scores)} failed ({reason}); using hybrid order")
+            return _emit(candidates[:top_k], False, reason)
 
-    # Hybrid-prior fallback: if the max Sonnet score across the candidate pool
-    # is below the threshold (default 7 = "Highly relevant" boundary in
-    # JUDGE_PROMPT), Sonnet hasn't identified anything as confidently relevant.
-    # Tie-breaking on uniformly-low scores favors keyword-dense chunks over
-    # canonical implementations. Preserve hybrid order in that case.
-    valid_scores = [s for s in scores if isinstance(s, int)]
-    if valid_scores and max(valid_scores) < hybrid_prior_threshold:
-        LOG.debug(f"Sonnet max score {max(valid_scores)} < {hybrid_prior_threshold}; "
-                  f"using hybrid order")
-        return _emit(candidates[:top_k], False, REASON_HYBRID_PRIOR_FALLBACK)
+        # Hybrid-prior fallback: if the max Sonnet score across the candidate pool
+        # is below the threshold (default 7 = "Highly relevant" boundary in
+        # JUDGE_PROMPT), Sonnet hasn't identified anything as confidently relevant.
+        # Tie-breaking on uniformly-low scores favors keyword-dense chunks over
+        # canonical implementations. Preserve hybrid order in that case.
+        valid_scores = [s for s in scores if isinstance(s, int)]
+        if valid_scores and max(valid_scores) < hybrid_prior_threshold:
+            LOG.debug(f"Sonnet max score {max(valid_scores)} < {hybrid_prior_threshold}; "
+                      f"using hybrid order")
+            return _emit(candidates[:top_k], False, REASON_HYBRID_PRIOR_FALLBACK)
 
-    # Sort: higher score wins; non-int scores (None, _ERR_*) sink to bottom;
-    # preserve original order on ties (stable sort).
-    def _sort_key(item):
-        idx, pair = item
-        score = pair[0]
-        is_failure = not isinstance(score, int)
-        return (is_failure, -(score if isinstance(score, int) else -1), idx)
+        # Sort: higher score wins; non-int scores (None, _ERR_*) sink to bottom;
+        # preserve original order on ties (stable sort).
+        def _sort_key(item):
+            idx, pair = item
+            score = pair[0]
+            is_failure = not isinstance(score, int)
+            return (is_failure, -(score if isinstance(score, int) else -1), idx)
 
-    indexed = list(enumerate(zip(scores, candidates)))
-    indexed.sort(key=_sort_key)
-    out = [c for _, (_, c) in indexed[:top_k]]
-    return _emit(out, True, REASON_OK)
+        indexed = list(enumerate(zip(scores, candidates)))
+        indexed.sort(key=_sort_key)
+        out = [c for _, (_, c) in indexed[:top_k]]
+        return _emit(out, True, REASON_OK)
 
 
 def rerank_with_sonnet(
