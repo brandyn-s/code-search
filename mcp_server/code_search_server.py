@@ -139,6 +139,15 @@ class CodeSearchServer:
             None  # {job_id, status, phase, current, total, errors, result}
         )
         self._indexing_thread = None
+        # PR Plan-2 F2 (2026-05-05): background reindex thread state.
+        # When CODE_SEARCH_NONBLOCKING_SEARCH=1, search_code dispatches
+        # auto_reindex_if_needed to a daemon thread + returns last-good-index
+        # results immediately with _metadata.freshness="stale_reindex_in_progress".
+        # Concurrent searches use the OLD _searcher reference (held in
+        # local var of in-flight calls); after reindex completes, _searcher
+        # is set to None so the next call rebuilds against the fresh index.
+        self._background_reindex_active = False
+        self._background_reindex_thread: Optional[Any] = None
 
         # Query logging (ported from memory-search)
         self._query_log_db = self._init_query_log()
@@ -442,6 +451,59 @@ class CodeSearchServer:
 
         return self._searcher
 
+    def _dispatch_background_reindex(
+        self, project_path: str, max_age_minutes: float,
+    ) -> bool:
+        """Dispatch auto_reindex_if_needed to a daemon thread.
+
+        Returns True if a fresh thread was started, False if a reindex
+        was already in flight. Plan-2 F2 (2026-05-05). Concurrent search
+        safety: in-flight searches use the OLD self._searcher reference
+        (held in their local var); after the reindex completes, _searcher
+        is set to None so the NEXT call rebuilds against the fresh index.
+        """
+        import threading
+        if self._background_reindex_active:
+            return False
+        self._background_reindex_active = True
+
+        def _run():
+            try:
+                from search.incremental_indexer import IncrementalIndexer
+                index_manager = self.get_index_manager(
+                    project_path, provider=self._current_provider
+                )
+                embedder = self.embedder(
+                    project_path, provider=self._current_provider
+                )
+                chunker = MultiLanguageChunker(project_path)
+                ii = IncrementalIndexer(
+                    indexer=index_manager, embedder=embedder, chunker=chunker
+                )
+                result = ii.auto_reindex_if_needed(
+                    project_path, max_age_minutes=max_age_minutes
+                )
+                if result.files_modified > 0 or result.files_added > 0:
+                    logger.info(
+                        f"[F2-bg] reindexed: +{result.files_added} ~{result.files_modified} "
+                        f"in {result.time_taken:.1f}s"
+                    )
+                    if self._searcher:
+                        try:
+                            self._searcher.clear_cache()
+                        except Exception:
+                            pass
+                    self._searcher = None
+            except Exception as e:
+                logger.warning(f"[F2-bg] background reindex failed: {e}")
+            finally:
+                self._background_reindex_active = False
+
+        t = threading.Thread(target=_run, daemon=True, name="bg-reindex")
+        t.start()
+        self._background_reindex_thread = t
+        return True
+
     def search_code(
         self,
         query: str,
@@ -477,41 +539,74 @@ class CodeSearchServer:
                     }
                 )
 
-            if auto_reindex and self._current_project:
-                from search.incremental_indexer import IncrementalIndexer
+            # PR Plan-2 F2 (2026-05-05): track freshness across all paths.
+            # Default: blocking auto-reindex (existing behavior). Opt-in
+            # CODE_SEARCH_NONBLOCKING_SEARCH=1 dispatches to background.
+            freshness = "unknown"
+            disable_auto = os.environ.get(
+                "CODE_SEARCH_DISABLE_AUTO_REINDEX", ""
+            ).lower() in {"1", "true", "yes", "on"}
+            nonblocking = os.environ.get(
+                "CODE_SEARCH_NONBLOCKING_SEARCH", ""
+            ).lower() in {"1", "true", "yes", "on"}
 
-                logger.info(
-                    f"Checking if index needs refresh (max age: {max_age_minutes} minutes)"
-                )
+            if disable_auto:
+                freshness = "stale_auto_reindex_disabled"
+            elif auto_reindex and self._current_project:
+                if nonblocking:
+                    # Background dispatch: kick off reindex if not already
+                    # running, return immediately with current index.
+                    if self._background_reindex_active:
+                        freshness = "stale_reindex_in_progress"
+                    else:
+                        dispatched = self._dispatch_background_reindex(
+                            self._current_project, max_age_minutes,
+                        )
+                        freshness = (
+                            "stale_reindex_in_progress" if dispatched else "fresh"
+                        )
+                else:
+                    # Blocking path (existing default).
+                    from search.incremental_indexer import IncrementalIndexer
 
-                # Pass _current_provider so auto-reindex writes to the same
-                # provider-aware dir the searcher is reading from. Without
-                # this, auto-reindex runs against the legacy hash and the
-                # fresh embeddings never reach the searcher's index.
-                index_manager = self.get_index_manager(
-                    self._current_project, provider=self._current_provider
-                )
-                embedder = self.embedder(
-                    self._current_project, provider=self._current_provider
-                )
-                chunker = MultiLanguageChunker(self._current_project)
-
-                incremental_indexer = IncrementalIndexer(
-                    indexer=index_manager, embedder=embedder, chunker=chunker
-                )
-
-                reindex_result = incremental_indexer.auto_reindex_if_needed(
-                    self._current_project, max_age_minutes=max_age_minutes
-                )
-
-                if reindex_result.files_modified > 0 or reindex_result.files_added > 0:
                     logger.info(
-                        f"Auto-reindexed: {reindex_result.files_added} added, {reindex_result.files_modified} modified, took {reindex_result.time_taken:.2f}s"
+                        f"Checking if index needs refresh (max age: {max_age_minutes} minutes)"
                     )
-                    # Clear query embedding cache before resetting searcher
-                    if self._searcher:
-                        self._searcher.clear_cache()
-                    self._searcher = None  # Reset to force reload
+
+                    # Pass _current_provider so auto-reindex writes to the same
+                    # provider-aware dir the searcher is reading from. Without
+                    # this, auto-reindex runs against the legacy hash and the
+                    # fresh embeddings never reach the searcher's index.
+                    index_manager = self.get_index_manager(
+                        self._current_project, provider=self._current_provider
+                    )
+                    embedder = self.embedder(
+                        self._current_project, provider=self._current_provider
+                    )
+                    chunker = MultiLanguageChunker(self._current_project)
+
+                    incremental_indexer = IncrementalIndexer(
+                        indexer=index_manager, embedder=embedder, chunker=chunker
+                    )
+
+                    reindex_result = incremental_indexer.auto_reindex_if_needed(
+                        self._current_project, max_age_minutes=max_age_minutes
+                    )
+
+                    if reindex_result.files_modified > 0 or reindex_result.files_added > 0:
+                        logger.info(
+                            f"Auto-reindexed: {reindex_result.files_added} added, {reindex_result.files_modified} modified, took {reindex_result.time_taken:.2f}s"
+                        )
+                        # Clear query embedding cache before resetting searcher
+                        if self._searcher:
+                            self._searcher.clear_cache()
+                        self._searcher = None  # Reset to force reload
+                        freshness = "fresh_after_reindex"
+                    else:
+                        freshness = "fresh"
+            else:
+                # auto_reindex=False or no project — neither stale nor refreshed
+                freshness = "fresh"
 
             searcher = self.get_searcher()
             logger.info(f"Current project: {self._current_project}")
@@ -607,8 +702,10 @@ class CodeSearchServer:
             except Exception as e:
                 # Never let metadata propagation break a search response.
                 logger.debug(f"reranker metadata propagation failed: {e}")
-            if response_metadata:
-                response["_metadata"] = response_metadata
+            # PR Plan-2 F2 (2026-05-05): freshness metadata. Stable string
+            # vocabulary documented in CLAUDE.md.
+            response_metadata["freshness"] = freshness
+            response["_metadata"] = response_metadata
 
             # Staleness warning
             if self._current_project:
