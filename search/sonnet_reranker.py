@@ -25,6 +25,15 @@ Reason values are documented in `REASON_*` constants below. The MCP search
 response surfaces this in `_metadata.reranker` so LLM agents can detect
 silent fallback (e.g., rotated API key, sustained rate-limit, sustained
 hybrid-prior fallback indicating prompt-coverage issues).
+
+Latency diagnostics (Plan D1-Pass-2 A.1, 2026-05-06): each Anthropic call
+emits a `[ANTHROPIC_DIAG]` log line with `total_ms`, `in_flight`,
+`attempt_seq`, and `outcome`. Optional concurrency cap via
+`ANTHROPIC_CONCURRENCY_LIMIT` env var (unbounded when unset, preserving
+existing behavior). Together these expose whether degraded latency is
+constant-rate (server-side), tail-heavy (per-call slow), concurrency-
+related, or rate-limit-driven — see
+`bench/research/anthropic_latency_diagnosis.md`.
 """
 from __future__ import annotations
 
@@ -104,6 +113,22 @@ def _classify_call_error(exc: BaseException) -> str:
     return _ERR_HTTP
 
 
+# ─── Latency diagnostic state (Plan D1-Pass-2 A.1) ───
+# Module-level counter for in-flight Sonnet calls. Updated under
+# _IN_FLIGHT_LOCK so the diag log line reflects a consistent snapshot.
+_IN_FLIGHT_COUNT = 0
+_IN_FLIGHT_LOCK: asyncio.Lock | None = None
+_ATTEMPT_SEQ = 0
+
+
+def _get_in_flight_lock() -> asyncio.Lock:
+    """Lazy-create the lock so we attach it to the running event loop."""
+    global _IN_FLIGHT_LOCK
+    if _IN_FLIGHT_LOCK is None:
+        _IN_FLIGHT_LOCK = asyncio.Lock()
+    return _IN_FLIGHT_LOCK
+
+
 async def _score_one(client: Any, query: str, file_path: str, content: str):
     """Score one (query, chunk) pair.
 
@@ -112,25 +137,57 @@ async def _score_one(client: Any, query: str, file_path: str, content: str):
         None on legacy parse/empty paths (preserved for backward-compat with
             existing test monkey-patches that return int|None).
         str (one of _ERR_* tags) when a structured failure can be classified.
+
+    Emits one `[ANTHROPIC_DIAG]` log line per call documenting wall-time and
+    concurrency. Used to diagnose latency regressions — see PR Plan D1-Pass-2.
     """
+    global _IN_FLIGHT_COUNT, _ATTEMPT_SEQ
     truncated = content[:MAX_CONTENT_CHARS] if len(content) > MAX_CONTENT_CHARS else content
     prompt = JUDGE_PROMPT.format(
         query=query,
         file_path=file_path or "(unknown)",
         content=truncated or "(empty content)",
     )
+
+    # Snapshot in-flight + attempt-seq under lock so the diag log line is
+    # consistent. Increment counter, capture seq, then make the SDK call.
+    lock = _get_in_flight_lock()
+    async with lock:
+        _ATTEMPT_SEQ += 1
+        attempt_seq = _ATTEMPT_SEQ
+        _IN_FLIGHT_COUNT += 1
+        in_flight = _IN_FLIGHT_COUNT
+
+    t_start = time.monotonic()
+    outcome = "ok"
+    resp = None
+    exc: BaseException | None = None
     try:
-        resp = await client.messages.create(
-            model=MODEL,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
+        try:
+            resp = await client.messages.create(
+                model=MODEL,
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            exc = e
+            outcome = _classify_call_error(e).removeprefix("_err_")
+    finally:
+        t_total_ms = int((time.monotonic() - t_start) * 1000)
+        async with lock:
+            _IN_FLIGHT_COUNT -= 1
+        LOG.info(
+            f"[ANTHROPIC_DIAG] model={MODEL} total_ms={t_total_ms} "
+            f"in_flight={in_flight} attempt={attempt_seq} outcome={outcome}"
         )
-    except Exception as e:
-        LOG.debug(f"Sonnet score call failed: {e}")
-        return _classify_call_error(e)
+
+    if exc is not None:
+        LOG.debug(f"Sonnet score call failed: {exc}")
+        return _classify_call_error(exc)
+
     try:
         text = ""
-        for block in resp.content:
+        for block in resp.content:  # type: ignore[union-attr]
             if getattr(block, "type", None) == "text":
                 text = getattr(block, "text", "").strip()
                 break
@@ -145,6 +202,21 @@ async def _score_one(client: Any, query: str, file_path: str, content: str):
     except Exception as e:
         LOG.debug(f"Sonnet score parse failed: {e}")
         return _ERR_UNPARSEABLE
+
+
+async def _bounded_score_one(sem: asyncio.Semaphore | None, *args):
+    """Wrap _score_one with optional semaphore-bounded concurrency.
+
+    When sem is None, behaves identically to _score_one (unbounded).
+    When sem is set, acquires before the call so at most `sem._value`
+    concurrent calls are in flight. Indirection lives outside _score_one
+    so existing tests that monkey-patch _score_one with a 4-arg fake keep
+    working.
+    """
+    if sem is None:
+        return await _score_one(*args)
+    async with sem:
+        return await _score_one(*args)
 
 
 def _aggregate_failure_reason(failures: list[str]) -> str:
@@ -203,12 +275,27 @@ async def _rerank_async(
     # accumulates catastrophically in eval drivers that call asyncio.run per
     # query (~150+ warnings stalled D1 Pass 2 on 2026-05-06). The async-with
     # block guarantees client.aclose() completes inside this loop's lifetime.
+    # Optional concurrency cap (Plan D1-Pass-2 A.1). When unset, behaves
+    # exactly as before (unbounded asyncio.gather over all candidates). When
+    # ANTHROPIC_CONCURRENCY_LIMIT is set to a positive integer, _score_one
+    # acquires from a semaphore before each SDK call, capping in-flight
+    # requests. Useful for debugging concurrency-related latency regressions.
+    sem: asyncio.Semaphore | None = None
+    try:
+        limit_str = os.environ.get("ANTHROPIC_CONCURRENCY_LIMIT")
+        if limit_str:
+            limit = int(limit_str)
+            if limit > 0:
+                sem = asyncio.Semaphore(limit)
+    except ValueError:
+        sem = None
+
     async with anthropic.AsyncAnthropic() as client:
         tasks = []
         for c in candidates:
             full = c.get("full_content") or c.get("content") or c.get("content_preview") or ""
             file_path = c.get("file_path") or c.get("file") or c.get("relative_path") or ""
-            tasks.append(_score_one(client, query, file_path, full))
+            tasks.append(_bounded_score_one(sem, client, query, file_path, full))
 
         try:
             scores = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=False),

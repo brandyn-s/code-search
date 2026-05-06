@@ -402,3 +402,196 @@ def test_metadata_reason_vocabulary_is_stable():
     assert REASON_TOO_MANY_FAILURES == "too_many_failures"
     assert REASON_HYBRID_PRIOR_FALLBACK == "hybrid_prior_fallback"
     assert REASON_UNEXPECTED_ERROR == "unexpected_error"
+
+
+# ─── Plan D1-Pass-2 A.1 (PR ?): latency diagnostic + concurrency cap ───
+# These tests pin the concurrency-limit semaphore behavior and the
+# [ANTHROPIC_DIAG] log emission. Used to diagnose Anthropic per-call latency
+# regressions without requiring API spend.
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_caps_in_flight_calls(monkeypatch):
+    """ANTHROPIC_CONCURRENCY_LIMIT=2 caps simultaneous _score_one calls to 2."""
+    import asyncio as _asyncio
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(6)
+    ]
+
+    # Track concurrent call count via a shared counter
+    concurrent_now = 0
+    max_concurrent = 0
+    counter_lock = _asyncio.Lock()
+
+    async def slow_score(client, query, file_path, content):
+        nonlocal concurrent_now, max_concurrent
+        async with counter_lock:
+            concurrent_now += 1
+            if concurrent_now > max_concurrent:
+                max_concurrent = concurrent_now
+        await _asyncio.sleep(0.05)
+        async with counter_lock:
+            concurrent_now -= 1
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", slow_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_CONCURRENCY_LIMIT", "2")
+    out = await _rerank_async(
+        "q", candidates, top_k=6, timeout=10.0, hybrid_prior_threshold=7,
+    )
+    assert len(out) == 6
+    # max_concurrent must NEVER exceed the cap
+    assert max_concurrent <= 2, f"max_concurrent={max_concurrent} exceeded cap=2"
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_unset_is_unbounded(monkeypatch):
+    """When ANTHROPIC_CONCURRENCY_LIMIT is unset, all calls run concurrently."""
+    import asyncio as _asyncio
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(6)
+    ]
+
+    concurrent_now = 0
+    max_concurrent = 0
+    counter_lock = _asyncio.Lock()
+
+    async def slow_score(client, query, file_path, content):
+        nonlocal concurrent_now, max_concurrent
+        async with counter_lock:
+            concurrent_now += 1
+            if concurrent_now > max_concurrent:
+                max_concurrent = concurrent_now
+        await _asyncio.sleep(0.05)
+        async with counter_lock:
+            concurrent_now -= 1
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", slow_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_CONCURRENCY_LIMIT", raising=False)
+    out = await _rerank_async(
+        "q", candidates, top_k=6, timeout=10.0, hybrid_prior_threshold=7,
+    )
+    assert len(out) == 6
+    # Without a cap, all 6 should run in parallel
+    assert max_concurrent == 6, f"max_concurrent={max_concurrent}, expected 6"
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_invalid_value_falls_back_to_unbounded(monkeypatch):
+    """ANTHROPIC_CONCURRENCY_LIMIT=garbage doesn't break the reranker."""
+    import asyncio as _asyncio
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(3)
+    ]
+
+    async def fast_score(client, query, file_path, content):
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fast_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_CONCURRENCY_LIMIT", "not-a-number")
+    out = await _rerank_async(
+        "q", candidates, top_k=3, timeout=5.0, hybrid_prior_threshold=7,
+    )
+    assert len(out) == 3
+    # Reranker still produces a sensible ordering even with bad env value
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_zero_is_treated_as_unbounded(monkeypatch):
+    """ANTHROPIC_CONCURRENCY_LIMIT=0 is treated as unbounded (semaphore not created)."""
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(3)
+    ]
+
+    async def fast_score(client, query, file_path, content):
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fast_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_CONCURRENCY_LIMIT", "0")
+    out = await _rerank_async(
+        "q", candidates, top_k=3, timeout=5.0, hybrid_prior_threshold=7,
+    )
+    assert len(out) == 3
+
+
+def test_diag_log_emits_per_call(monkeypatch, caplog):
+    """Each [ANTHROPIC_DIAG] log line records a per-call timing snapshot.
+
+    Uses a real _score_one call against a mock client (the SDK call inside
+    _score_one raises, classified as _err_http; we still expect the diag
+    line to fire from the finally block).
+    """
+    import asyncio as _asyncio
+    import logging as _logging
+    from search import sonnet_reranker as sr
+
+    class FakeClient:
+        class messages:
+            @staticmethod
+            async def create(**kwargs):
+                # Simulate a network round-trip + force an error to trigger
+                # the failure-path diag emission
+                await _asyncio.sleep(0.001)
+                raise RuntimeError("simulated SDK error")
+
+    caplog.set_level(_logging.INFO, logger="search.sonnet_reranker")
+    result = _asyncio.run(sr._score_one(FakeClient(), "q", "f.py", "content"))
+    # On error, _score_one returns one of the _ERR_* tags
+    assert isinstance(result, str) and result.startswith("_err_")
+
+    diag_records = [r for r in caplog.records if "[ANTHROPIC_DIAG]" in r.getMessage()]
+    assert len(diag_records) == 1, (
+        f"expected exactly 1 diag log line, got {len(diag_records)}"
+    )
+    msg = diag_records[0].getMessage()
+    assert "model=" in msg
+    assert "total_ms=" in msg
+    assert "in_flight=" in msg
+    assert "attempt=" in msg
+    assert "outcome=" in msg
+
+
+def test_diag_log_records_outcome_ok_on_success(monkeypatch, caplog):
+    """A successful _score_one call records outcome=ok in the diag line."""
+    import asyncio as _asyncio
+    import logging as _logging
+    from search import sonnet_reranker as sr
+
+    class FakeBlock:
+        type = "text"
+        text = '{"score": 8, "reasoning": "match"}'
+
+    class FakeResponse:
+        content = [FakeBlock()]
+
+    class FakeClient:
+        class messages:
+            @staticmethod
+            async def create(**kwargs):
+                await _asyncio.sleep(0.001)
+                return FakeResponse()
+
+    caplog.set_level(_logging.INFO, logger="search.sonnet_reranker")
+    result = _asyncio.run(sr._score_one(FakeClient(), "q", "f.py", "content"))
+    assert result == 8
+
+    diag_records = [r for r in caplog.records if "[ANTHROPIC_DIAG]" in r.getMessage()]
+    assert len(diag_records) == 1
+    assert "outcome=ok" in diag_records[0].getMessage()
