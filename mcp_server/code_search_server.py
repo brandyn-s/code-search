@@ -705,6 +705,31 @@ class CodeSearchServer:
             # PR Plan-2 F2 (2026-05-05): freshness metadata. Stable string
             # vocabulary documented in CLAUDE.md.
             response_metadata["freshness"] = freshness
+
+            # PR Plan-2 E2-6 (2026-05-06): manifest-freshness metadata.
+            # Orthogonal to `freshness` (which reports index-vs-source
+            # state). `manifest.status` reports committed-epoch state via
+            # the same read_with_fallback reader verify_index_integrity
+            # uses, so a search response and an integrity scan agree on
+            # the manifest verdict. Adds zero structural risk: the probe
+            # is read-only and falls back to {status: "missing"} when no
+            # manifest exists (legacy index pre-PR #119).
+            try:
+                from search.epoch_manifest import read_with_fallback
+                idx_dir = searcher.index_manager.storage_dir
+                manifest_result = read_with_fallback(idx_dir)
+                manifest_meta: Dict[str, Any] = {
+                    "status": manifest_result.freshness,
+                }
+                if manifest_result.manifest is not None:
+                    manifest_meta["epoch_id"] = manifest_result.manifest.get(
+                        "epoch_id"
+                    )
+                response_metadata["manifest"] = manifest_meta
+            except Exception as e:
+                # Manifest probe failures must never break a search.
+                logger.debug(f"manifest metadata propagation failed: {e}")
+
             response["_metadata"] = response_metadata
 
             # Staleness warning

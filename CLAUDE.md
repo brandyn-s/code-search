@@ -55,8 +55,8 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 ## Search Response Metadata
 
 Every `search_code` response includes a `_metadata` envelope with structured
-observability fields. Currently surfaces reranker outcome; future PRs will
-add freshness (Phase F2) and provenance (Plan 1).
+observability fields covering reranker outcome, index freshness (Phase F2),
+and committed-epoch manifest state (Phase E2-6).
 
 ```json
 {
@@ -67,10 +67,31 @@ add freshness (Phase F2) and provenance (Plan 1).
       "applied": true,
       "reason": "ok",
       "latency_ms": 1842
+    },
+    "freshness": "fresh",
+    "manifest": {
+      "status": "fresh",
+      "epoch_id": "2026-05-06T13-42-09-a1b2c3d4"
     }
   }
 }
 ```
+
+**`_metadata.manifest.status`** vocabulary (Plan-2 E2-6, PR #122) — same
+strings `verify_index_integrity` reports, sourced from
+`search.epoch_manifest.ReadResult.freshness`:
+
+| Status | Meaning |
+|--------|---------|
+| `fresh` | `manifest/current.json` exists; recorded artifact SHAs match disk |
+| `stale_using_prior_epoch` | current.json corrupt; fell back to verified prior.json |
+| `missing` | No manifest exists yet (legacy index pre-PR #119) |
+| `corrupt` | Both current and prior failed verification (or current missing + prior corrupt) |
+
+`epoch_id` is present when a manifest was successfully read (status `fresh` or
+`stale_using_prior_epoch`). The `manifest` field is absent entirely if the
+manifest probe itself raised — search responses must never break on
+observability path failures.
 
 **Reasons** (stable string vocabulary):
 

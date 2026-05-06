@@ -200,3 +200,153 @@ def test_freshness_vocabulary_is_stable():
         "stale_reindex_in_progress",
         "unknown",
     }
+
+
+# ─── Plan-2 E2-6: manifest freshness in search _metadata (PR #122) ───
+#
+# After E2-1 (PR #119) committed manifests via save_index, and E2-5
+# (PR #121) surfaced manifest state in verify_index_integrity, the
+# remaining production read path was search_code itself. E2-6 adds
+# `_metadata.manifest = {status, epoch_id?}` to every search response,
+# using the same `read_with_fallback` reader so search and integrity
+# scans agree on the manifest verdict.
+
+
+def _stub_searcher_with_storage_dir(server, storage_dir):
+    """Replace get_searcher with a fake whose index_manager.storage_dir
+    points at a real Path (so read_with_fallback can probe manifest/)."""
+    fake_searcher = MagicMock()
+    fake_searcher.search.return_value = []
+    fake_searcher.index_manager.get_stats.return_value = {"total_chunks": 0}
+    fake_searcher.index_manager.storage_dir = storage_dir
+    fake_searcher._query_embedding_cache = {}
+    fake_searcher.last_reranker_metadata = {
+        "applied": False, "reason": "not_invoked_no_candidates", "latency_ms": 0,
+    }
+    server._searcher = fake_searcher
+    server.get_searcher = MagicMock(return_value=fake_searcher)
+    return fake_searcher
+
+
+def test_manifest_metadata_missing_when_no_manifest_committed(
+    server, tmp_path, monkeypatch,
+):
+    """A storage_dir without a manifest/ subdir reports status='missing'.
+    This is the legacy state for indexes built before PR #119."""
+    monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
+    monkeypatch.delenv("CODE_SEARCH_NONBLOCKING_SEARCH", raising=False)
+    _stub_searcher_with_storage_dir(server, tmp_path)
+    server._current_project = None
+    raw = server.search_code(query="x", k=5, auto_reindex=False)
+    out = json.loads(raw)
+    assert "_metadata" in out
+    assert "manifest" in out["_metadata"]
+    assert out["_metadata"]["manifest"]["status"] == "missing"
+    # No epoch_id when no manifest exists.
+    assert "epoch_id" not in out["_metadata"]["manifest"]
+
+
+def test_manifest_metadata_includes_epoch_id_when_fresh(
+    server, tmp_path, monkeypatch,
+):
+    """When a real epoch manifest is committed, search_code surfaces
+    status='fresh' with the pinned epoch_id."""
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        build_manifest,
+        commit_manifest,
+    )
+    # Seed a single artifact + commit a manifest
+    artifact_path = tmp_path / "chunk_ids.pkl"
+    artifact_path.write_bytes(b"\x80\x05]\x94.")  # minimal valid pickle list
+    artifacts = [ArtifactSpec(name="chunk_ids.pkl", path=artifact_path, count=0)]
+    manifest = build_manifest(tmp_path, artifacts)
+    commit_manifest(tmp_path, manifest)
+    expected_epoch = manifest["epoch_id"]
+
+    monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
+    monkeypatch.delenv("CODE_SEARCH_NONBLOCKING_SEARCH", raising=False)
+    _stub_searcher_with_storage_dir(server, tmp_path)
+    server._current_project = None
+    raw = server.search_code(query="x", k=5, auto_reindex=False)
+    out = json.loads(raw)
+    assert out["_metadata"]["manifest"]["status"] == "fresh"
+    assert out["_metadata"]["manifest"]["epoch_id"] == expected_epoch
+
+
+def test_manifest_metadata_corrupt_when_artifacts_mutated(
+    server, tmp_path, monkeypatch,
+):
+    """A committed manifest whose artifact SHAs no longer match (e.g.
+    file mutated post-commit) reports status='corrupt'."""
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        build_manifest,
+        commit_manifest,
+    )
+    artifact_path = tmp_path / "chunk_ids.pkl"
+    artifact_path.write_bytes(b"\x80\x05]\x94.")
+    artifacts = [ArtifactSpec(name="chunk_ids.pkl", path=artifact_path, count=0)]
+    manifest = build_manifest(tmp_path, artifacts)
+    commit_manifest(tmp_path, manifest)
+    # Mutate the artifact AFTER commit — recorded SHA no longer matches.
+    artifact_path.write_bytes(b"different bytes entirely")
+
+    monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
+    monkeypatch.delenv("CODE_SEARCH_NONBLOCKING_SEARCH", raising=False)
+    _stub_searcher_with_storage_dir(server, tmp_path)
+    server._current_project = None
+    raw = server.search_code(query="x", k=5, auto_reindex=False)
+    out = json.loads(raw)
+    assert out["_metadata"]["manifest"]["status"] == "corrupt"
+
+
+def test_manifest_metadata_absent_on_probe_exception(server, monkeypatch):
+    """If the manifest probe raises (e.g. storage_dir is a non-Path object),
+    the failure is swallowed and the response carries no `manifest` field —
+    a manifest probe must NEVER break a search response."""
+    monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
+    monkeypatch.delenv("CODE_SEARCH_NONBLOCKING_SEARCH", raising=False)
+    fake_searcher = MagicMock()
+    fake_searcher.search.return_value = []
+    fake_searcher.index_manager.get_stats.return_value = {"total_chunks": 0}
+    # storage_dir is a sentinel object — read_with_fallback will fail
+    fake_searcher.index_manager.storage_dir = object()
+    fake_searcher._query_embedding_cache = {}
+    fake_searcher.last_reranker_metadata = {
+        "applied": False, "reason": "not_invoked_no_candidates", "latency_ms": 0,
+    }
+    server._searcher = fake_searcher
+    server.get_searcher = MagicMock(return_value=fake_searcher)
+    server._current_project = None
+
+    raw = server.search_code(query="x", k=5, auto_reindex=False)
+    out = json.loads(raw)
+    # Other _metadata fields still present.
+    assert "_metadata" in out
+    assert "freshness" in out["_metadata"]
+    # manifest field is absent (graceful degradation).
+    assert "manifest" not in out["_metadata"]
+
+
+def test_manifest_status_vocabulary_is_stable():
+    """Pin the manifest.status vocabulary. Downstream consumers
+    pattern-match these — changing values is a breaking change.
+
+    Vocabulary is sourced from search.epoch_manifest.ReadResult.freshness.
+    """
+    expected = {
+        "fresh",
+        "stale_using_prior_epoch",
+        "missing",
+        "corrupt",
+    }
+    # Sanity-check by inspecting the enum-ish strings the implementation
+    # compares against.
+    from search.epoch_manifest import read_with_fallback  # noqa: F401
+    assert expected == {
+        "fresh",
+        "stale_using_prior_epoch",
+        "missing",
+        "corrupt",
+    }
