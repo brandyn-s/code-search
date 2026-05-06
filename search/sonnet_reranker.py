@@ -51,6 +51,22 @@ MAX_CONTENT_CHARS = 4000
 DEFAULT_TIMEOUT = 8.0
 DEFAULT_RERANK_K = 15  # rerank top-15, return top-k of those (D4b validated)
 FAILURE_TOLERANCE = 0.3  # if >30% of calls fail, abort and use input order
+
+# ─── Phase B.1 SDK retry/timeout knobs (Plan D1-Pass-2, 2026-05-06) ───
+# Default SDK max_retries=2 means 3 total attempts per call. When the API
+# returns 429/5xx, the SDK retries with backoff before raising; on retry
+# exhaustion we observe ~7.5s of wall time per failure (3 attempts × ~2.5s)
+# even though the cohort already has its own FAILURE_TOLERANCE=0.3 fallback.
+# Lowering to max_retries=1 cuts retry overhead in half without disabling
+# transient-error recovery.
+DEFAULT_SDK_MAX_RETRIES = 1
+# Default per-call SDK timeout=NOT_GIVEN (no per-call cap). Phase A.2
+# diagnostic showed p95 successful=5.9s, p99 successful=8.6s; setting a
+# per-call cap above p99 successful (12s here) catches genuinely-stuck calls
+# without truncating healthy slow ones. The cohort-level
+# SONNET_RERANKER_TIMEOUT (default 8s) is the OUTER bound on the entire
+# `asyncio.gather` — it serves as a backstop, not a per-call control.
+DEFAULT_SDK_PER_CALL_TIMEOUT_S = 12.0
 # If max Sonnet score across the candidate pool is below this threshold,
 # Sonnet has not identified anything confidently relevant. When the judge
 # is uncertain, Sonnet's score-tie-breaking pushes canonical files down
@@ -103,13 +119,36 @@ Respond with ONLY valid JSON:
 
 
 def _classify_call_error(exc: BaseException) -> str:
-    """Classify a per-call exception into one of the _ERR_* tags."""
-    cls_name = type(exc).__name__
-    msg = str(exc).lower()
-    if "ratelimit" in cls_name.lower() or ("rate" in msg and "limit" in msg) or "429" in msg:
-        return _ERR_RATE_LIMIT
-    if "timeout" in cls_name.lower() or "timeout" in msg:
-        return _ERR_TIMEOUT
+    """Classify a per-call exception into one of the _ERR_* tags.
+
+    Walks the exception's `__cause__` chain so retry-exhausted errors that
+    arrive as wrappers still surface their underlying cause. Phase B.1 fix:
+    before this change, the SDK's retry-exhaustion produced a wrapper whose
+    name/message didn't contain "rate"/"limit"/"429", causing genuine rate
+    limits to be misclassified as generic _ERR_HTTP and losing diagnostic
+    signal in `_metadata.reranker.reason`.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        cls_name = type(cur).__name__
+        msg = str(cur).lower()
+        # Anthropic SDK exception class names (RateLimitError, APITimeoutError,
+        # etc.) checked alongside string-based detection so we catch both
+        # explicitly-typed exceptions and stringified wrappers.
+        if (
+            "ratelimit" in cls_name.lower()
+            or "rate_limit" in cls_name.lower()
+            or ("rate" in msg and "limit" in msg)
+            or "429" in msg
+        ):
+            return _ERR_RATE_LIMIT
+        if "timeout" in cls_name.lower() or "timeout" in msg:
+            return _ERR_TIMEOUT
+        # Walk the cause chain (one common SDK pattern: APIConnectionError
+        # wraps an httpx ReadTimeout)
+        cur = cur.__cause__ or cur.__context__
     return _ERR_HTTP
 
 
@@ -127,6 +166,36 @@ def _get_in_flight_lock() -> asyncio.Lock:
     if _IN_FLIGHT_LOCK is None:
         _IN_FLIGHT_LOCK = asyncio.Lock()
     return _IN_FLIGHT_LOCK
+
+
+def _resolve_per_call_timeout() -> float:
+    """Resolve per-call SDK timeout from env, falling back to the default.
+
+    `messages.create(timeout=...)` accepts a float seconds value; we read the
+    env var here so tests can override per-test without touching defaults.
+    """
+    raw = os.environ.get("ANTHROPIC_PER_CALL_TIMEOUT_S")
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return DEFAULT_SDK_PER_CALL_TIMEOUT_S
+
+
+def _resolve_sdk_max_retries() -> int:
+    """Resolve SDK max_retries from env, falling back to the default."""
+    raw = os.environ.get("ANTHROPIC_MAX_RETRIES")
+    if raw:
+        try:
+            v = int(raw)
+            if v >= 0:
+                return v
+        except ValueError:
+            pass
+    return DEFAULT_SDK_MAX_RETRIES
 
 
 async def _score_one(client: Any, query: str, file_path: str, content: str):
@@ -162,12 +231,14 @@ async def _score_one(client: Any, query: str, file_path: str, content: str):
     outcome = "ok"
     resp = None
     exc: BaseException | None = None
+    per_call_timeout = _resolve_per_call_timeout()
     try:
         try:
             resp = await client.messages.create(
                 model=MODEL,
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],
+                timeout=per_call_timeout,
             )
         except Exception as e:
             exc = e
@@ -290,7 +361,8 @@ async def _rerank_async(
     except ValueError:
         sem = None
 
-    async with anthropic.AsyncAnthropic() as client:
+    sdk_max_retries = _resolve_sdk_max_retries()
+    async with anthropic.AsyncAnthropic(max_retries=sdk_max_retries) as client:
         tasks = []
         for c in candidates:
             full = c.get("full_content") or c.get("content") or c.get("content_preview") or ""

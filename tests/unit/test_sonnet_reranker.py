@@ -595,3 +595,164 @@ def test_diag_log_records_outcome_ok_on_success(monkeypatch, caplog):
     diag_records = [r for r in caplog.records if "[ANTHROPIC_DIAG]" in r.getMessage()]
     assert len(diag_records) == 1
     assert "outcome=ok" in diag_records[0].getMessage()
+
+
+# ─── Plan D1-Pass-2 B.1 (PR ?): SDK retry/timeout + classification ───
+# Phase B.1 mitigations diagnosed in PR #133:
+#   - Lower SDK max_retries from default 2 → 1 to cut retry-exhaustion wall
+#     time without disabling transient-error recovery.
+#   - Add per-call SDK timeout=12.0 to bound individual call wall.
+#   - Walk the exception cause chain in _classify_call_error so wrapped
+#     rate-limit errors surface as REASON_RATE_LIMIT instead of generic _ERR_HTTP.
+
+
+def test_classify_walks_cause_chain_for_rate_limit(monkeypatch):
+    """A wrapper exception whose __cause__ is a RateLimitError-like classifies
+    as _ERR_RATE_LIMIT (not _ERR_HTTP), even when the wrapper's own name and
+    message don't mention 'rate' or 'limit'.
+    """
+    from search.sonnet_reranker import _classify_call_error, _ERR_RATE_LIMIT
+
+    class FakeRateLimitError(Exception):
+        pass
+    FakeRateLimitError.__name__ = "RateLimitError"
+
+    class GenericWrapper(Exception):
+        pass
+
+    inner = FakeRateLimitError("429 Too Many Requests")
+    outer = GenericWrapper("retry exhausted")
+    outer.__cause__ = inner
+
+    assert _classify_call_error(outer) == _ERR_RATE_LIMIT
+
+
+def test_classify_walks_cause_chain_for_timeout():
+    """A wrapper exception whose __cause__ is a timeout classifies as _ERR_TIMEOUT."""
+    from search.sonnet_reranker import _classify_call_error, _ERR_TIMEOUT
+
+    class FakeTimeout(Exception):
+        pass
+    FakeTimeout.__name__ = "APITimeoutError"
+
+    class FakeAPIConnectionError(Exception):
+        pass
+
+    inner = FakeTimeout("read timeout")
+    outer = FakeAPIConnectionError("connection failed")
+    outer.__cause__ = inner
+
+    assert _classify_call_error(outer) == _ERR_TIMEOUT
+
+
+def test_classify_falls_back_to_http_when_no_signal():
+    """A pure HTTP error (no rate-limit/timeout signal in the chain) classifies as _ERR_HTTP."""
+    from search.sonnet_reranker import _classify_call_error, _ERR_HTTP
+
+    class FakeHTTPError(Exception):
+        pass
+
+    e = FakeHTTPError("500 Internal Server Error")
+    assert _classify_call_error(e) == _ERR_HTTP
+
+
+def test_classify_avoids_infinite_loop_on_circular_cause():
+    """A circular __cause__ chain doesn't hang; falls through to _ERR_HTTP."""
+    from search.sonnet_reranker import _classify_call_error, _ERR_HTTP
+
+    a = Exception("a")
+    b = Exception("b")
+    a.__cause__ = b
+    b.__cause__ = a  # circular!
+
+    assert _classify_call_error(a) == _ERR_HTTP
+
+
+def test_resolve_per_call_timeout_default(monkeypatch):
+    """Default per-call timeout is the documented constant."""
+    from search.sonnet_reranker import (
+        _resolve_per_call_timeout, DEFAULT_SDK_PER_CALL_TIMEOUT_S,
+    )
+
+    monkeypatch.delenv("ANTHROPIC_PER_CALL_TIMEOUT_S", raising=False)
+    assert _resolve_per_call_timeout() == DEFAULT_SDK_PER_CALL_TIMEOUT_S
+
+
+def test_resolve_per_call_timeout_env_override(monkeypatch):
+    """Env var ANTHROPIC_PER_CALL_TIMEOUT_S overrides the default."""
+    from search.sonnet_reranker import _resolve_per_call_timeout
+
+    monkeypatch.setenv("ANTHROPIC_PER_CALL_TIMEOUT_S", "5.5")
+    assert _resolve_per_call_timeout() == 5.5
+
+
+def test_resolve_per_call_timeout_invalid_falls_back(monkeypatch):
+    """Bad env values fall back to the default (no crash)."""
+    from search.sonnet_reranker import (
+        _resolve_per_call_timeout, DEFAULT_SDK_PER_CALL_TIMEOUT_S,
+    )
+
+    monkeypatch.setenv("ANTHROPIC_PER_CALL_TIMEOUT_S", "not-a-number")
+    assert _resolve_per_call_timeout() == DEFAULT_SDK_PER_CALL_TIMEOUT_S
+    monkeypatch.setenv("ANTHROPIC_PER_CALL_TIMEOUT_S", "-1")
+    assert _resolve_per_call_timeout() == DEFAULT_SDK_PER_CALL_TIMEOUT_S
+
+
+def test_resolve_sdk_max_retries_default(monkeypatch):
+    """Default SDK max_retries is the documented constant."""
+    from search.sonnet_reranker import _resolve_sdk_max_retries, DEFAULT_SDK_MAX_RETRIES
+
+    monkeypatch.delenv("ANTHROPIC_MAX_RETRIES", raising=False)
+    assert _resolve_sdk_max_retries() == DEFAULT_SDK_MAX_RETRIES
+
+
+def test_resolve_sdk_max_retries_env_override(monkeypatch):
+    """Env var ANTHROPIC_MAX_RETRIES overrides the default."""
+    from search.sonnet_reranker import _resolve_sdk_max_retries
+
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "0")
+    assert _resolve_sdk_max_retries() == 0
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "3")
+    assert _resolve_sdk_max_retries() == 3
+
+
+def test_resolve_sdk_max_retries_invalid_falls_back(monkeypatch):
+    """Bad env values fall back to the default."""
+    from search.sonnet_reranker import _resolve_sdk_max_retries, DEFAULT_SDK_MAX_RETRIES
+
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "not-a-number")
+    assert _resolve_sdk_max_retries() == DEFAULT_SDK_MAX_RETRIES
+    monkeypatch.setenv("ANTHROPIC_MAX_RETRIES", "-1")
+    assert _resolve_sdk_max_retries() == DEFAULT_SDK_MAX_RETRIES
+
+
+def test_score_one_passes_per_call_timeout_to_sdk(monkeypatch):
+    """_score_one must pass the resolved timeout into messages.create.
+
+    Verifies the SDK gets a per-call cap; without this, the SDK falls back
+    to its default (no per-call timeout, just the global client timeout).
+    """
+    import asyncio as _asyncio
+
+    from search import sonnet_reranker as sr
+
+    captured: dict = {}
+
+    class FakeBlock:
+        type = "text"
+        text = '{"score": 5}'
+
+    class FakeResponse:
+        content = [FakeBlock()]
+
+    class FakeClient:
+        class messages:
+            @staticmethod
+            async def create(**kwargs):
+                captured.update(kwargs)
+                return FakeResponse()
+
+    monkeypatch.setenv("ANTHROPIC_PER_CALL_TIMEOUT_S", "7.5")
+    result = _asyncio.run(sr._score_one(FakeClient(), "q", "f.py", "c"))
+    assert result == 5
+    assert captured.get("timeout") == 7.5
