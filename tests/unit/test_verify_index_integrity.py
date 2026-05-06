@@ -274,3 +274,194 @@ def test_response_is_valid_json(storage_root):
     assert isinstance(out, dict)
     # Must serialize back without circular refs / weird types
     json.dumps(out)
+
+
+# ─── Plan-2 E2-5: manifest-aware integrity tests (PR #121) ───
+#
+# After E2-1 (PR #119), save_index commits an epoch manifest. E2-5
+# extends verify_index_integrity to surface that state. Each per-project
+# entry now carries:
+#   - manifest_status: fresh | stale_using_prior_epoch | missing | corrupt | skipped
+#   - manifest_epoch_id: str or None
+#   - manifest_stale_candidate: bool
+# And the summary aggregates manifest_fresh / _stale_prior / _missing /
+# _corrupt / total_stale_candidates.
+
+
+def _commit_manifest_for_seeded_project(idx: Path, chunk_count: int) -> str:
+    """Commit a real epoch manifest for the artifacts already in idx.
+
+    Builds an ArtifactSpec list that matches what _seed_clean_project
+    wrote, then calls build_manifest + commit_manifest. Returns the
+    epoch_id so tests can pin it.
+
+    We don't go through CodeIndexManager.save_index because (a) save_index
+    expects an in-memory FAISS state and (b) the fake artifacts the test
+    fixture writes don't include code.index. The manifest just covers
+    the artifacts that DO exist (chunk_ids.pkl, metadata.db, fts5.db,
+    stats.json). build_manifest's consistency check holds since
+    _seed_clean_project guarantees count alignment.
+    """
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        build_manifest,
+        commit_manifest,
+        count_fts5_db,
+        count_metadata_db,
+    )
+
+    artifacts = [
+        ArtifactSpec(
+            name="chunk_ids.pkl",
+            path=idx / "chunk_ids.pkl",
+            count=chunk_count,
+        ),
+        ArtifactSpec(
+            name="metadata.db",
+            path=idx / "metadata.db",
+            count=count_metadata_db(idx / "metadata.db"),
+        ),
+        ArtifactSpec(
+            name="fts5.db",
+            path=idx / "fts5.db",
+            count=count_fts5_db(idx / "fts5.db"),
+        ),
+        ArtifactSpec(
+            name="stats.json",
+            path=idx / "stats.json",
+            count=None,
+        ),
+    ]
+    manifest = build_manifest(idx, artifacts)
+    commit_manifest(idx, manifest)
+    return manifest["epoch_id"]
+
+
+def test_legacy_project_without_manifest_reports_missing(storage_root):
+    """A clean project that pre-dates PR #119's manifest commit shows
+    `manifest_status: missing` while still being chunk-level clean."""
+    _seed_clean_project(storage_root, "legacy", chunk_count=3)
+    server = CodeSearchServer()
+    raw = server.verify_index_integrity()
+    out = json.loads(raw)
+    p = out["projects"][0]
+    # Chunk-level state is fine.
+    assert p["status"] == "clean"
+    # Manifest state surfaces as missing (no current.json yet).
+    assert p["manifest_status"] == "missing"
+    assert p["manifest_epoch_id"] is None
+    assert p["manifest_stale_candidate"] is False
+    # Detail message is propagated from read_with_fallback.
+    assert "manifest_detail" in p
+    # Summary reflects the legacy state.
+    assert out["summary"]["manifest_missing"] == 1
+    assert out["summary"]["manifest_fresh"] == 0
+
+
+def test_freshly_committed_manifest_reports_fresh(storage_root):
+    """After a real commit_manifest, status=clean AND manifest_status=fresh
+    with the pinned epoch_id."""
+    idx = _seed_clean_project(storage_root, "fresh_proj", chunk_count=5)
+    epoch_id = _commit_manifest_for_seeded_project(idx, chunk_count=5)
+
+    server = CodeSearchServer()
+    raw = server.verify_index_integrity()
+    out = json.loads(raw)
+    p = out["projects"][0]
+    assert p["status"] == "clean"
+    assert p["manifest_status"] == "fresh"
+    assert p["manifest_epoch_id"] == epoch_id
+    assert p["manifest_stale_candidate"] is False
+    # No detail when fresh.
+    assert "manifest_detail" not in p
+    assert out["summary"]["manifest_fresh"] == 1
+
+
+def test_corrupt_manifest_reports_corrupt(storage_root):
+    """A current.json whose recorded SHAs don't match actual artifacts is
+    detected and reported (no prior to fall back to)."""
+    idx = _seed_clean_project(storage_root, "corrupt_proj", chunk_count=2)
+    _commit_manifest_for_seeded_project(idx, chunk_count=2)
+
+    # Mutate chunk_ids.pkl AFTER manifest commit. The recorded SHA in
+    # current.json no longer matches; verify_manifest fails; no prior
+    # exists; read_with_fallback returns "corrupt".
+    extra_chunks = ["chunk_0", "chunk_1", "extra_chunk"]
+    with open(idx / "chunk_ids.pkl", "wb") as f:
+        pickle.dump(extra_chunks, f)
+
+    server = CodeSearchServer()
+    raw = server.verify_index_integrity()
+    out = json.loads(raw)
+    p = out["projects"][0]
+    assert p["manifest_status"] == "corrupt"
+    assert "manifest_detail" in p
+    assert out["summary"]["manifest_corrupt"] == 1
+    # Remediation surfaces the corrupt-manifest pointer.
+    assert "Manifest corruption" in (out["remediation"] or "")
+
+
+def test_stale_candidate_surfaces(storage_root):
+    """A leftover manifest/candidate.json (crashed-write residue) is
+    flagged on the per-project entry and counted in summary."""
+    idx = _seed_clean_project(storage_root, "stale_cand_proj", chunk_count=2)
+    _commit_manifest_for_seeded_project(idx, chunk_count=2)
+    # Simulate a prior crashed write that left candidate.json behind.
+    candidate = idx / "manifest" / "candidate.json"
+    candidate.write_text(
+        json.dumps({"epoch_id": "stale-crash-residue", "artifacts": {}}),
+        encoding="utf-8",
+    )
+
+    server = CodeSearchServer()
+    raw = server.verify_index_integrity()
+    out = json.loads(raw)
+    p = out["projects"][0]
+    assert p["manifest_status"] == "fresh"  # current.json still good
+    assert p["manifest_stale_candidate"] is True
+    assert out["summary"]["total_stale_candidates"] == 1
+    assert "candidate.json" in (out["remediation"] or "")
+
+
+def test_unscannable_project_marks_manifest_skipped(storage_root):
+    """A project without index/ subdir (or with unreadable pkl) gets
+    manifest_status='skipped' rather than crashing the manifest probe."""
+    (storage_root / "no_index").mkdir()
+    server = CodeSearchServer()
+    raw = server.verify_index_integrity()
+    out = json.loads(raw)
+    p = out["projects"][0]
+    assert p["status"] == "unscannable"
+    assert p["manifest_status"] == "skipped"
+    assert p["manifest_epoch_id"] is None
+    assert p["manifest_stale_candidate"] is False
+    # Skipped projects don't pollute the manifest totals.
+    assert out["summary"]["manifest_fresh"] == 0
+    assert out["summary"]["manifest_missing"] == 0
+    assert out["summary"]["manifest_corrupt"] == 0
+
+
+def test_summary_aggregates_mixed_manifest_states(storage_root):
+    """A mix of fresh + missing + corrupt projects produces correct totals."""
+    # Project A: manifest committed, fresh.
+    idx_a = _seed_clean_project(storage_root, "a_fresh", chunk_count=2)
+    _commit_manifest_for_seeded_project(idx_a, chunk_count=2)
+
+    # Project B: legacy (no manifest).
+    _seed_clean_project(storage_root, "b_missing", chunk_count=3)
+
+    # Project C: manifest committed then mutated (corrupt).
+    idx_c = _seed_clean_project(storage_root, "c_corrupt", chunk_count=4)
+    _commit_manifest_for_seeded_project(idx_c, chunk_count=4)
+    with open(idx_c / "chunk_ids.pkl", "wb") as f:
+        pickle.dump(["only_one_now"], f)
+
+    server = CodeSearchServer()
+    raw = server.verify_index_integrity()
+    out = json.loads(raw)
+    summary = out["summary"]
+    assert summary["total_projects"] == 3
+    assert summary["manifest_fresh"] == 1
+    assert summary["manifest_missing"] == 1
+    assert summary["manifest_corrupt"] == 1
+    assert summary["manifest_stale_prior"] == 0

@@ -1169,6 +1169,15 @@ class CodeSearchServer:
         scan as `scripts/cleanup_index_orphans.py --dry-run`, exposed as a
         structured JSON tool an LLM agent can call.
 
+        Plan-2 E2-5 (PR #121): also surfaces the epoch-manifest state
+        committed by save_index (E2-1, PR #119). Manifest fields are
+        orthogonal to chunk-level orphan/drift detection — a project can
+        be `status: clean` (artifacts internally consistent) AND
+        `manifest_status: missing` (legacy index pre-PR #119, no manifest
+        committed yet). Both signals together let an operator distinguish
+        "clean but unverified epoch" (manifest missing) from "fresh epoch
+        with verified SHAs" (manifest fresh).
+
         Args:
             project: Optional directory name PREFIX to limit the scan to one
                 project. Empty/None scans every indexed project.
@@ -1178,7 +1187,12 @@ class CodeSearchServer:
             name (str), valid_chunks (int), fts5_orphans (int),
             metadata_orphans (int), stats_drift (int — signed; positive
             means stats.json claims more chunks than the pkl), status
-            (one of "clean", "inconsistent", "unscannable").
+            (one of "clean", "inconsistent", "unscannable"),
+            manifest_status (one of "fresh", "stale_using_prior_epoch",
+            "missing", "corrupt"; "skipped" when status=unscannable),
+            manifest_epoch_id (str or None),
+            manifest_stale_candidate (bool — True if candidate.json
+            exists from a crashed prior write).
         """
         try:
             # Lazy import: scripts.cleanup_index_orphans is the single source
@@ -1190,6 +1204,14 @@ class CodeSearchServer:
                 load_chunk_ids,
                 project_index_dir,
                 stats_drift,
+            )
+            # E2-5: read_with_fallback gives us the same downgrade-tolerant
+            # verdict that production read paths will consume. CANDIDATE_FILE
+            # constant lets us probe for a stale crash residue without
+            # touching the file (cleanup is operator-driven, not tool-driven).
+            from search.epoch_manifest import (
+                CANDIDATE_FILE,
+                read_with_fallback,
             )
 
             base_dir = get_storage_dir()
@@ -1203,6 +1225,11 @@ class CodeSearchServer:
                         "total_fts5_orphans": 0,
                         "total_metadata_orphans": 0,
                         "total_stats_drift": 0,
+                        "manifest_fresh": 0,
+                        "manifest_stale_prior": 0,
+                        "manifest_missing": 0,
+                        "manifest_corrupt": 0,
+                        "total_stale_candidates": 0,
                     },
                     "message": "No indexed projects found.",
                 })
@@ -1222,6 +1249,11 @@ class CodeSearchServer:
                 "total_fts5_orphans": 0,
                 "total_metadata_orphans": 0,
                 "total_stats_drift": 0,
+                "manifest_fresh": 0,
+                "manifest_stale_prior": 0,
+                "manifest_missing": 0,
+                "manifest_corrupt": 0,
+                "total_stale_candidates": 0,
             }
 
             for proj in project_dirs:
@@ -1231,6 +1263,9 @@ class CodeSearchServer:
                         "name": proj.name,
                         "status": "unscannable",
                         "reason": "no index/ subdir",
+                        "manifest_status": "skipped",
+                        "manifest_epoch_id": None,
+                        "manifest_stale_candidate": False,
                     })
                     totals["unscannable"] += 1
                     continue
@@ -1241,6 +1276,9 @@ class CodeSearchServer:
                         "name": proj.name,
                         "status": "unscannable",
                         "reason": "no chunk_ids.pkl or unreadable",
+                        "manifest_status": "skipped",
+                        "manifest_epoch_id": None,
+                        "manifest_stale_candidate": False,
                     })
                     totals["unscannable"] += 1
                     continue
@@ -1253,6 +1291,16 @@ class CodeSearchServer:
                 )
                 drift = stats_drift(idx_dir / "stats.json", valid_count)
 
+                # Manifest probe. read_with_fallback handles all the corner
+                # cases (missing current, current corrupt+prior fallback,
+                # both corrupt) and returns a stable freshness vocabulary.
+                manifest_result = read_with_fallback(idx_dir)
+                manifest_status = manifest_result.freshness
+                manifest_epoch_id: Optional[str] = None
+                if manifest_result.manifest is not None:
+                    manifest_epoch_id = manifest_result.manifest.get("epoch_id")
+                stale_candidate = (idx_dir / "manifest" / CANDIDATE_FILE).exists()
+
                 anything_off = bool(fts_count or meta_count or drift)
                 entry: Dict[str, Any] = {
                     "name": proj.name,
@@ -1261,6 +1309,9 @@ class CodeSearchServer:
                     "metadata_orphans": meta_count,
                     "stats_drift": drift,
                     "status": "inconsistent" if anything_off else "clean",
+                    "manifest_status": manifest_status,
+                    "manifest_epoch_id": manifest_epoch_id,
+                    "manifest_stale_candidate": stale_candidate,
                 }
                 # Surface samples only when inconsistent — gives the operator
                 # something concrete to grep without bloating the output.
@@ -1276,7 +1327,45 @@ class CodeSearchServer:
                 else:
                     totals["clean"] += 1
 
+                # Surface manifest detail when not fresh, mirroring how
+                # samples are surfaced when chunks are inconsistent.
+                if manifest_status != "fresh" and manifest_result.detail:
+                    entry["manifest_detail"] = manifest_result.detail
+
+                if manifest_status == "fresh":
+                    totals["manifest_fresh"] += 1
+                elif manifest_status == "stale_using_prior_epoch":
+                    totals["manifest_stale_prior"] += 1
+                elif manifest_status == "missing":
+                    totals["manifest_missing"] += 1
+                elif manifest_status == "corrupt":
+                    totals["manifest_corrupt"] += 1
+                if stale_candidate:
+                    totals["total_stale_candidates"] += 1
+
                 results.append(entry)
+
+            # Remediation pointer — chunk-level inconsistency is fixed by
+            # cleanup_index_orphans; manifest issues are usually resolved
+            # by a clean reindex (or cleanup_stale_candidate for the
+            # candidate-only case). Surface BOTH when both are present.
+            remediation_lines = []
+            if totals["inconsistent"]:
+                remediation_lines.append(
+                    "Run `python scripts/cleanup_index_orphans.py --apply-all` "
+                    "(quiesce the MCP server first) to fix chunk-level inconsistencies."
+                )
+            if totals["manifest_corrupt"]:
+                remediation_lines.append(
+                    "Manifest corruption detected: reindex affected projects "
+                    "via `index_directory(incremental=false)` to commit a fresh manifest."
+                )
+            if totals["total_stale_candidates"]:
+                remediation_lines.append(
+                    "Stale `manifest/candidate.json` files present from a crashed "
+                    "prior write; safe to remove via "
+                    "`search.epoch_manifest.cleanup_stale_candidate(idx_dir)`."
+                )
 
             return json.dumps({
                 "projects": results,
@@ -1284,10 +1373,7 @@ class CodeSearchServer:
                     "total_projects": len(results),
                     **totals,
                 },
-                "remediation": (
-                    "Run `python scripts/cleanup_index_orphans.py --apply-all` "
-                    "(quiesce the MCP server first) to fix inconsistencies."
-                ) if totals["inconsistent"] else None,
+                "remediation": " ".join(remediation_lines) if remediation_lines else None,
             })
         except Exception as e:
             logger.error(f"verify_index_integrity failed: {e}", exc_info=True)
