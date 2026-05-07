@@ -514,8 +514,30 @@ class CodeSearchServer:
         include_context: bool = True,
         auto_reindex: bool = True,
         max_age_minutes: float = 5,
+        provider: str = None,
     ) -> str:
-        """Implementation of search_code tool."""
+        """Implementation of search_code tool.
+
+        CS-2 (2026-05-06): added `provider` argument. When set, this
+        single search routes through the specified embedding provider's
+        index instead of the project's currently-active provider.
+        Enables ensemble / A-B workflows over a project that has been
+        indexed with multiple providers (voyage-4-large +
+        voyage-context-3) without forcing the caller to invoke
+        `switch_project` between every query. Per the 2026-05-02
+        per-subproject baseline (`benchmarks/eval_v4/run_psm-full-consensus/REPORT.md`),
+        voyage-4-large vs voyage-context-3 split per-subproject —
+        libnet wins +0.171 MRR for voyage-context, nix wins +0.069 for
+        voyage-4-large. Per-search provider routing enables querying
+        the right provider for the right subproject.
+
+        Side effect: calling with provider != _current_provider
+        invalidates the cached searcher/index manager (they'll rebuild
+        on next access). Subsequent searches WITHOUT a provider arg
+        will use whichever provider was last passed — callers managing
+        state explicitly should pass provider on every call OR use
+        `switch_project` to set a new default.
+        """
         t_start = time.time()
         try:
             logger.info(
@@ -608,8 +630,15 @@ class CodeSearchServer:
                 # auto_reindex=False or no project — neither stale nor refreshed
                 freshness = "fresh"
 
-            searcher = self.get_searcher()
-            logger.info(f"Current project: {self._current_project}")
+            # CS-2 (2026-05-06): per-search provider routing. When the
+            # caller passes a provider, route through that provider's
+            # index for this query. Otherwise fall back to the
+            # currently-active provider (existing behavior).
+            searcher = self.get_searcher(provider=provider) if provider else self.get_searcher()
+            logger.info(
+                f"Current project: {self._current_project}"
+                + (f" (provider override: {provider})" if provider else "")
+            )
 
             index_stats = searcher.index_manager.get_stats()
             logger.info(f"Index contains {index_stats.get('total_chunks', 0)} chunks")
