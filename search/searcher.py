@@ -307,7 +307,7 @@ class IntelligentSearcher:
             self.last_reranker_metadata = {
                 "applied": False, "reason": "not_invoked_keyword_mode", "latency_ms": 0,
             }
-            return self._keyword_search(query, k)
+            return self._keyword_search(query, k, filters)
         elif mode == "semantic":
             self.last_reranker_metadata = {
                 "applied": False, "reason": "not_invoked_semantic_mode", "latency_ms": 0,
@@ -363,9 +363,14 @@ class IntelligentSearcher:
 
         return ranked_results[:k]
 
-    def _keyword_search(self, query: str, k: int = 5) -> List[SearchResult]:
+    def _keyword_search(
+        self,
+        query: str,
+        k: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[SearchResult]:
         """Pure BM25 keyword search."""
-        raw_results = self.index_manager.search_bm25(query, k=k)
+        raw_results = self.index_manager.search_bm25(query, k=k, filters=filters)
         return [
             self._create_search_result(chunk_id, abs(rank), metadata, 0)
             for chunk_id, rank, metadata in raw_results
@@ -407,7 +412,7 @@ class IntelligentSearcher:
             bm25_query = rewrite_query_for_bm25(query)
         if os.environ.get("QUERY_EXPANSION", "on") == "on":
             bm25_query = expand_code_query(bm25_query)
-        bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k)
+        bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k, filters=filters)
         bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
 
         # Weighted RRF fusion

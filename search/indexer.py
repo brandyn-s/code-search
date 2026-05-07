@@ -1,5 +1,6 @@
 """Vector index management with FAISS and metadata storage."""
 
+import fnmatch
 import os
 import json
 import pickle
@@ -162,8 +163,24 @@ class CodeIndexManager:
         # Quote each token to prevent column-name interpretation
         return " OR ".join(f'"{t}"' for t in tokens)
 
-    def search_bm25(self, query: str, k: int = 50, name_weight: float = 5.0) -> List[Tuple[str, float, Dict[str, Any]]]:
-        """Search using BM25 full-text search. Returns (chunk_id, rank, metadata)."""
+    def search_bm25(
+        self,
+        query: str,
+        k: int = 50,
+        name_weight: float = 5.0,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        """Search using BM25 full-text search. Returns (chunk_id, rank, metadata).
+
+        When `filters` is provided, applies the same `_matches_filters`
+        check used by the vector search path. Without this, the BM25 half
+        of hybrid search returned chunks the user explicitly filtered out
+        via `file_pattern` / `chunk_type` (regression fixed 2026-05-07).
+
+        Over-fetches by 3x when filters are present so a useful k is
+        retained after filter rejection. Caps at the original `k` after
+        filtering.
+        """
         if not hasattr(self, "_fts_conn") or self._fts_conn is None:
             return []
 
@@ -171,17 +188,26 @@ class CodeIndexManager:
         if not fts_query:
             return []
 
+        # Over-fetch when filters will reduce the result set
+        fetch_k = k * 3 if filters else k
+
         try:
             cursor = self._fts_conn.execute(
                 f"SELECT chunk_id, bm25(chunk_fts, 0.0, 1.0, 0.5, {float(name_weight)}) as rank "
                 "FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?",
-                (fts_query, k),
+                (fts_query, fetch_k),
             )
             results = []
             for chunk_id, rank in cursor.fetchall():
                 metadata_entry = self.metadata_db.get(chunk_id)
-                if metadata_entry:
-                    results.append((chunk_id, float(rank), metadata_entry["metadata"]))
+                if not metadata_entry:
+                    continue
+                metadata = metadata_entry["metadata"]
+                if filters and not self._matches_filters(metadata, filters):
+                    continue
+                results.append((chunk_id, float(rank), metadata))
+                if len(results) >= k:
+                    break
             return results
         except Exception as e:
             self._logger.warning(f"FTS5 search failed for '{fts_query}': {e}")
@@ -569,8 +595,23 @@ class CodeIndexManager:
         """Check if metadata matches the provided filters."""
         for key, value in filters.items():
             if key == 'file_pattern':
-                # Pattern matching for file paths
-                if not any(pattern in metadata.get('relative_path', '') for pattern in value):
+                # Glob matching for file paths. fnmatch does shell-style:
+                # `*.rs` matches `foo.rs`, `internal/x/foo.rs`, etc. (against
+                # full path segments). Previously this was substring match,
+                # which meant `*.rs` was never a substring of any real path
+                # and silently filtered out all results — except it didn't,
+                # because the BM25 path bypassed filtering entirely (see
+                # search_bm25). Both bugs fixed together in this change.
+                relative_path = metadata.get('relative_path', '') or ''
+                # Match against both full path AND basename so users can
+                # write `*.rs` (basename pattern) or `internal/**/*.rs`
+                # (path pattern) interchangeably.
+                basename = relative_path.split('/')[-1].split('\\')[-1]
+                if not any(
+                    fnmatch.fnmatch(relative_path, pattern)
+                    or fnmatch.fnmatch(basename, pattern)
+                    for pattern in value
+                ):
                     return False
             elif key == 'chunk_type':
                 # Exact match for chunk type
