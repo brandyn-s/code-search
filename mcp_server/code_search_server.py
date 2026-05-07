@@ -1520,56 +1520,116 @@ class CodeSearchServer:
                     {"error": f"Project path does not exist: {project_path}"}
                 )
 
-            # Auto-resolve provider from the legacy-hash project_info.json when
-            # the caller didn't specify one. This prevents the failure mode
-            # where switch_project routes to a corrupted / stub legacy dir
-            # while the real index lives under the provider-aware hash. Affects
-            # any project indexed with a non-None provider before the
-            # provider-aware hash was introduced (or re-indexed since).
+            # Auto-resolve provider when the caller didn't specify one.
+            #
+            # Two failure modes this guards against:
+            # (1) The "stale legacy dir" mode: project was originally indexed
+            #     without a provider, then re-indexed with one. The legacy
+            #     (path-only-hash) dir still has a stub project_info.json
+            #     pointing at the new provider, while the real index lives
+            #     under the provider-aware hash.
+            # (2) The "born provider-aware" mode: project was indexed WITH
+            #     a provider from the start. There is no legacy dir at all.
+            #     A previous resolver that only checked the legacy hash
+            #     would call get_project_storage_dir(provider=None), which
+            #     creates an empty stub at the legacy hash and returns it,
+            #     making switch_project report "not indexed" even though
+            #     the provider-aware dir is fully populated.
+            #
+            # Fix: scan every <project_name>_* dir, read its
+            # project_info.json, and select the one whose project_path
+            # matches AND has a populated index/code.index. Provider is
+            # read from that dir's stored info.
             effective_provider = provider
+            project_dir = None
             if effective_provider is None:
-                legacy_hash = hashlib.md5(
-                    str(project_path).encode()
-                ).hexdigest()[:8]
-                legacy_info = (
-                    get_storage_dir()
-                    / "projects"
-                    / f"{project_path.name}_{legacy_hash}"
-                    / "project_info.json"
-                )
-                if legacy_info.exists():
-                    try:
-                        with open(legacy_info, encoding="utf-8") as f:
-                            stored = json.load(f)
-                        stored_provider = stored.get("embedding_provider")
-                        if stored_provider:
-                            # Prefer provider-aware dir when it exists and has
-                            # a real index; only fall back to the legacy dir
-                            # if the provider-aware dir is missing or empty.
-                            provider_hash = hashlib.md5(
-                                f"{project_path}:{stored_provider}".encode()
-                            ).hexdigest()[:8]
-                            provider_dir = (
-                                get_storage_dir()
-                                / "projects"
-                                / f"{project_path.name}_{provider_hash}"
-                            )
-                            provider_code_index = provider_dir / "index" / "code.index"
-                            if provider_code_index.exists():
-                                effective_provider = stored_provider
+                base_projects = get_storage_dir() / "projects"
+                # Pass 1 (strict): scan every <project_name>_* dir, pick the
+                # one whose project_info.json's project_path matches AND has a
+                # populated index. Handles "born provider-aware" projects with
+                # no legacy dir.
+                if base_projects.exists():
+                    for cand in base_projects.glob(f"{project_path.name}_*"):
+                        if not cand.is_dir():
+                            continue
+                        info_file = cand / "project_info.json"
+                        if not info_file.exists():
+                            continue
+                        try:
+                            with open(info_file, encoding="utf-8") as f:
+                                info = json.load(f)
+                            stored_path_str = info.get("project_path", "")
+                            if not stored_path_str:
+                                continue
+                            try:
+                                stored_path = Path(stored_path_str).resolve()
+                            except OSError:
+                                continue
+                            if stored_path != project_path:
+                                continue
+                            if (cand / "index" / "code.index").exists():
+                                project_dir = cand
+                                effective_provider = info.get("embedding_provider")
                                 logger.info(
-                                    f"Auto-resolved provider={stored_provider} from "
-                                    f"project_info.json (legacy dir may be stale)"
+                                    f"Auto-resolved {project_path.name} to "
+                                    f"{cand.name} (provider={effective_provider})"
                                 )
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to auto-resolve provider from "
-                            f"{legacy_info}: {e}"
-                        )
+                                break
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to read {info_file} during auto-resolve: {e}"
+                            )
 
-            project_dir = self.get_project_storage_dir(
-                str(project_path), provider=effective_provider
-            )
+                # Pass 2 (legacy-info fallback): if pass 1 didn't match,
+                # check the legacy-hash dir's stored provider and route to
+                # the corresponding provider-aware hash. Handles the old
+                # "stale legacy dir" case where the legacy dir has a stub
+                # but project_info.json points at a populated provider-
+                # aware peer.
+                if project_dir is None:
+                    legacy_hash = hashlib.md5(
+                        str(project_path).encode()
+                    ).hexdigest()[:8]
+                    legacy_info = (
+                        get_storage_dir()
+                        / "projects"
+                        / f"{project_path.name}_{legacy_hash}"
+                        / "project_info.json"
+                    )
+                    if legacy_info.exists():
+                        try:
+                            with open(legacy_info, encoding="utf-8") as f:
+                                stored = json.load(f)
+                            stored_provider = stored.get("embedding_provider")
+                            if stored_provider:
+                                provider_hash = hashlib.md5(
+                                    f"{project_path}:{stored_provider}".encode()
+                                ).hexdigest()[:8]
+                                provider_dir = (
+                                    get_storage_dir()
+                                    / "projects"
+                                    / f"{project_path.name}_{provider_hash}"
+                                )
+                                if (provider_dir / "index" / "code.index").exists():
+                                    project_dir = provider_dir
+                                    effective_provider = stored_provider
+                                    logger.info(
+                                        f"Auto-resolved provider={stored_provider} "
+                                        f"from legacy project_info.json"
+                                    )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed legacy-info auto-resolve from "
+                                f"{legacy_info}: {e}"
+                            )
+
+            if project_dir is None:
+                # Either provider was specified, or no populated dir matched.
+                # Fall back to the canonical resolver (which may create a new
+                # dir if none exists yet).
+                project_dir = self.get_project_storage_dir(
+                    str(project_path), provider=effective_provider
+                )
             index_dir = project_dir / "index"
 
             if not index_dir.exists() or not (index_dir / "code.index").exists():
