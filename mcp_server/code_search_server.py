@@ -121,6 +121,69 @@ def _format_staleness_warning(age_seconds: float) -> str | None:
     return f"Index is {int(days)} day{'s' if int(days) != 1 else ''} old. Run index_directory to refresh."
 
 
+# Phase A (2026-05-07): refuse-as-project-root reasons. When auto-index
+# would otherwise pick a path that isn't a real project — most commonly
+# `$HOME` because the MCP server was spawned with cwd at the user's home —
+# we abort BEFORE walking the directory. The pre-fix path triggered when
+# Claude Code spawned the code-search MCP with cwd=$HOME and the first
+# search routed through `ensure_project_indexed(cwd)`, which silently
+# kicked off `index_directory($HOME)`. The job wedged in phase=starting
+# walking ~150K files; `cancel_indexing` set the cancel flag but the file-
+# walk doesn't poll it, so the job was unkillable until session restart.
+def _refuse_as_project_root_reason(path_str: str) -> Optional[str]:
+    """Return a refusal reason string if `path_str` should NOT be treated
+    as a project root, or None if it's acceptable.
+
+    Refusal rules (in order):
+      1. Empty / unresolvable path.
+      2. Equal to the user's home directory.
+      3. A filesystem root (e.g., `C:\\` or `/`).
+      4. Contains more than 5 nested `.git` directories within depth 3 —
+         signals a workspace root (e.g., ~/Documents/GitHub/) rather
+         than a project. Cap walk depth to keep this cheap.
+
+    The `/` and home checks are exact-match; subdirectories of home
+    (e.g. `~/Documents/GitHub/foo`) are fine.
+    """
+    if not path_str:
+        return "empty path"
+    try:
+        p = Path(path_str).resolve()
+    except (OSError, ValueError) as e:
+        return f"unresolvable path: {e}"
+
+    home = Path.home().resolve()
+    if p == home:
+        return f"path is the user home directory ({home})"
+
+    # Filesystem root check: anchor with no parts, or anchor==str(p).
+    if p.parent == p:
+        return f"path is a filesystem root ({p})"
+
+    # Nested-git workspace heuristic. Walk at most depth 3, cap visits.
+    git_count = 0
+    visited = 0
+    try:
+        for entry in p.iterdir():
+            visited += 1
+            if visited > 50:
+                break
+            if not entry.is_dir():
+                continue
+            if (entry / ".git").exists():
+                git_count += 1
+                if git_count > 5:
+                    return (
+                        f"path contains >5 nested .git directories — looks "
+                        f"like a workspace root, not a project ({p})"
+                    )
+    except (OSError, PermissionError):
+        # Walk failure is not itself a refusal — let the indexer hit it.
+        pass
+
+    return None
+
+
 class CodeSearchServer:
     """Server that manages code search state and implements business logic."""
 
@@ -269,7 +332,14 @@ class CodeSearchServer:
         return project_dir
 
     def ensure_project_indexed(self, project_path: str) -> bool:
-        """Check if project is indexed, auto-index if needed."""
+        """Check if project is indexed, auto-index if needed.
+
+        Phase A (2026-05-07): refuses to auto-index home directories or
+        nested-git-workspace roots. Without this guard, when the MCP
+        server was spawned with cwd=$HOME, the first search call routed
+        through here and triggered `index_directory($HOME)`, which
+        wedged on a ~150K-file walk. See `_refuse_as_project_root_reason`.
+        """
         try:
             project_dir = self.get_project_storage_dir(project_path)
             index_dir = project_dir / "index"
@@ -281,6 +351,13 @@ class CodeSearchServer:
             if project_path_obj == Path.cwd() and list(
                 project_path_obj.glob("**/*.py")
             ):
+                refuse = _refuse_as_project_root_reason(project_path)
+                if refuse:
+                    logger.info(
+                        f"Refusing to auto-index {project_path}: {refuse}. "
+                        f"Pass an explicit project root via index_directory."
+                    )
+                    return False
                 logger.info(f"Auto-indexing current directory: {project_path}")
                 result = self.index_directory(project_path)
                 result_data = json.loads(result)
@@ -901,6 +978,19 @@ class CodeSearchServer:
             return json.dumps(
                 {"error": f"Path is not a directory: {directory_path_obj}"}
             )
+
+        # Phase A (2026-05-07): refuse home-dir / workspace-root paths.
+        # These walk far too many files and silently wedge the indexer.
+        refuse = _refuse_as_project_root_reason(str(directory_path_obj))
+        if refuse:
+            return json.dumps({
+                "error": (
+                    f"Refused to index {directory_path_obj}: {refuse}. "
+                    f"Pass an explicit project root (a directory containing "
+                    f"a single project's source code, not a workspace root)."
+                ),
+                "refusal_reason": refuse,
+            })
 
         project_name = project_name or directory_path_obj.name
         job_id = uuid.uuid4().hex[:8]
