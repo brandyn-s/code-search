@@ -54,6 +54,7 @@ class IncrementalIndexer:
         chunker: Optional[MultiLanguageChunker] = None,
         snapshot_manager: Optional[SnapshotManager] = None,
         progress_fn=None,
+        cancel_check=None,
     ):
         """Initialize incremental indexer.
 
@@ -63,6 +64,14 @@ class IncrementalIndexer:
             chunker: Code chunker instance
             snapshot_manager: Snapshot manager instance
             progress_fn: Optional callback(phase, current, total) for progress reporting
+            cancel_check: Optional callable returning True if the
+                indexing run should abort. Polled by MerkleDAG at every
+                directory boundary during the file-walk phase. Without
+                this, cancel_indexing only propagates after chunking
+                begins — useless when the walk itself is the slow phase
+                (e.g., $HOME indexing wedge resolved by Phase A2 at the
+                server-level guard, but A3 closes it at the indexer level
+                for any other long legitimate walk).
         """
         self.indexer = indexer or Indexer()
         self.embedder = embedder or CodeEmbedder()
@@ -70,6 +79,7 @@ class IncrementalIndexer:
         self.snapshot_manager = snapshot_manager or SnapshotManager()
         self.change_detector = ChangeDetector(self.snapshot_manager)
         self._progress_fn = progress_fn or (lambda phase, current, total: None)
+        self._cancel_check = cancel_check
 
     def detect_changes(self, project_path: str) -> Tuple[FileChanges, MerkleDAG]:
         """Detect changes in project since last snapshot.
@@ -253,8 +263,11 @@ class IncrementalIndexer:
             # Clear existing index
             self.indexer.clear_index()
 
-            # Build DAG for all files
-            dag = MerkleDAG(project_path)
+            # Build DAG for all files. Phase A3 (2026-05-08): pass the
+            # cancel_check callable so an in-flight cancel_indexing call
+            # propagates within seconds during the merkle walk, not just
+            # after chunking begins.
+            dag = MerkleDAG(project_path, cancel_check=self._cancel_check)
             dag.build()
             all_files = dag.get_all_files()
 

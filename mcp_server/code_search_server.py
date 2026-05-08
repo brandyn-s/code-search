@@ -1050,11 +1050,22 @@ class CodeSearchServer:
                         else:
                             os.environ["EMBEDDING_PROVIDER"] = _old_provider
 
+                # Phase A3 (2026-05-08): cancel_check propagates the
+                # _indexing_job["cancel_requested"] flag into the merkle
+                # walk. Without this, cancel only fires inside
+                # progress_callback, which doesn't run until chunking
+                # begins — useless when the merkle walk itself is the
+                # slow phase.
                 incremental_indexer = IncrementalIndexer(
                     indexer=index_manager,
                     embedder=embedder,
                     chunker=chunker,
                     progress_fn=_progress_callback,
+                    cancel_check=lambda jid=job_id: bool(
+                        self._indexing_job
+                        and self._indexing_job.get("job_id") == jid
+                        and self._indexing_job.get("cancel_requested")
+                    ),
                 )
 
                 # Pipeline version check: force full reindex if pipeline changed

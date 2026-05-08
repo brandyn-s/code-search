@@ -36,7 +36,20 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
+
+
+class IndexingCancelled(InterruptedError):
+    """Raised when an indexing run observes the cancel signal during the
+    file-walk phase.
+
+    Phase A3 (2026-05-08): MerkleDAG.build_node accepts an optional
+    cancel_check callable. When that callable returns True, build_node
+    raises IndexingCancelled at the next directory boundary. Subclassing
+    InterruptedError keeps existing `except InterruptedError` handlers
+    in code_search_server.py / incremental_indexer.py compatible —
+    callers don't need to know about the new exception class.
+    """
 
 
 @dataclass
@@ -75,13 +88,19 @@ class MerkleNode:
 class MerkleDAG:
     """Merkle DAG for tracking file system changes."""
     
-    def __init__(self, root_path: str):
+    def __init__(self, root_path: str, cancel_check: Optional[Callable[[], bool]] = None):
         """Initialize Merkle DAG for a directory tree.
-        
+
         Args:
             root_path: Root directory to track
+            cancel_check: Optional callable returning True if the
+                indexing run should be cancelled. Polled at every
+                directory boundary inside build_node. When True,
+                build raises IndexingCancelled. None = no cancellation
+                support (legacy behavior).
         """
         self.root_path = Path(root_path).resolve()
+        self.cancel_check = cancel_check
         self.nodes: Dict[str, MerkleNode] = {}
         self.root_node: Optional[MerkleNode] = None
         self.ignore_patterns: Set[str] = {
@@ -215,9 +234,19 @@ class MerkleDAG:
             return node
             
         elif path.is_dir():
+            # Phase A3 (2026-05-08): poll cancel signal at every directory
+            # boundary. Walking $HOME hits ~150K files; the previous code
+            # had no exit unless a chunker progress_fn fired, which only
+            # happens AFTER the walk completes. Now `cancel_indexing`
+            # propagates within seconds via this check.
+            if self.cancel_check is not None and self.cancel_check():
+                raise IndexingCancelled(
+                    f"indexing cancelled during merkle walk at {relative_path}"
+                )
+
             children = []
             child_hashes = []
-            
+
             try:
                 for child_path in sorted(path.iterdir()):
                     child_node = self.build_node(child_path, base_path)
