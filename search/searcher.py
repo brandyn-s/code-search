@@ -1,5 +1,6 @@
 """Intelligent search functionality with query optimization."""
 
+import json
 import os
 import re
 import logging
@@ -443,8 +444,25 @@ class IntelligentSearcher:
                 )
                 candidates.append(result)
 
-        # Apply chunk type boosts and name-match boost based on content mode
-        boosts = CHUNK_TYPE_BOOSTS.get(content_mode, {})
+        # Apply chunk type boosts and name-match boost based on content mode.
+        # `CHUNK_TYPE_BOOST_OVERRIDE` env var (Phase B3, 2026-05-08) layers a
+        # JSON dict on top of the static defaults at search-time, enabling
+        # the sweep harness to test alternative boost values without
+        # restarting the server. Keys not in the override fall through to the
+        # static dict; malformed JSON is silently ignored.
+        boosts = dict(CHUNK_TYPE_BOOSTS.get(content_mode, {}))
+        override_raw = os.environ.get("CHUNK_TYPE_BOOST_OVERRIDE")
+        if override_raw:
+            try:
+                override = json.loads(override_raw)
+                if isinstance(override, dict):
+                    # NOTE: avoid using `k` as a loop variable here — `k` is the
+                    # search top-k argument at function scope and shadowing it
+                    # silently breaks `candidates[:k]` slicing later.
+                    for chunk_type_key, boost_value in override.items():
+                        boosts[chunk_type_key] = float(boost_value)
+            except (ValueError, TypeError):
+                pass
         query_tokens = self._normalize_to_tokens(query.lower())
 
         for result in candidates:
