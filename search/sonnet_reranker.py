@@ -76,6 +76,79 @@ DEFAULT_SDK_PER_CALL_TIMEOUT_S = 12.0
 # Default=7 (PR #95) was too aggressive; tuned to 6 in PR #96.
 DEFAULT_HYBRID_PRIOR_THRESHOLD = 6
 
+
+def _parse_path_overrides(raw: str | None) -> dict[str, int]:
+    """Parse SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES env value.
+
+    Accepts a JSON object mapping path-prefix -> threshold int.
+    Returns {} on missing, empty, or malformed input (never raises).
+
+    Example: '{"assetman/": 11, "mithrandir/": 4}' produces
+    {"assetman/": 11, "mithrandir/": 4}.
+    """
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        LOG.warning(
+            f"SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES is not valid JSON; "
+            f"per-path overrides disabled. Got: {raw!r}"
+        )
+        return {}
+    if not isinstance(data, dict):
+        LOG.warning(
+            f"SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES must be a JSON object; "
+            f"got {type(data).__name__}, per-path overrides disabled."
+        )
+        return {}
+    out: dict[str, int] = {}
+    for k, v in data.items():
+        if not isinstance(k, str) or not isinstance(v, int):
+            LOG.warning(
+                f"SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES entry "
+                f"{k!r}: {v!r} is not str->int; skipped."
+            )
+            continue
+        # Normalize separators to forward-slash for cross-platform matching.
+        out[k.replace("\\", "/")] = v
+    return out
+
+
+def _effective_threshold(
+    candidates: list[dict],
+    base_threshold: int,
+    path_overrides: dict[str, int],
+) -> int:
+    """Return the effective hybrid-prior threshold for this candidate set.
+
+    Per-path overrides are applied conservatively: if any candidate's path
+    matches an override prefix, the threshold for the cohort is the MAX of
+    base_threshold and every matching override.
+
+    Rationale: if we lower the threshold for a domain where Sonnet helps
+    (mithrandir +0.173 MRR, bootstrap CI excludes 0), we want sonnet to
+    fire more often. If we raise the threshold for a domain where Sonnet
+    hurts (assetman -0.0695 MRR, bootstrap CI excludes 0), we want sonnet
+    to fall back to hybrid more often. Mixed cohorts (queries returning
+    candidates from BOTH domains) take the higher (more conservative)
+    threshold so the harmful domain's behavior dominates.
+
+    Returns base_threshold when path_overrides is empty.
+    """
+    if not path_overrides:
+        return base_threshold
+    effective = base_threshold
+    for c in candidates:
+        path = c.get("file_path") or c.get("file") or c.get("relative_path") or ""
+        if not path:
+            continue
+        norm = path.replace("\\", "/")
+        for prefix, override in path_overrides.items():
+            if norm.startswith(prefix) and override > effective:
+                effective = override
+    return effective
+
 # ─── Structured-metadata reason vocabulary ───
 # Stable strings consumed by callers (MCP layer, eval harnesses). Add new
 # entries here rather than ad-hoc reason strings; downstream consumers will
@@ -315,6 +388,7 @@ async def _rerank_async(
     timeout: float,
     hybrid_prior_threshold: int,
     return_metadata: bool = False,
+    hybrid_prior_path_overrides: dict[str, int] | None = None,
 ):
     """Score candidates in parallel, sort by score, return top-k.
 
@@ -389,10 +463,19 @@ async def _rerank_async(
         # JUDGE_PROMPT), Sonnet hasn't identified anything as confidently relevant.
         # Tie-breaking on uniformly-low scores favors keyword-dense chunks over
         # canonical implementations. Preserve hybrid order in that case.
+        #
+        # Per-path overrides (2026-05-09 D3): when SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES
+        # is set, the cohort threshold is raised above base whenever any
+        # candidate path matches an override prefix. Used to suppress sonnet
+        # rerank on domains where it empirically regresses (e.g. assetman per
+        # bootstrap CI 2026-05-09).
+        effective_threshold = _effective_threshold(
+            candidates, hybrid_prior_threshold, hybrid_prior_path_overrides or {},
+        )
         valid_scores = [s for s in scores if isinstance(s, int)]
-        if valid_scores and max(valid_scores) < hybrid_prior_threshold:
-            LOG.debug(f"Sonnet max score {max(valid_scores)} < {hybrid_prior_threshold}; "
-                      f"using hybrid order")
+        if valid_scores and max(valid_scores) < effective_threshold:
+            LOG.debug(f"Sonnet max score {max(valid_scores)} < {effective_threshold}; "
+                      f"using hybrid order (base={hybrid_prior_threshold})")
             return _emit(candidates[:top_k], False, REASON_HYBRID_PRIOR_FALLBACK)
 
         # Sort: higher score wins; non-int scores (None, _ERR_*) sink to bottom;
@@ -463,10 +546,15 @@ def rerank_with_sonnet(
     except ValueError:
         threshold = DEFAULT_HYBRID_PRIOR_THRESHOLD
 
+    path_overrides = _parse_path_overrides(
+        os.environ.get("SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES")
+    )
+
     try:
         result = asyncio.run(
             _rerank_async(query, candidates, top_k, timeout, threshold,
-                          return_metadata=return_metadata)
+                          return_metadata=return_metadata,
+                          hybrid_prior_path_overrides=path_overrides)
         )
         return result
     except RuntimeError as e:

@@ -756,3 +756,116 @@ def test_score_one_passes_per_call_timeout_to_sdk(monkeypatch):
     result = _asyncio.run(sr._score_one(FakeClient(), "q", "f.py", "c"))
     assert result == 5
     assert captured.get("timeout") == 7.5
+
+
+# ─── Per-path hybrid-prior threshold overrides (D3, 2026-05-09) ───
+# Tests for SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES env var.
+# Bootstrap CI on 2026-05-09 PSM eval data showed sonnet rerank effect splits
+# by subproject (assetman: -0.0695 hurts, mithrandir: +0.173 helps; both CIs
+# excluded zero). Per-path override lets the threshold tune by domain.
+
+
+def test_parse_path_overrides_empty():
+    from search.sonnet_reranker import _parse_path_overrides
+
+    assert _parse_path_overrides(None) == {}
+    assert _parse_path_overrides("") == {}
+
+
+def test_parse_path_overrides_valid():
+    from search.sonnet_reranker import _parse_path_overrides
+
+    result = _parse_path_overrides('{"assetman/": 11, "mithrandir/": 4}')
+    assert result == {"assetman/": 11, "mithrandir/": 4}
+
+
+def test_parse_path_overrides_normalizes_separators():
+    from search.sonnet_reranker import _parse_path_overrides
+
+    # Windows-style path prefix gets normalized to forward-slash
+    result = _parse_path_overrides('{"assetman\\\\src/": 9}')
+    assert result == {"assetman/src/": 9}
+
+
+def test_parse_path_overrides_malformed_json_returns_empty():
+    from search.sonnet_reranker import _parse_path_overrides
+
+    assert _parse_path_overrides("{not json}") == {}
+    assert _parse_path_overrides("[1, 2, 3]") == {}  # not a dict
+    assert _parse_path_overrides("null") == {}
+
+
+def test_parse_path_overrides_skips_invalid_entries():
+    from search.sonnet_reranker import _parse_path_overrides
+
+    # str->non-int entries dropped; valid entries kept
+    result = _parse_path_overrides('{"good/": 7, "bad/": "not-int", "ok/": 9}')
+    assert result == {"good/": 7, "ok/": 9}
+
+
+def test_effective_threshold_no_overrides_returns_base():
+    from search.sonnet_reranker import _effective_threshold
+
+    candidates = [{"file_path": "assetman/src/foo.rs"}]
+    assert _effective_threshold(candidates, base_threshold=6, path_overrides={}) == 6
+
+
+def test_effective_threshold_no_match_returns_base():
+    from search.sonnet_reranker import _effective_threshold
+
+    candidates = [{"file_path": "nix/modules/foo.nix"}]
+    overrides = {"assetman/": 11}
+    assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 6
+
+
+def test_effective_threshold_match_raises_above_base():
+    from search.sonnet_reranker import _effective_threshold
+
+    candidates = [{"file_path": "assetman/src/foo.rs"}]
+    overrides = {"assetman/": 11}
+    assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
+
+
+def test_effective_threshold_takes_max_across_matches():
+    """Mixed cohort: cohort threshold = MAX (most restrictive) match."""
+    from search.sonnet_reranker import _effective_threshold
+
+    candidates = [
+        {"file_path": "assetman/src/foo.rs"},      # → 11
+        {"file_path": "mithrandir/src/page.tsx"},  # → 4
+    ]
+    overrides = {"assetman/": 11, "mithrandir/": 4}
+    # Conservative: pick the higher (sonnet hurts assetman; better to fall back)
+    assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
+
+
+def test_effective_threshold_below_base_does_not_lower():
+    """Override BELOW base never lowers the cohort threshold."""
+    from search.sonnet_reranker import _effective_threshold
+
+    candidates = [{"file_path": "mithrandir/src/page.tsx"}]
+    overrides = {"mithrandir/": 4}  # below base
+    # Lowering thresholds via overrides isn't yet supported (would need a
+    # different design — the current rule uses MAX). Cohort stays at base.
+    assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 6
+
+
+def test_effective_threshold_falls_back_to_alt_path_keys():
+    """_effective_threshold checks file_path → file → relative_path in that order."""
+    from search.sonnet_reranker import _effective_threshold
+
+    candidates = [
+        {"file": "assetman/src/foo.rs"},          # no file_path key
+        {"relative_path": "assetman/src/bar.rs"},  # no file or file_path key
+    ]
+    overrides = {"assetman/": 11}
+    assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
+
+
+def test_effective_threshold_handles_windows_separators_in_paths():
+    """Candidate paths may use Windows backslashes; normalize before matching."""
+    from search.sonnet_reranker import _effective_threshold
+
+    candidates = [{"file_path": "assetman\\src\\foo.rs"}]
+    overrides = {"assetman/": 11}
+    assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
