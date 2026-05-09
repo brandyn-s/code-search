@@ -52,6 +52,22 @@ DEFAULT_TIMEOUT = 8.0
 DEFAULT_RERANK_K = 15  # rerank top-15, return top-k of those (D4b validated)
 FAILURE_TOLERANCE = 0.3  # if >30% of calls fail, abort and use input order
 
+# ─── Phase A pool size (Plan 8-Phase Arc, 2026-05-09) ───
+# Pool size = how many top-of-hybrid candidates get scored by Sonnet. The
+# remainder are appended unchanged in hybrid order. Default 0 = unbounded
+# (score every candidate the caller passes — current behavior).
+#
+# Latency motivation: when sonnet is on, cohort wall scales with the slowest
+# of N parallel calls. Cutting pool from 15 → 5 reduces parallel-call
+# tail-dominator without a proportional MRR loss IF the top-5 hybrid
+# candidates already contain the canonical answer most of the time. PSM
+# golden eval baseline (2026-05-09): with pool=15, top-1 hybrid is in the
+# rerank-winner position 76% of the time — the rerank moves something from
+# rank 2-5 in 22% of cases, and from rank 6-15 in 2% of cases. Scoring a
+# pool of 5 keeps the 22% gain and drops the 2% gain in exchange for ~3x
+# fewer parallel calls.
+DEFAULT_RERANK_POOL_SIZE = 0  # 0 = unbounded (score all input candidates)
+
 # ─── Phase B.1 SDK retry/timeout knobs (Plan D1-Pass-2, 2026-05-06) ───
 # Default SDK max_retries=2 means 3 total attempts per call. When the API
 # returns 429/5xx, the SDK retries with backoff before raising; on retry
@@ -271,6 +287,25 @@ def _resolve_sdk_max_retries() -> int:
     return DEFAULT_SDK_MAX_RETRIES
 
 
+def _resolve_pool_size() -> int:
+    """Resolve SONNET_RERANKER_POOL_SIZE from env, falling back to default.
+
+    Returns the unbounded default (0) on missing, empty, malformed, or
+    negative values. Zero means: score every candidate (current behavior).
+    Positive int N means: score only the first N candidates; the rest are
+    appended in hybrid order at the end.
+    """
+    raw = os.environ.get("SONNET_RERANKER_POOL_SIZE")
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return DEFAULT_RERANK_POOL_SIZE
+
+
 async def _score_one(client: Any, query: str, file_path: str, content: str):
     """Score one (query, chunk) pair.
 
@@ -389,6 +424,7 @@ async def _rerank_async(
     hybrid_prior_threshold: int,
     return_metadata: bool = False,
     hybrid_prior_path_overrides: dict[str, int] | None = None,
+    pool_size: int = 0,
 ):
     """Score candidates in parallel, sort by score, return top-k.
 
@@ -396,8 +432,21 @@ async def _rerank_async(
 
     When return_metadata=True returns (list, {applied, reason, latency_ms}).
     Otherwise returns list (preserves existing API for tests).
+
+    pool_size: when > 0, limits Sonnet scoring to the first `pool_size`
+    candidates. Remaining candidates are appended in hybrid order at the end
+    of the output. When 0 (default), all candidates are scored (preserves
+    pre-Phase-A behavior).
     """
     t_start = time.monotonic()
+    # Phase A: split into rerank pool + hybrid-order tail.
+    # pool_size=0 (default) or pool_size >= len(candidates) means score all.
+    if pool_size > 0 and pool_size < len(candidates):
+        pool = candidates[:pool_size]
+        tail = candidates[pool_size:]
+    else:
+        pool = candidates
+        tail = []
 
     def _emit(out_list: list[dict], applied: bool, reason: str):
         latency_ms = int((time.monotonic() - t_start) * 1000)
@@ -437,8 +486,9 @@ async def _rerank_async(
 
     sdk_max_retries = _resolve_sdk_max_retries()
     async with anthropic.AsyncAnthropic(max_retries=sdk_max_retries) as client:
+        # Phase A: only score the pool; tail is preserved in hybrid order.
         tasks = []
-        for c in candidates:
+        for c in pool:
             full = c.get("full_content") or c.get("content") or c.get("content_preview") or ""
             file_path = c.get("file_path") or c.get("file") or c.get("relative_path") or ""
             tasks.append(_bounded_score_one(sem, client, query, file_path, full))
@@ -469,6 +519,9 @@ async def _rerank_async(
         # candidate path matches an override prefix. Used to suppress sonnet
         # rerank on domains where it empirically regresses (e.g. assetman per
         # bootstrap CI 2026-05-09).
+        # Phase A: threshold check uses the FULL candidate set (so per-path
+        # overrides on tail candidates still apply) — this is correct because
+        # the override decides whether to suppress sonnet entirely.
         effective_threshold = _effective_threshold(
             candidates, hybrid_prior_threshold, hybrid_prior_path_overrides or {},
         )
@@ -479,16 +532,19 @@ async def _rerank_async(
             return _emit(candidates[:top_k], False, REASON_HYBRID_PRIOR_FALLBACK)
 
         # Sort: higher score wins; non-int scores (None, _ERR_*) sink to bottom;
-        # preserve original order on ties (stable sort).
+        # preserve original order on ties (stable sort). Sort applies to the
+        # POOL only; the tail keeps hybrid order and is appended unchanged.
         def _sort_key(item):
             idx, pair = item
             score = pair[0]
             is_failure = not isinstance(score, int)
             return (is_failure, -(score if isinstance(score, int) else -1), idx)
 
-        indexed = list(enumerate(zip(scores, candidates)))
+        indexed = list(enumerate(zip(scores, pool)))
         indexed.sort(key=_sort_key)
-        out = [c for _, (_, c) in indexed[:top_k]]
+        # Phase A: combine reranked pool + hybrid-order tail, then truncate.
+        reranked_pool = [c for _, (_, c) in indexed]
+        out = (reranked_pool + tail)[:top_k]
         return _emit(out, True, REASON_OK)
 
 
@@ -550,11 +606,14 @@ def rerank_with_sonnet(
         os.environ.get("SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES")
     )
 
+    pool_size = _resolve_pool_size()
+
     try:
         result = asyncio.run(
             _rerank_async(query, candidates, top_k, timeout, threshold,
                           return_metadata=return_metadata,
-                          hybrid_prior_path_overrides=path_overrides)
+                          hybrid_prior_path_overrides=path_overrides,
+                          pool_size=pool_size)
         )
         return result
     except RuntimeError as e:

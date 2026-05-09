@@ -51,6 +51,29 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 | `ANTHROPIC_PER_CALL_TIMEOUT_S` | `12.0` | Per-SDK-call timeout in seconds (Plan D1-Pass-2 B.1). Set above the documented p99-successful (8.6s on 2026-05-06 baseline) so genuinely-stuck calls are bounded but healthy slow calls are not truncated. The cohort-level `SONNET_RERANKER_TIMEOUT` (default 8s, applied via `asyncio.wait_for` over `asyncio.gather`) is the OUTER bound — `ANTHROPIC_PER_CALL_TIMEOUT_S` adds a per-call inner cap so one stuck call doesn't dominate the cohort budget. |
 | `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD` | `6` | Hybrid-prior fallback threshold (added 2026-05-03, tuned 2026-05-04). When the max Sonnet score across the candidate pool is below this value, the reranker is uncertain — score ties get arbitrary tie-breaking that favors keyword-dense chunks over canonical files. Falls back to hybrid order in that case. Set to `0` to disable. Default tuned 7→6 (PR #96): n=183 multi-target eval showed threshold=6 wins MRR (0.838 vs 0.830 at 7) and HR@1 (0.803 vs 0.787 at 7). |
 | `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES` | unset (no overrides) | Per-path-prefix override for the hybrid-prior threshold above. JSON object mapping path-prefix → threshold int, e.g. `'{"assetman/": 11, "mithrandir/": 4}'`. The cohort threshold is the MAX of the base threshold and any override matching a candidate path; mixed cohorts inherit the most restrictive (highest) override. Lowering thresholds via overrides is currently a no-op (cohort never goes below base) — the mechanism is conservative-by-design: tighten only. Bootstrap CI on n=183+102 PSM eval (2026-05-09) showed sonnet rerank effect splits sharply by subproject — assetman MRR delta -0.0695 (CI [-0.16, -0.01], excludes zero), mithrandir +0.1733 (CI [+0.02, +0.33], excludes zero), aggregate golden delta within noise. The override env var lets per-domain tuning ship without changing the global default. Default unset = behavior unchanged. Validate any new override mapping with `bench/research/paired_bootstrap_per_subproject.py` against the prior eval before promoting to production. |
+| `SONNET_RERANKER_POOL_SIZE` | `0` (unbounded) | Phase A latency lever (Plan 8-Phase Arc, 2026-05-09). When set to a positive integer N, only the top-N candidates (in hybrid order) are scored by Sonnet; the remaining candidates are appended unchanged in hybrid order at the end of the output. When `0` (default), all input candidates are scored — pre-Phase-A behavior preserved. Latency motivation: cohort wall scales with the slowest of N parallel calls; cutting pool from 15 → 5 reduces parallel-call tail-dominator. Tradeoff: candidates beyond the pool can't move up via rerank — only candidates in the pool participate in score-based reordering. PSM golden eval baseline (2026-05-09): with pool=15, top-1 hybrid is in the rerank-winner position 76% of the time, rerank moves something from rank 2-5 in 22%, rank 6-15 in 2%. Pool=5 keeps the 22% gain while cutting parallel-call count 3x. Default unset = behavior unchanged. Validate any new pool size with `bench/research/anthropic_latency_diag.py` (latency) AND PSM eval bootstrap CI (MRR no-regression) before flipping the default. |
+
+### Phase A — Streaming SDK option (out-of-scope follow-up, 2026-05-09)
+
+The Anthropic Python SDK exposes `client.messages.stream()` and
+`client.messages.with_streaming_response`, so streaming responses for the
+per-candidate scoring calls is technically possible. **Not pursued for
+this phase** because:
+
+- Per-call output is ~50-200 tokens of JSON (`{"score": N, "reasoning": "..."}`).
+  Total generation time is small relative to request RTT + first-token
+  latency. Streaming reduces time-to-first-token but doesn't reduce
+  time-to-last-token meaningfully on short responses.
+- The latency dominator measured today is the slowest-of-N-parallel-calls
+  pattern, NOT per-call generation time. `SONNET_RERANKER_POOL_SIZE` (this
+  PR) directly cuts N; streaming would only marginally reduce per-call wall.
+- Streaming would require parsing partial JSON during accumulation — added
+  complexity without proportional gain for our use case.
+
+A future phase that pivots from "rerank N candidates fully" to "stream
+hybrid order immediately, swap in rerank order as scores arrive" (perceived
+latency = hybrid baseline) would benefit from streaming. That's a
+materially different UX contract; out of scope here.
 | `QUANTIZATION` | `int8` | Index type: `int8` (QT_8bit trained, 4x smaller, default), `float32` (legacy), `binary` (32x smaller, opt-in for 100K+ chunks). **Note**: QT_8bit requires a training step (learns value range). Indexes built before 2026-04-05 used QT_8bit_direct which silently returned 0.0 similarities — must reindex. |
 | `VOYAGE_BATCH_API` | `off` | `on` to use Batch API for full reindex (33% cheaper, 1000+ chunk threshold) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |

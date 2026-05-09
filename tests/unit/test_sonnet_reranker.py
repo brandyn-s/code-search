@@ -869,3 +869,240 @@ def test_effective_threshold_handles_windows_separators_in_paths():
     candidates = [{"file_path": "assetman\\src\\foo.rs"}]
     overrides = {"assetman/": 11}
     assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
+
+
+# ─── Phase A pool size (Plan 8-Phase Arc, 2026-05-09) ───
+# Tests for SONNET_RERANKER_POOL_SIZE env var. The pool sizing limits how
+# many candidates Sonnet scores; the rest are appended in hybrid order.
+
+
+def test_resolve_pool_size_default(monkeypatch):
+    """Default pool size is 0 (unbounded — score all candidates)."""
+    from search.sonnet_reranker import _resolve_pool_size, DEFAULT_RERANK_POOL_SIZE
+
+    monkeypatch.delenv("SONNET_RERANKER_POOL_SIZE", raising=False)
+    assert _resolve_pool_size() == DEFAULT_RERANK_POOL_SIZE
+    assert DEFAULT_RERANK_POOL_SIZE == 0  # contract: 0 = unbounded
+
+
+def test_resolve_pool_size_env_override(monkeypatch):
+    """Env var SONNET_RERANKER_POOL_SIZE overrides the default."""
+    from search.sonnet_reranker import _resolve_pool_size
+
+    monkeypatch.setenv("SONNET_RERANKER_POOL_SIZE", "5")
+    assert _resolve_pool_size() == 5
+    monkeypatch.setenv("SONNET_RERANKER_POOL_SIZE", "10")
+    assert _resolve_pool_size() == 10
+
+
+def test_resolve_pool_size_invalid_falls_back(monkeypatch):
+    """Bad env values fall back to the default (0/unbounded)."""
+    from search.sonnet_reranker import _resolve_pool_size
+
+    monkeypatch.setenv("SONNET_RERANKER_POOL_SIZE", "not-a-number")
+    assert _resolve_pool_size() == 0
+    monkeypatch.setenv("SONNET_RERANKER_POOL_SIZE", "-1")
+    assert _resolve_pool_size() == 0
+    monkeypatch.setenv("SONNET_RERANKER_POOL_SIZE", "0")
+    assert _resolve_pool_size() == 0  # explicit 0 = unbounded
+
+
+@pytest.mark.asyncio
+async def test_pool_size_truncates_scoring_to_pool(monkeypatch):
+    """When pool_size=3, only first 3 candidates are scored."""
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(8)
+    ]
+
+    scored_chunk_ids = []
+
+    async def track_score(client, query, file_path, content):
+        # Extract chunk index from file_path "fN.py"
+        idx = int(file_path.split("f")[1].split(".")[0])
+        scored_chunk_ids.append(f"c{idx}")
+        return 8  # uniformly high so rerank applies
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", track_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out = await _rerank_async(
+        "q", candidates, top_k=8, timeout=10.0, hybrid_prior_threshold=7,
+        pool_size=3,
+    )
+    # Only first 3 candidates were scored
+    assert sorted(scored_chunk_ids) == ["c0", "c1", "c2"]
+    # Output has 8 items — 3 reranked pool + 5 tail
+    assert len(out) == 8
+    # Tail (c3..c7) preserved in hybrid order at the END
+    assert [c["chunk_id"] for c in out[3:]] == ["c3", "c4", "c5", "c6", "c7"]
+
+
+@pytest.mark.asyncio
+async def test_pool_size_zero_scores_all_candidates(monkeypatch):
+    """pool_size=0 (default) scores all candidates (preserves pre-Phase-A behavior)."""
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(5)
+    ]
+
+    score_calls = 0
+
+    async def count_score(client, query, file_path, content):
+        nonlocal score_calls
+        score_calls += 1
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", count_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out = await _rerank_async(
+        "q", candidates, top_k=5, timeout=10.0, hybrid_prior_threshold=7,
+        pool_size=0,
+    )
+    assert score_calls == 5  # all candidates scored
+    assert len(out) == 5
+
+
+@pytest.mark.asyncio
+async def test_pool_size_larger_than_candidates_scores_all(monkeypatch):
+    """pool_size=20 with 5 candidates scores all (no over-allocation)."""
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(5)
+    ]
+
+    score_calls = 0
+
+    async def count_score(client, query, file_path, content):
+        nonlocal score_calls
+        score_calls += 1
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", count_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out = await _rerank_async(
+        "q", candidates, top_k=5, timeout=10.0, hybrid_prior_threshold=7,
+        pool_size=20,
+    )
+    assert score_calls == 5  # only 5 candidates exist; no padding
+    assert len(out) == 5
+
+
+@pytest.mark.asyncio
+async def test_pool_size_preserves_tail_hybrid_order(monkeypatch):
+    """Pool reranking changes pool order; tail retains exact hybrid order."""
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(6)
+    ]
+
+    # Score pool [c0, c1, c2] inversely (c2=10, c1=5, c0=2) so reranker
+    # puts them in c2, c1, c0 order. Tail [c3, c4, c5] stays as-is.
+    pool_scores = {"c0": 2, "c1": 5, "c2": 10}
+
+    async def fake_score(client, query, file_path, content):
+        idx = int(file_path.split("f")[1].split(".")[0])
+        chunk_id = f"c{idx}"
+        return pool_scores.get(chunk_id, 0)
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out = await _rerank_async(
+        "q", candidates, top_k=6, timeout=10.0, hybrid_prior_threshold=2,
+        pool_size=3,
+    )
+    # Pool reranked: c2 (10), c1 (5), c0 (2). Tail unchanged: c3, c4, c5.
+    assert [c["chunk_id"] for c in out] == ["c2", "c1", "c0", "c3", "c4", "c5"]
+
+
+@pytest.mark.asyncio
+async def test_pool_size_with_top_k_smaller_than_pool(monkeypatch):
+    """top_k=3, pool=5, candidates=10 → returns 3 reranked from pool only."""
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(10)
+    ]
+
+    async def fake_score(client, query, file_path, content):
+        return 8  # all uniformly high; preserves input order via stable sort
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out = await _rerank_async(
+        "q", candidates, top_k=3, timeout=10.0, hybrid_prior_threshold=7,
+        pool_size=5,
+    )
+    # top_k=3 from reranked pool (uniform scores, stable sort preserves input order)
+    assert [c["chunk_id"] for c in out] == ["c0", "c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_pool_size_with_top_k_larger_than_pool(monkeypatch):
+    """top_k=8, pool=5, candidates=10 → 5 reranked + 3 tail in hybrid order."""
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(10)
+    ]
+
+    # Pool [c0..c4] gets scored; rerank inverts their order
+    pool_scores = {"c0": 2, "c1": 4, "c2": 6, "c3": 8, "c4": 10}
+
+    async def fake_score(client, query, file_path, content):
+        idx = int(file_path.split("f")[1].split(".")[0])
+        chunk_id = f"c{idx}"
+        return pool_scores.get(chunk_id, 0)
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out = await _rerank_async(
+        "q", candidates, top_k=8, timeout=10.0, hybrid_prior_threshold=2,
+        pool_size=5,
+    )
+    # Reranked pool (descending by score) + tail in hybrid order
+    expected = ["c4", "c3", "c2", "c1", "c0", "c5", "c6", "c7"]
+    assert [c["chunk_id"] for c in out] == expected
+
+
+@pytest.mark.asyncio
+async def test_pool_size_hybrid_prior_fallback_returns_full_candidates(monkeypatch):
+    """When pool scores are all below threshold, fallback returns ALL candidates in hybrid order."""
+    from search.sonnet_reranker import _rerank_async, REASON_HYBRID_PRIOR_FALLBACK
+
+    candidates = [
+        {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
+        for i in range(8)
+    ]
+
+    async def low_score(client, query, file_path, content):
+        return 3  # uniformly below threshold=7
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", low_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    out, meta = await _rerank_async(
+        "q", candidates, top_k=8, timeout=10.0, hybrid_prior_threshold=7,
+        pool_size=3, return_metadata=True,
+    )
+    assert meta["applied"] is False
+    assert meta["reason"] == REASON_HYBRID_PRIOR_FALLBACK
+    # Full hybrid order (NOT just the pool)
+    assert [c["chunk_id"] for c in out] == ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"]
+
+
+def test_pool_size_env_var_end_to_end(monkeypatch, sample_candidates):
+    """Setting SONNET_RERANKER_POOL_SIZE=2 with no API key still returns input order."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("SONNET_RERANKER_POOL_SIZE", "2")
+    # No API key → API_KEY_MISSING path; pool_size doesn't matter
+    result = rerank_with_sonnet("auth", sample_candidates, top_k=3)
+    assert result == sample_candidates[:3]
