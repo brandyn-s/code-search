@@ -96,7 +96,30 @@ class TypeScriptChunker(LanguageChunker):
         `export const AlertToast = () => {...}`) or empty string when
         the declaration does not bind a function-like expression.
         """
-        # lexical_declaration -> variable_declarator(s) -> {name, value}
+        name, is_func = self._extract_declaration_name(node, source)
+        return name if (name and is_func) else ""
+
+    def _extract_declaration_name(self, node: Any, source: bytes) -> tuple[str, bool]:
+        """For a lexical_declaration / variable_declaration node, return
+        (binding_name, value_is_function_like).
+
+        Phase E (Plan 8-Phase Arc, 2026-05-09): the prior chunker used
+        `_extract_arrow_binding_name` which only returned a name when the
+        value was function-shaped. That left `<no-name>` chunks for
+        styled components (`const X = styled.div...`), Story-typed
+        consts (`const Default: Story = (...) => ...` — the type
+        annotation can shadow direct arrow_function detection), and any
+        const-bound non-function expression. Mithrandir TSX inspection
+        (n=30 sample) showed components covered 24/39 = 62% — every miss
+        was a `<no-name>` lexical_declaration.
+
+        This helper splits naming from function-shape detection. The name
+        is extracted unconditionally from the first variable_declarator's
+        identifier child. The is-function-shape signal is propagated
+        separately so `is_component` / `is_hook` metadata stays gated on
+        function-like values.
+        """
+        # lexical_declaration -> variable_declarator(s) -> {name, value, type}
         for child in node.children:
             if child.type != 'variable_declarator':
                 continue
@@ -107,12 +130,18 @@ class TypeScriptChunker(LanguageChunker):
                     name_text = self.get_node_text(sub, source)
                 elif sub.type in ('arrow_function', 'function', 'function_declaration'):
                     value_is_function_like = True
-                # Generic case: the value may be wrapped (e.g. type
-                # assertion) — accept any "value" field that contains
-                # arrow_function as a descendant.
-            if value_is_function_like and name_text:
-                return name_text
-        return ""
+                # The value may also be an assignment_expression wrapping
+                # an arrow function in some grammar variants — recursively
+                # inspect for arrow_function descendants only when the
+                # immediate child is a known wrapper type.
+                elif sub.type in ('parenthesized_expression', 'as_expression', 'satisfies_expression'):
+                    for grand in sub.children:
+                        if grand.type in ('arrow_function', 'function'):
+                            value_is_function_like = True
+                            break
+            if name_text:
+                return name_text, value_is_function_like
+        return "", False
 
     def extract_metadata(self, node: Any, source: bytes) -> Dict[str, Any]:
         """Extract TypeScript-specific metadata.
@@ -131,9 +160,14 @@ class TypeScriptChunker(LanguageChunker):
         # CS-1: special-case lexical_declaration / variable_declaration
         # binding an arrow — extract the variable name from the
         # declarator subtree before the existing identifier loop runs.
+        # Phase E (2026-05-09): always extract the binding name (was
+        # gated on function-like value, leaving styled components and
+        # Story-typed consts as <no-name> chunks). is_component/is_hook
+        # remain gated on function-like value.
         binding_name = ""
+        binding_is_function_like = False
         if node.type in ('lexical_declaration', 'variable_declaration'):
-            binding_name = self._extract_arrow_binding_name(node, source)
+            binding_name, binding_is_function_like = self._extract_declaration_name(node, source)
             if binding_name:
                 metadata['name'] = binding_name
 
@@ -164,9 +198,14 @@ class TypeScriptChunker(LanguageChunker):
         # function-shaped binding (declaration or arrow). Both are
         # additive metadata — they don't change what gets chunked, just
         # tag the chunks that ARE produced for downstream weighting.
+        # Phase E (2026-05-09): is_component now requires the value to
+        # be function-like (binding_is_function_like). PascalCase consts
+        # bound to non-function values (e.g. const Theme = { ... }) are
+        # not components and shouldn't be flagged as such.
         name = metadata.get('name', '')
         if name:
-            if binding_name and _is_component_name(name):
+            if (binding_name and binding_is_function_like
+                    and _is_component_name(name)):
                 # Only flag arrow-bound declarations as components —
                 # function declarations with PascalCase names are more
                 # commonly utility constructors than React components.
