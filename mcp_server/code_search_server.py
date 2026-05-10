@@ -302,9 +302,63 @@ class CodeSearchServer:
                         logger.warning(f"Legacy migration failed: {e}")
             project_hash = provider_hash
         else:
-            # No provider specified: use legacy hash (backward-compatible)
-            project_dir = legacy_dir
-            project_hash = legacy_hash
+            # No provider specified. Before falling back to the legacy
+            # path-only hash, check whether a sibling provider-aware
+            # directory already has a populated index for this same
+            # project_path. If so, auto-resolve to it.
+            #
+            # Why: switch_project (the read path) auto-resolves to the
+            # provider-aware sibling whenever code.index is populated
+            # there. Without the same auto-resolution on the WRITE path,
+            # `index_directory(provider=None)` silently writes to the
+            # legacy-hash directory while reads go to the provider-aware
+            # directory — divergence that produces "post-reindex MRR ==
+            # pre-reindex MRR" because the reader never sees the new
+            # chunks. (Recovered from 2026-05-09 PSM Phase A; user
+            # demanded it can never happen again.)
+            picked_provider_aware = None
+            base_projects = base_dir / "projects"
+            if base_projects.exists():
+                for cand in base_projects.glob(f"{project_name}_*"):
+                    if not cand.is_dir() or cand == legacy_dir:
+                        continue
+                    info_file = cand / "project_info.json"
+                    if not info_file.exists():
+                        continue
+                    try:
+                        with open(info_file, encoding="utf-8") as f:
+                            info = json.load(f)
+                    except Exception:
+                        continue
+                    stored_path_str = info.get("project_path", "")
+                    if not stored_path_str:
+                        continue
+                    try:
+                        stored_path = Path(stored_path_str).resolve()
+                    except OSError:
+                        continue
+                    if stored_path != project_path_obj:
+                        continue
+                    if not (cand / "index" / "code.index").exists():
+                        continue
+                    picked_provider_aware = (cand, info.get("embedding_provider"))
+                    break
+
+            if picked_provider_aware is not None:
+                cand_dir, stored_provider = picked_provider_aware
+                logger.info(
+                    f"get_project_storage_dir(provider=None) auto-resolved "
+                    f"{project_name} to provider-aware sibling {cand_dir.name} "
+                    f"(provider={stored_provider}). Prevents silent write/read "
+                    f"hash divergence."
+                )
+                project_dir = cand_dir
+                project_hash = cand_dir.name.rsplit("_", 1)[1] if "_" in cand_dir.name else legacy_hash
+            else:
+                # No provider-aware sibling — use legacy hash (preserves
+                # backward compatibility for projects indexed pre-PR-#).
+                project_dir = legacy_dir
+                project_hash = legacy_hash
 
         project_dir.mkdir(parents=True, exist_ok=True)
 
