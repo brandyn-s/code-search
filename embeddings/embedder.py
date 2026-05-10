@@ -161,6 +161,29 @@ class CodeEmbedder:
                 header_parts.append(f"- {chunk.chunk_type}")
             content_parts.append(" ".join(header_parts))
 
+            # D1 (Plan: 2026-05-09 PSM follow-up, item 7): prop-interface
+            # parent-component link. When an interface chunk's name ends
+            # in "Props", append "(props for X)" to the contextual header
+            # where X is the inferred parent component name. The signal
+            # is that mithrandir TSX has 153 such interfaces, all sibling-
+            # paired with a same-file component declaration.
+            #
+            # Implementation note: the suffix-strip heuristic is approximate
+            # (no sibling lookup); D1's purpose is to validate whether the
+            # extra identifier-token in the header moves retrieval at the
+            # embedding level. A4 (post-Phase-E baseline) showed Voyage-4-
+            # large doesn't weight identifier tokens enough to change
+            # rankings on the chunker name-extraction change. D1 is the
+            # falsifier check: if the more-targeted prop-interface signal
+            # also doesn't move retrieval, the embedding ceiling — not the
+            # chunker design — is the constraint.
+            if (chunk.chunk_type == "interface"
+                    and chunk.name
+                    and chunk.name.endswith("Props")
+                    and len(chunk.name) > 5):
+                parent_component = chunk.name[:-5]
+                content_parts[-1] = content_parts[-1] + f" (props for {parent_component})"
+
             # Enriched context: add sibling chunk names from the same file.
             # Approximates Voyage's contextualized embeddings for models that
             # embed each chunk independently (Jina, local).
