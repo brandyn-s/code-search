@@ -85,6 +85,11 @@ def _install_search_file_handler() -> None:
         # Promoted from LOG.debug to LOG.info to close the silent-fallback
         # observability gap surfaced in the 2026-05-10 Phase B audit.
         "[RERANK_REASON]",
+        # Arc A (2026-05-11): per-search PPR diagnostic emitted by
+        # search/ppr_scorer.py — db-not-found / insufficient-subgraph /
+        # computed t_ms records. Same observability pattern as
+        # RERANK_REASON / ANTHROPIC_DIAG.
+        "[PPR_DIAG]",
     )
 
     class _SearchDiagFilter(logging.Filter):

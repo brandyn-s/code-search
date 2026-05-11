@@ -1,12 +1,27 @@
 """Multi-language chunker that combines AST and tree-sitter approaches."""
 
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
 from chunking.code_chunk import CodeChunk
 from chunking.tree_sitter import TreeSitterChunker, TreeSitterChunk
 from chunking.languages import LANGUAGE_MAP
+
+# Arc B (2026-05-11): per-option .nix chunking gate.
+# When CODE_SEARCH_NIX_OPTION_CHUNKING=1, files under nix/modules/ are
+# chunked by NixOptionChunker instead of NixChunker. Other .nix files
+# (lib/, hardware/, packages/, etc.) fall through to NixChunker so we
+# don't disturb their existing index quality. See plan
+# 2026-05-11-code-search-graph-augmented-and-per-option-nix.md, B2.1.
+_NIX_OPTION_PATH_PREFIX = "nix/modules/"
+
+
+def _nix_option_chunking_enabled() -> bool:
+    return os.environ.get("CODE_SEARCH_NIX_OPTION_CHUNKING", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +91,39 @@ class MultiLanguageChunker:
             return []
 
         try:
+            # Arc B (2026-05-11): per-option .nix chunker dispatch.
+            # Activates only for files matching nix/modules/ AND env var
+            # CODE_SEARCH_NIX_OPTION_CHUNKING=1. Skips the merge_file_chunks
+            # post-merge because option chunks are intentionally small and
+            # focused — merging would defeat the per-option-signal hypothesis.
+            if (
+                file_path.replace("\\", "/").endswith(".nix")
+                and _NIX_OPTION_PATH_PREFIX in file_path.replace("\\", "/")
+                and _nix_option_chunking_enabled()
+            ):
+                from chunking.languages.nix_option_chunker import NixOptionChunker
+
+                with open(file_path, "r", encoding="utf-8") as f:
+                    nix_src = f.read()
+                tree_chunks = NixOptionChunker().chunk_code(nix_src)
+                code_chunks = self._convert_tree_chunks(tree_chunks, file_path)
+                # Return unmerged — per-option chunks are sized intentionally.
+                # Add path metadata directly without going through merge.
+                path = Path(file_path)
+                folder_parts = []
+                if self.root_path:
+                    try:
+                        rel_path = path.relative_to(self.root_path)
+                        folder_parts = list(rel_path.parent.parts)
+                    except ValueError:
+                        folder_parts = [path.parent.name] if path.parent.name else []
+                else:
+                    folder_parts = [path.parent.name] if path.parent.name else []
+                for c in code_chunks:
+                    if not c.folder_structure:
+                        c.folder_structure = folder_parts
+                return code_chunks
+
             tree_chunks = self.tree_sitter_chunker.chunk_file(file_path)
             code_chunks = self._convert_tree_chunks(tree_chunks, file_path)
 

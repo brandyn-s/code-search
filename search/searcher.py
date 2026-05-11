@@ -495,6 +495,34 @@ class IntelligentSearcher:
         # the two paths; see bench/research/2026-05-10-assetman-override-refresh.md).
         candidates.sort(key=lambda r: r.similarity_score, reverse=True)
 
+        # Arc A (2026-05-11): Personalized PageRank over code-graph as
+        # post-boost-sort, pre-rerank re-ranking signal. Gated by env var
+        # `CODE_SEARCH_PPR_ENABLED=1` (default off). Blends
+        # `similarity_score *= (1 + alpha * ppr_score)` where alpha is read
+        # from `CODE_SEARCH_PPR_ALPHA` (default 0.5). Mechanism-correctness
+        # gate (Plan A2.4 falsifier): with PPR disabled OR alpha=0.0, this
+        # block is a no-op and candidates pass through unchanged.
+        from search.ppr_scorer import (
+            PPRScorer, blend_ppr_into_candidates, get_env_config,
+        )
+        ppr_enabled, ppr_alpha = get_env_config()
+        if ppr_enabled and ppr_alpha != 0.0 and candidates:
+            try:
+                hint = None
+                for c in candidates:
+                    abs_path = getattr(c, "file_path", None) or getattr(c, "absolute_path", None)
+                    if abs_path:
+                        hint = str(abs_path)
+                        break
+                with PPRScorer() as ppr:
+                    cps = [(c.relative_path, c.similarity_score) for c in candidates]
+                    ppr_scores = ppr.score(cps, hint_abs_path=hint)
+                if ppr_scores:
+                    blend_ppr_into_candidates(candidates, ppr_alpha, ppr_scores)
+                    candidates.sort(key=lambda r: r.similarity_score, reverse=True)
+            except Exception as ppr_err:
+                self._logger.warning("[PPR_DIAG] ppr_blend_failed err=%s", ppr_err)
+
         # Reranking. Default mode is "sonnet" (validated 2026-05-03 PR #93+:
         # +0.087 MRR, +0.137 HR@1 on n=183 multi-target real_session). The
         # Sonnet reranker is graceful: on missing ANTHROPIC_API_KEY, timeout,
