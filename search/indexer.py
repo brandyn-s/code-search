@@ -79,6 +79,12 @@ def _install_search_file_handler() -> None:
         # SONNET_RERANKER_LOG_OVERRIDE_TRIGGERS=1. Used by
         # paired_bootstrap_per_subproject.py to count spillover.
         "[PATH_OVERRIDE_TRIGGER]",
+        # Phase A1 (2026-05-11): per-cohort reranker outcome records,
+        # emitted by _rerank_async in sonnet_reranker.py for non-OK
+        # outcomes (hybrid_prior_fallback, timeout, too_many_failures).
+        # Promoted from LOG.debug to LOG.info to close the silent-fallback
+        # observability gap surfaced in the 2026-05-10 Phase B audit.
+        "[RERANK_REASON]",
     )
 
     class _SearchDiagFilter(logging.Filter):

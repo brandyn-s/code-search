@@ -524,7 +524,10 @@ async def _rerank_async(
             scores = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=False),
                                               timeout=timeout)
         except asyncio.TimeoutError:
-            LOG.warning(f"Sonnet reranker timeout >{timeout}s; using hybrid order")
+            LOG.warning(
+                f"[RERANK_REASON] {REASON_TIMEOUT} cohort_wall_ms>{int(timeout*1000)} "
+                f"n_candidates={len(candidates)}; using hybrid order"
+            )
             return _emit(candidates[:top_k], False, REASON_TIMEOUT)
 
         # _score_one returns: int (success), None (legacy parse/empty paths), or str (_ERR_*).
@@ -532,7 +535,10 @@ async def _rerank_async(
         n_failed = sum(1 for s in scores if not isinstance(s, int))
         if len(scores) > 0 and n_failed > len(scores) * FAILURE_TOLERANCE:
             reason = _aggregate_failure_reason(failures) if failures else REASON_TOO_MANY_FAILURES
-            LOG.warning(f"Sonnet reranker {n_failed}/{len(scores)} failed ({reason}); using hybrid order")
+            LOG.warning(
+                f"[RERANK_REASON] {reason} n_failed={n_failed} n_total={len(scores)} "
+                f"n_candidates={len(candidates)}; using hybrid order"
+            )
             return _emit(candidates[:top_k], False, reason)
 
         # Hybrid-prior fallback: if the max Sonnet score across the candidate pool
@@ -554,8 +560,15 @@ async def _rerank_async(
         )
         valid_scores = [s for s in scores if isinstance(s, int)]
         if valid_scores and max(valid_scores) < effective_threshold:
-            LOG.debug(f"Sonnet max score {max(valid_scores)} < {effective_threshold}; "
-                      f"using hybrid order (base={hybrid_prior_threshold})")
+            # Phase A1 (2026-05-11): promoted from LOG.debug to LOG.info with
+            # [RERANK_REASON] prefix so the silent-fallback rate is observable
+            # alongside [PATH_OVERRIDE_TRIGGER] and [ANTHROPIC_DIAG]. Closes
+            # the observability gap surfaced by Phase B audit in the parent plan.
+            LOG.info(
+                f"[RERANK_REASON] {REASON_HYBRID_PRIOR_FALLBACK} "
+                f"max_score={max(valid_scores)} effective_threshold={effective_threshold} "
+                f"base_threshold={hybrid_prior_threshold} n_candidates={len(candidates)}"
+            )
             return _emit(candidates[:top_k], False, REASON_HYBRID_PRIOR_FALLBACK)
 
         # Sort: higher score wins; non-int scores (None, _ERR_*) sink to bottom;
