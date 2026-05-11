@@ -483,6 +483,18 @@ class IntelligentSearcher:
                 path_boost = 1.0 + (path_boost - 1.0) * 3.0
             result.similarity_score *= path_boost
 
+        # Phase H fix (2026-05-10): sort candidates by post-boost
+        # similarity_score BEFORE the rerank branch. This ensures all paths
+        # (sonnet success, sonnet override-fallback, RERANKER=off) start
+        # from the same boost-sorted order. Previously, only the
+        # RERANKER=off path applied this sort (line ~600); sonnet's
+        # hybrid_prior_fallback returned `candidates[:top_k]` in
+        # RRF-fused-rank order, which differs from the boost-sorted order
+        # on subprojects whose chunk-type / name / path boosts re-order
+        # the top-15 (libnet: 13/18 queries had different top-1 between
+        # the two paths; see bench/research/2026-05-10-assetman-override-refresh.md).
+        candidates.sort(key=lambda r: r.similarity_score, reverse=True)
+
         # Reranking. Default mode is "sonnet" (validated 2026-05-03 PR #93+:
         # +0.087 MRR, +0.137 HR@1 on n=183 multi-target real_session). The
         # Sonnet reranker is graceful: on missing ANTHROPIC_API_KEY, timeout,

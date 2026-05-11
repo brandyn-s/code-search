@@ -151,18 +151,45 @@ def _effective_threshold(
     threshold so the harmful domain's behavior dominates.
 
     Returns base_threshold when path_overrides is empty.
+
+    Observability (Phase A1, 2026-05-10): when
+    SONNET_RERANKER_LOG_OVERRIDE_TRIGGERS=1, emits a [PATH_OVERRIDE_TRIGGER]
+    log line whenever the effective threshold is raised above
+    base_threshold, recording the triggering paths and which override
+    prefix matched. Used by paired_bootstrap_per_subproject.py to count
+    spillover (non-target cohorts whose threshold is incidentally raised
+    by a target-prefix candidate in their top-15).
     """
     if not path_overrides:
         return base_threshold
     effective = base_threshold
+    trigger_paths: list[tuple[str, str, int]] = []  # (path, prefix, override)
     for c in candidates:
         path = c.get("file_path") or c.get("file") or c.get("relative_path") or ""
         if not path:
             continue
         norm = path.replace("\\", "/")
         for prefix, override in path_overrides.items():
-            if norm.startswith(prefix) and override > effective:
-                effective = override
+            if norm.startswith(prefix) and override > base_threshold:
+                trigger_paths.append((norm, prefix, override))
+                if override > effective:
+                    effective = override
+    if effective > base_threshold and os.environ.get(
+        "SONNET_RERANKER_LOG_OVERRIDE_TRIGGERS"
+    ) in ("1", "true", "yes", "on"):
+        # One-line JSON record per cohort. Consumers grep for
+        # "[PATH_OVERRIDE_TRIGGER]" and parse the trailing JSON.
+        record = {
+            "base_threshold": base_threshold,
+            "effective_threshold": effective,
+            "n_candidates": len(candidates),
+            "n_triggering_paths": len(trigger_paths),
+            "triggering": [
+                {"path": p, "prefix": pr, "override": ov}
+                for (p, pr, ov) in trigger_paths
+            ],
+        }
+        LOG.info(f"[PATH_OVERRIDE_TRIGGER] {json.dumps(record)}")
     return effective
 
 # ─── Structured-metadata reason vocabulary ───

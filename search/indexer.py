@@ -70,7 +70,16 @@ def _install_search_file_handler() -> None:
     handler._chunk_id_diag = True  # type: ignore[attr-defined]
     handler.setLevel(logging.DEBUG)
 
-    _ACCEPTED_PREFIXES = ("[CHUNK_ID_DIAG]", "[REINDEX_PROGRESS]", "[ANTHROPIC_DIAG]")
+    _ACCEPTED_PREFIXES = (
+        "[CHUNK_ID_DIAG]",
+        "[REINDEX_PROGRESS]",
+        "[ANTHROPIC_DIAG]",
+        # Phase A1 (2026-05-10): per-cohort override-trigger records,
+        # emitted by _effective_threshold in sonnet_reranker.py when
+        # SONNET_RERANKER_LOG_OVERRIDE_TRIGGERS=1. Used by
+        # paired_bootstrap_per_subproject.py to count spillover.
+        "[PATH_OVERRIDE_TRIGGER]",
+    )
 
     class _SearchDiagFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
