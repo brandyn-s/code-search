@@ -404,7 +404,24 @@ async def _score_one(client: Any, query: str, file_path: str, content: str):
             text = "\n".join(line for line in lines if not line.startswith("```"))
         obj = json.loads(text)
         score = int(obj.get("score", 0))
-        return max(0, min(10, score))  # clamp to [0, 10]
+        score = max(0, min(10, score))  # clamp to [0, 10]
+        # Phase B'''(a) per-candidate score logging (opt-in, default off):
+        # SONNET_RERANKER_LOG_PER_CANDIDATE_SCORE=1 emits one log line per
+        # successful score call. Used to diagnose whether Sonnet's score
+        # for the SAME (query, candidate) pair changes when pool composition
+        # changes (pool=15 vs pool=5). The 2026-05-14 Phase B'' analysis
+        # hypothesized that pool-size sensitivity explains the harvested
+        # corruption signal; this logging surfaces the data to verify.
+        if os.environ.get("SONNET_RERANKER_LOG_PER_CANDIDATE_SCORE"):
+            import hashlib
+            q_hash = hashlib.sha1(query.encode("utf-8", errors="replace")
+                                  ).hexdigest()[:8]
+            LOG.info(
+                f"[SONNET_PER_CANDIDATE_SCORE] query_hash={q_hash} "
+                f"file_path={file_path or '(unknown)'} score={score} "
+                f"pool_size={_resolve_pool_size()}"
+            )
+        return score
     except Exception as e:
         LOG.debug(f"Sonnet score parse failed: {e}")
         return _ERR_UNPARSEABLE
