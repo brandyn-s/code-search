@@ -1,0 +1,167 @@
+[
+  {
+    "id": "flask-hard-vague-response-001",
+    "category": "vague",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "where is the response object built", "expected_files": ["src/flask/wrappers.py"]},
+      {"turn": 2, "query": "make_response from view return value", "expected_files": ["src/flask/app.py"]},
+      {"turn": 3, "query": "Response subclass Werkzeug default_mimetype", "expected_files": ["src/flask/wrappers.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-vague-config-002",
+    "category": "vague",
+    "fixture": "flask",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "how does the app know what database to use", "expected_files": ["src/flask/config.py"]},
+      {"turn": 2, "query": "Flask config from envvar SQLALCHEMY_DATABASE_URI", "expected_files": ["src/flask/config.py"]},
+      {"turn": 3, "query": "Config from_pyfile from_object", "expected_files": ["src/flask/config.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-vague-async-003",
+    "category": "vague",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "concurrent async handlers", "expected_files": ["src/flask/app.py"]},
+      {"turn": 2, "query": "async view function ensure_sync", "expected_files": ["src/flask/app.py", "src/flask/sansio/app.py"]},
+      {"turn": 3, "query": "iscoroutinefunction wrap async view", "expected_files": ["src/flask/sansio/app.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-vague-error-004",
+    "category": "vague",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "when things go wrong how does the user see it", "expected_files": ["src/flask/app.py"]},
+      {"turn": 2, "query": "Flask error handler HTTPException catch", "expected_files": ["src/flask/sansio/app.py", "src/flask/sansio/scaffold.py"]},
+      {"turn": 3, "query": "debug page traceback DebugTraceback", "expected_files": ["src/flask/debughelpers.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-vague-startup-005",
+    "category": "vague",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "what runs when the server starts", "expected_files": ["src/flask/cli.py"]},
+      {"turn": 2, "query": "flask run command Werkzeug dev server", "expected_files": ["src/flask/cli.py", "src/flask/app.py"]},
+      {"turn": 3, "query": "before_first_request setup_hook init", "expected_files": ["src/flask/sansio/scaffold.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-trace-template-006",
+    "category": "trace",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "rendering with variables", "expected_files": ["src/flask/templating.py"]},
+      {"turn": 2, "query": "Jinja Environment update render", "expected_files": ["src/flask/templating.py"]},
+      {"turn": 3, "query": "blueprint template loader dispatch", "expected_files": ["src/flask/templating.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-trace-context-007",
+    "category": "trace",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "thread safety per request", "expected_files": ["src/flask/ctx.py"]},
+      {"turn": 2, "query": "context local storage werkzeug", "expected_files": ["src/flask/globals.py"]},
+      {"turn": 3, "query": "RequestContext copy push", "expected_files": ["src/flask/ctx.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-trace-blueprint-008",
+    "category": "trace",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "splitting routes into modules", "expected_files": ["src/flask/blueprints.py", "src/flask/sansio/blueprints.py"]},
+      {"turn": 2, "query": "register_blueprint url_prefix", "expected_files": ["src/flask/sansio/app.py"]},
+      {"turn": 3, "query": "nested blueprint cli_group", "expected_files": ["src/flask/sansio/blueprints.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-disco-static-009",
+    "category": "discover",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "serving static assets", "expected_files": ["src/flask/sansio/scaffold.py"]},
+      {"turn": 2, "query": "send_static_file routes", "expected_files": ["src/flask/sansio/scaffold.py", "src/flask/helpers.py"]},
+      {"turn": 3, "query": "MAX_CONTENT_LENGTH static folder", "expected_files": ["src/flask/sansio/scaffold.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-disco-json-010",
+    "category": "discover",
+    "fixture": "flask",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "encoding data into the response body", "expected_files": ["src/flask/json/__init__.py"]},
+      {"turn": 2, "query": "JSONProvider dumps datetime", "expected_files": ["src/flask/json/provider.py"]},
+      {"turn": 3, "query": "DefaultJSONProvider _default", "expected_files": ["src/flask/json/provider.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-trace-session-011",
+    "category": "trace",
+    "fixture": "flask",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "remembering things between requests", "expected_files": ["src/flask/sessions.py"]},
+      {"turn": 2, "query": "session cookie sign timestamp", "expected_files": ["src/flask/sessions.py"]},
+      {"turn": 3, "query": "SecureCookieSessionInterface save_session", "expected_files": ["src/flask/sessions.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-vague-view-012",
+    "category": "vague",
+    "fixture": "flask",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "organizing handlers as classes", "expected_files": ["src/flask/views.py"]},
+      {"turn": 2, "query": "MethodView class based handler", "expected_files": ["src/flask/views.py"]},
+      {"turn": 3, "query": "View.as_view dispatch_request", "expected_files": ["src/flask/views.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-vague-typing-013",
+    "category": "vague",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "type hints for return values", "expected_files": ["src/flask/typing.py"]},
+      {"turn": 2, "query": "ResponseReturnValue ResponseClass alias", "expected_files": ["src/flask/typing.py"]},
+      {"turn": 3, "query": "BeforeRequestCallable AfterRequestCallable", "expected_files": ["src/flask/typing.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-disco-signals-014",
+    "category": "discover",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "subscribing to lifecycle events", "expected_files": ["src/flask/signals.py"]},
+      {"turn": 2, "query": "request_started request_finished signal", "expected_files": ["src/flask/signals.py", "src/flask/app.py"]},
+      {"turn": 3, "query": "appcontext_pushed appcontext_popped", "expected_files": ["src/flask/signals.py"]}
+    ]
+  },
+  {
+    "id": "flask-hard-trace-debug-015",
+    "category": "trace",
+    "fixture": "flask",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "extra information when something breaks", "expected_files": ["src/flask/debughelpers.py"]},
+      {"turn": 2, "query": "explain_template_load_attempts debug", "expected_files": ["src/flask/debughelpers.py"]},
+      {"turn": 3, "query": "FormDataRoutingRedirect debug", "expected_files": ["src/flask/debughelpers.py"]}
+    ]
+  }
+]

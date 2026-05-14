@@ -1,0 +1,167 @@
+[
+  {
+    "id": "requests-hard-vague-session-001",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "reuse connections across requests", "expected_files": ["src/requests/sessions.py"]},
+      {"turn": 2, "query": "HTTPAdapter mount connection pool", "expected_files": ["src/requests/adapters.py"]},
+      {"turn": 3, "query": "PoolManager urllib3 reuse", "expected_files": ["src/requests/adapters.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-redirect-002",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "following http redirects", "expected_files": ["src/requests/sessions.py"]},
+      {"turn": 2, "query": "resolve_redirects 301 302 chain", "expected_files": ["src/requests/sessions.py"]},
+      {"turn": 3, "query": "TooManyRedirects max_redirects exception", "expected_files": ["src/requests/exceptions.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-stream-003",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "downloading large files efficiently", "expected_files": ["src/requests/models.py"]},
+      {"turn": 2, "query": "Response iter_content chunk_size", "expected_files": ["src/requests/models.py"]},
+      {"turn": 3, "query": "stream True raw urllib3", "expected_files": ["src/requests/models.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-auth-004",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "user credentials sent with each call", "expected_files": ["src/requests/auth.py"]},
+      {"turn": 2, "query": "HTTPBasicAuth header b64", "expected_files": ["src/requests/auth.py"]},
+      {"turn": 3, "query": "rebuild_auth strip credentials cross-host", "expected_files": ["src/requests/sessions.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-cookie-005",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "tracking state between calls", "expected_files": ["src/requests/cookies.py"]},
+      {"turn": 2, "query": "RequestsCookieJar set_cookie", "expected_files": ["src/requests/cookies.py"]},
+      {"turn": 3, "query": "session cookies persisted between sends", "expected_files": ["src/requests/sessions.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-tls-006",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "encrypted connections", "expected_files": ["src/requests/adapters.py"]},
+      {"turn": 2, "query": "SSLContext verify cert chain", "expected_files": ["src/requests/adapters.py"]},
+      {"turn": 3, "query": "certifi ca bundle location", "expected_files": ["src/requests/certs.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-trace-prepared-007",
+    "category": "trace",
+    "fixture": "requests",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "how the http request is built before sending", "expected_files": ["src/requests/models.py"]},
+      {"turn": 2, "query": "PreparedRequest prepare_url quote", "expected_files": ["src/requests/models.py"]},
+      {"turn": 3, "query": "prepare_body multipart files", "expected_files": ["src/requests/models.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-disco-proxy-008",
+    "category": "discover",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "routing through a corporate gateway", "expected_files": ["src/requests/utils.py"]},
+      {"turn": 2, "query": "select_proxy by URL scheme", "expected_files": ["src/requests/utils.py"]},
+      {"turn": 3, "query": "proxy_headers basic auth send", "expected_files": ["src/requests/adapters.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-disco-encoding-009",
+    "category": "discover",
+    "fixture": "requests",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "guess what charset the body is in", "expected_files": ["src/requests/utils.py"]},
+      {"turn": 2, "query": "get_encoding_from_headers content-type", "expected_files": ["src/requests/utils.py"]},
+      {"turn": 3, "query": "get_encodings_from_content meta", "expected_files": ["src/requests/utils.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-error-010",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "things that can go wrong on the wire", "expected_files": ["src/requests/exceptions.py"]},
+      {"turn": 2, "query": "ConnectionError Timeout HTTPError types", "expected_files": ["src/requests/exceptions.py"]},
+      {"turn": 3, "query": "InvalidURL ChunkedEncodingError", "expected_files": ["src/requests/exceptions.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-trace-hooks-011",
+    "category": "trace",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "intercept the response and modify it", "expected_files": ["src/requests/hooks.py"]},
+      {"turn": 2, "query": "dispatch_hook response callable", "expected_files": ["src/requests/hooks.py"]},
+      {"turn": 3, "query": "session hooks dict register", "expected_files": ["src/requests/sessions.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-headers-012",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "case insensitive metadata storage", "expected_files": ["src/requests/structures.py"]},
+      {"turn": 2, "query": "CaseInsensitiveDict iter", "expected_files": ["src/requests/structures.py"]},
+      {"turn": 3, "query": "default user agent build", "expected_files": ["src/requests/utils.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-trace-status-013",
+    "category": "trace",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "what does 404 mean", "expected_files": ["src/requests/status_codes.py"]},
+      {"turn": 2, "query": "LookupDict status_codes mapping", "expected_files": ["src/requests/status_codes.py"]},
+      {"turn": 3, "query": "raise_for_status HTTPError", "expected_files": ["src/requests/models.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-disco-compat-014",
+    "category": "discover",
+    "fixture": "requests",
+    "anchor_shift": "diff-module",
+    "turns": [
+      {"turn": 1, "query": "python 2 vs 3 differences", "expected_files": ["src/requests/compat.py"]},
+      {"turn": 2, "query": "string bytes types import", "expected_files": ["src/requests/compat.py"]},
+      {"turn": 3, "query": "urllib3 chardet packages re-export", "expected_files": ["src/requests/packages.py"]}
+    ]
+  },
+  {
+    "id": "requests-hard-vague-help-015",
+    "category": "vague",
+    "fixture": "requests",
+    "anchor_shift": "same-module",
+    "turns": [
+      {"turn": 1, "query": "diagnose ssl issues at runtime", "expected_files": ["src/requests/help.py"]},
+      {"turn": 2, "query": "system_ssl info dict", "expected_files": ["src/requests/help.py"]},
+      {"turn": 3, "query": "implementation Python version detect", "expected_files": ["src/requests/help.py"]}
+    ]
+  }
+]

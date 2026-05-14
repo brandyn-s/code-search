@@ -154,6 +154,7 @@ def run_bundle(server, bundle: dict) -> dict:
         "id": bundle.get("id"),
         "category": bundle.get("category"),
         "fixture": bundle.get("fixture"),
+        "anchor_shift": bundle.get("anchor_shift"),
         "turns": turn_rows,
         "cumulative": cumulative,
     }
@@ -189,6 +190,30 @@ def aggregate(bundles_out: list[dict]) -> dict:
             "hr_10": sum(1 for r in rows if r["hit_10"]) / n,
         }
 
+    # Stratify by anchor_shift (Phase C' A/B): same-module vs diff-module
+    # Hypothesis: on requests, later-turn queries that target a DIFFERENT
+    # module from turn-1 (diff-module) underperform same-module bundles
+    # because the retrieval stack anchors on turn-1's context.
+    per_turn_by_anchor: dict[str, dict[int, dict]] = {}
+    for shift in ("same-module", "diff-module"):
+        shift_bundles = [b for b in bundles_out
+                         if b.get("anchor_shift") == shift]
+        if not shift_bundles:
+            continue
+        by_turn_shift: dict[int, list[dict]] = {}
+        for b in shift_bundles:
+            for t in b["turns"]:
+                by_turn_shift.setdefault(t["turn"], []).append(t)
+        per_turn_by_anchor[shift] = {}
+        for tno, rows in sorted(by_turn_shift.items()):
+            n = len(rows)
+            per_turn_by_anchor[shift][tno] = {
+                "n": n,
+                "hr_1": sum(1 for r in rows if r["hit_1"]) / n,
+                "hr_5": sum(1 for r in rows if r["hit_5"]) / n,
+                "hr_10": sum(1 for r in rows if r["hit_10"]) / n,
+            }
+
     return {
         "n_bundles": n_bundles,
         "recall_at_5_in_3_turns": recall_5_3,
@@ -196,6 +221,7 @@ def aggregate(bundles_out: list[dict]) -> dict:
         "median_first_turn_to_gold": median_ftg,
         "bundles_finding_gold_within_budget": gold_found_count,
         "per_turn": per_turn,
+        "per_turn_by_anchor_shift": per_turn_by_anchor,
     }
 
 
@@ -254,6 +280,15 @@ def main() -> int:
     for tno, m in agg["per_turn"].items():
         print(f"    turn {tno}: n={m['n']:>3}  HR@1={m['hr_1']:.3f}  "
               f"HR@5={m['hr_5']:.3f}  HR@10={m['hr_10']:.3f}", flush=True)
+    if agg.get("per_turn_by_anchor_shift"):
+        print("\n  per-turn stratified by anchor_shift (Phase C' A/B):",
+              flush=True)
+        for shift, turns in agg["per_turn_by_anchor_shift"].items():
+            print(f"    [{shift}]", flush=True)
+            for tno, m in turns.items():
+                print(f"      turn {tno}: n={m['n']:>3}  HR@1={m['hr_1']:.3f}  "
+                      f"HR@5={m['hr_5']:.3f}  HR@10={m['hr_10']:.3f}",
+                      flush=True)
     print(f"\nWritten to {out_path}", flush=True)
     return 0
 
