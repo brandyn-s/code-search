@@ -1,0 +1,122 @@
+[
+  {
+    "id": "requests-session-001",
+    "category": "trace",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "requests Session object send dispatch", "expected_files": ["src/requests/sessions.py"]},
+      {"turn": 2, "query": "HTTPAdapter mount connection pool", "expected_files": ["src/requests/adapters.py", "src/requests/sessions.py"]},
+      {"turn": 3, "query": "send method through adapter", "expected_files": ["src/requests/adapters.py"]}
+    ]
+  },
+  {
+    "id": "requests-auth-002",
+    "category": "trace",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "HTTPBasicAuth Authorization header", "expected_files": ["src/requests/auth.py"]},
+      {"turn": 2, "query": "HTTPDigestAuth challenge response", "expected_files": ["src/requests/auth.py"]},
+      {"turn": 3, "query": "rebuild auth on redirect host change", "expected_files": ["src/requests/sessions.py"]}
+    ]
+  },
+  {
+    "id": "requests-cookie-003",
+    "category": "trace",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "RequestsCookieJar set get cookie", "expected_files": ["src/requests/cookies.py"]},
+      {"turn": 2, "query": "extract_cookies_to_jar from response", "expected_files": ["src/requests/cookies.py"]},
+      {"turn": 3, "query": "merge_cookies session cookies", "expected_files": ["src/requests/cookies.py", "src/requests/sessions.py"]}
+    ]
+  },
+  {
+    "id": "requests-prepared-004",
+    "category": "trace",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "PreparedRequest body encoding", "expected_files": ["src/requests/models.py"]},
+      {"turn": 2, "query": "prepare_url quote unicode", "expected_files": ["src/requests/models.py"]},
+      {"turn": 3, "query": "prepare_body multipart files form", "expected_files": ["src/requests/models.py"]}
+    ]
+  },
+  {
+    "id": "requests-response-005",
+    "category": "trace",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "Response iter_content streaming", "expected_files": ["src/requests/models.py"]},
+      {"turn": 2, "query": "iter_lines decoded utf-8", "expected_files": ["src/requests/models.py"]},
+      {"turn": 3, "query": "Response raise_for_status http error", "expected_files": ["src/requests/models.py", "src/requests/exceptions.py"]}
+    ]
+  },
+  {
+    "id": "requests-ssl-006",
+    "category": "discover",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "certificate verify location ca bundle", "expected_files": ["src/requests/certs.py", "src/requests/adapters.py"]},
+      {"turn": 2, "query": "verify SSL bool path session", "expected_files": ["src/requests/adapters.py", "src/requests/sessions.py"]},
+      {"turn": 3, "query": "TLS context SSLContext", "expected_files": ["src/requests/adapters.py"]}
+    ]
+  },
+  {
+    "id": "requests-proxy-007",
+    "category": "discover",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "proxy from environment HTTPS_PROXY", "expected_files": ["src/requests/utils.py", "src/requests/sessions.py"]},
+      {"turn": 2, "query": "select_proxy by URL scheme", "expected_files": ["src/requests/utils.py"]},
+      {"turn": 3, "query": "proxy_headers basic auth string", "expected_files": ["src/requests/utils.py", "src/requests/adapters.py"]}
+    ]
+  },
+  {
+    "id": "requests-exception-008",
+    "category": "discover",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "ConnectionError Timeout HTTPError", "expected_files": ["src/requests/exceptions.py"]},
+      {"turn": 2, "query": "TooManyRedirects raised when over limit", "expected_files": ["src/requests/exceptions.py", "src/requests/sessions.py"]},
+      {"turn": 3, "query": "InvalidURL ChunkedEncodingError", "expected_files": ["src/requests/exceptions.py"]}
+    ]
+  },
+  {
+    "id": "requests-hook-009",
+    "category": "trace",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "dispatch_hook response hook callable", "expected_files": ["src/requests/hooks.py"]},
+      {"turn": 2, "query": "register hooks on session response", "expected_files": ["src/requests/hooks.py", "src/requests/sessions.py"]},
+      {"turn": 3, "query": "default_hooks dict empty", "expected_files": ["src/requests/hooks.py"]}
+    ]
+  },
+  {
+    "id": "requests-redirect-010",
+    "category": "trace",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "resolve_redirects follow 301 302 chain", "expected_files": ["src/requests/sessions.py"]},
+      {"turn": 2, "query": "max_redirects limit Too Many", "expected_files": ["src/requests/sessions.py", "src/requests/exceptions.py"]},
+      {"turn": 3, "query": "rebuild_proxies after redirect", "expected_files": ["src/requests/sessions.py"]}
+    ]
+  },
+  {
+    "id": "requests-structures-011",
+    "category": "discover",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "CaseInsensitiveDict headers", "expected_files": ["src/requests/structures.py"]},
+      {"turn": 2, "query": "LookupDict status codes mapping", "expected_files": ["src/requests/structures.py", "src/requests/status_codes.py"]},
+      {"turn": 3, "query": "OrderedDict alternative", "expected_files": ["src/requests/structures.py"]}
+    ]
+  },
+  {
+    "id": "requests-utils-012",
+    "category": "discover",
+    "fixture": "requests",
+    "turns": [
+      {"turn": 1, "query": "default_user_agent header string", "expected_files": ["src/requests/utils.py"]},
+      {"turn": 2, "query": "get_encoding_from_headers content type", "expected_files": ["src/requests/utils.py"]},
+      {"turn": 3, "query": "guess_filename from content disposition", "expected_files": ["src/requests/utils.py"]}
+    ]
+  }
+]

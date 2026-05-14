@@ -1,0 +1,152 @@
+[
+  {
+    "id": "flask-routing-001",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "Flask route decorator binding URL to view", "expected_files": ["src/flask/sansio/scaffold.py"]},
+      {"turn": 2, "query": "url_for build URL given endpoint name", "expected_files": ["src/flask/app.py", "src/flask/helpers.py"]},
+      {"turn": 3, "query": "Werkzeug routing Map adapter binding rule", "expected_files": ["src/flask/app.py"]}
+    ]
+  },
+  {
+    "id": "flask-session-002",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "Flask session interface open and save", "expected_files": ["src/flask/sessions.py"]},
+      {"turn": 2, "query": "secure cookie signing serializer", "expected_files": ["src/flask/sessions.py"]},
+      {"turn": 3, "query": "TaggedJSONSerializer used for sessions", "expected_files": ["src/flask/json/tag.py"]}
+    ]
+  },
+  {
+    "id": "flask-context-003",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "request context push pop teardown", "expected_files": ["src/flask/ctx.py"]},
+      {"turn": 2, "query": "globals proxy request and session", "expected_files": ["src/flask/globals.py"]},
+      {"turn": 3, "query": "ContextVar _cv_request token reset", "expected_files": ["src/flask/ctx.py"]}
+    ]
+  },
+  {
+    "id": "flask-blueprint-004",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "Blueprint register on app with url_prefix", "expected_files": ["src/flask/blueprints.py", "src/flask/sansio/blueprints.py"]},
+      {"turn": 2, "query": "Blueprint nested child blueprint", "expected_files": ["src/flask/sansio/blueprints.py"]},
+      {"turn": 3, "query": "Blueprint CLI command group", "expected_files": ["src/flask/blueprints.py"]}
+    ]
+  },
+  {
+    "id": "flask-error-005",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "register error handler for HTTPException", "expected_files": ["src/flask/sansio/scaffold.py", "src/flask/sansio/app.py"]},
+      {"turn": 2, "query": "abort function raise http error", "expected_files": ["src/flask/helpers.py"]},
+      {"turn": 3, "query": "got_request_exception signal", "expected_files": ["src/flask/signals.py", "src/flask/app.py"]}
+    ]
+  },
+  {
+    "id": "flask-config-006",
+    "category": "discover",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "Flask config from envvar pyfile json", "expected_files": ["src/flask/config.py"]},
+      {"turn": 2, "query": "instance folder path config", "expected_files": ["src/flask/config.py", "src/flask/sansio/scaffold.py"]},
+      {"turn": 3, "query": "default config values FLASK_DEBUG", "expected_files": ["src/flask/config.py", "src/flask/sansio/app.py"]}
+    ]
+  },
+  {
+    "id": "flask-jinja-007",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "render_template Jinja environment", "expected_files": ["src/flask/templating.py"]},
+      {"turn": 2, "query": "DispatchingJinjaLoader app and blueprint", "expected_files": ["src/flask/templating.py"]},
+      {"turn": 3, "query": "context processors template globals", "expected_files": ["src/flask/app.py", "src/flask/sansio/app.py"]}
+    ]
+  },
+  {
+    "id": "flask-cli-008",
+    "category": "discover",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "flask run cli command click group", "expected_files": ["src/flask/cli.py"]},
+      {"turn": 2, "query": "ScriptInfo lazy app loader", "expected_files": ["src/flask/cli.py"]},
+      {"turn": 3, "query": "load dotenv FLASK_APP env", "expected_files": ["src/flask/cli.py", "src/flask/helpers.py"]}
+    ]
+  },
+  {
+    "id": "flask-testing-009",
+    "category": "discover",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "FlaskClient test client get post", "expected_files": ["src/flask/testing.py"]},
+      {"turn": 2, "query": "session_transaction test cli runner", "expected_files": ["src/flask/testing.py"]},
+      {"turn": 3, "query": "EnvironBuilder build wsgi environ", "expected_files": ["src/flask/testing.py"]}
+    ]
+  },
+  {
+    "id": "flask-response-010",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "Response set_cookie wrappers", "expected_files": ["src/flask/wrappers.py"]},
+      {"turn": 2, "query": "make_response from view return value", "expected_files": ["src/flask/app.py", "src/flask/sansio/app.py"]},
+      {"turn": 3, "query": "stream_with_context generator response", "expected_files": ["src/flask/helpers.py"]}
+    ]
+  },
+  {
+    "id": "flask-json-011",
+    "category": "discover",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "jsonify return JSON response", "expected_files": ["src/flask/json/__init__.py"]},
+      {"turn": 2, "query": "JSONProvider customize dumps loads", "expected_files": ["src/flask/json/provider.py"]},
+      {"turn": 3, "query": "DefaultJSONProvider default serializer", "expected_files": ["src/flask/json/provider.py"]}
+    ]
+  },
+  {
+    "id": "flask-view-012",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "MethodView class based view", "expected_files": ["src/flask/views.py"]},
+      {"turn": 2, "query": "as_view dispatch_request", "expected_files": ["src/flask/views.py"]},
+      {"turn": 3, "query": "View http_method_funcs", "expected_files": ["src/flask/views.py"]}
+    ]
+  },
+  {
+    "id": "flask-signal-013",
+    "category": "discover",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "Flask signals appcontext_pushed connect", "expected_files": ["src/flask/signals.py"]},
+      {"turn": 2, "query": "got_request_exception receivers", "expected_files": ["src/flask/signals.py", "src/flask/app.py"]},
+      {"turn": 3, "query": "blinker namespace optional dep", "expected_files": ["src/flask/signals.py"]}
+    ]
+  },
+  {
+    "id": "flask-helper-014",
+    "category": "discover",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "send_file send_from_directory", "expected_files": ["src/flask/helpers.py"]},
+      {"turn": 2, "query": "get_debug_flag environment", "expected_files": ["src/flask/helpers.py"]},
+      {"turn": 3, "query": "flash get_flashed_messages session", "expected_files": ["src/flask/helpers.py"]}
+    ]
+  },
+  {
+    "id": "flask-async-015",
+    "category": "trace",
+    "fixture": "flask",
+    "turns": [
+      {"turn": 1, "query": "async view function support", "expected_files": ["src/flask/app.py", "src/flask/sansio/app.py"]},
+      {"turn": 2, "query": "ensure_sync run async coroutine", "expected_files": ["src/flask/app.py", "src/flask/sansio/app.py"]},
+      {"turn": 3, "query": "iscoroutinefunction wrapper", "expected_files": ["src/flask/app.py"]}
+    ]
+  }
+]
