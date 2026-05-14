@@ -543,6 +543,41 @@ class IntelligentSearcher:
             }
             return []
         if rerank_mode == "sonnet" and len(candidates) > k:
+            # Phase B'''(b) skip-threshold gate (opt-in, default off):
+            # SONNET_RERANKER_SKIP_THRESHOLD allows operators to skip Sonnet
+            # entirely when the hybrid top-1 score already exceeds a
+            # confidence floor. Motivation: the 2026-05-14 Phase B''
+            # labeling analysis identified ~7% of harvested queries where
+            # Sonnet at pool=5 CORRUPTS already-perfect hybrid rank-1
+            # results. Skipping Sonnet on high-confidence queries preserves
+            # the rank-1 + saves ~4-5s latency. Threshold is corpus-
+            # specific — set per-deployment based on local similarity_score
+            # distribution. See CLAUDE.md SONNET_RERANKER_SKIP_THRESHOLD
+            # for tuning guidance.
+            skip_threshold_raw = os.environ.get(
+                "SONNET_RERANKER_SKIP_THRESHOLD")
+            if skip_threshold_raw:
+                try:
+                    skip_threshold = float(skip_threshold_raw)
+                except ValueError:
+                    skip_threshold = 0.0
+                top_1_score = candidates[0].similarity_score
+                if skip_threshold > 0 and top_1_score >= skip_threshold:
+                    self._logger.info(
+                        "[RERANK_REASON] skipped_high_confidence "
+                        "top_1_score=%.4f threshold=%.4f "
+                        "n_candidates=%d; preserved hybrid order",
+                        top_1_score, skip_threshold, len(candidates),
+                    )
+                    self.last_reranker_metadata = {
+                        "applied": False,
+                        "reason": "skipped_high_confidence",
+                        "latency_ms": 0,
+                        "top_1_score": top_1_score,
+                        "skip_threshold": skip_threshold,
+                    }
+                    return candidates[:k]
+
             from search.sonnet_reranker import rerank_with_sonnet
 
             # Rerank only the top-15 candidates (D4b validated: top-30 is
