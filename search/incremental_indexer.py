@@ -13,6 +13,7 @@ from merkle.snapshot_manager import SnapshotManager
 from chunking.multi_language_chunker import MultiLanguageChunker
 from embeddings.embedder import CodeEmbedder
 from search.indexer import CodeIndexManager as Indexer
+from search.path_validation import refuse_as_project_root_reason
 
 logger = logging.getLogger(__name__)
 
@@ -578,6 +579,30 @@ class IncrementalIndexer:
         import time
 
         start_time = time.time()
+
+        # U2 (2026-05-13): refuse to reindex home/root/workspace paths.
+        # The Phase A refuse-check in `ensure_project_indexed` (caller side)
+        # prevents new orphan entries from being created, but pre-existing
+        # orphan entries in `~/.claude_code_search/projects/` from older
+        # server versions would otherwise still trigger a full-index walk
+        # on every 5-min cron tick. Defense-in-depth: skip them here too.
+        refuse = refuse_as_project_root_reason(project_path)
+        if refuse:
+            logger.warning(
+                "[REINDEX_PROGRESS] auto_reindex_if_needed: REFUSED "
+                "project=%s reason=%s. Delete the orphan entry via "
+                "clear_index/delete_project or filesystem rm.",
+                project_name, refuse,
+            )
+            return IncrementalIndexResult(
+                files_added=0,
+                files_removed=0,
+                files_modified=0,
+                chunks_added=0,
+                chunks_removed=0,
+                time_taken=time.time() - start_time,
+                success=True,
+            )
 
         if os.environ.get("CODE_SEARCH_DISABLE_AUTO_REINDEX", "").lower() in (
             "1", "true", "yes", "on"
