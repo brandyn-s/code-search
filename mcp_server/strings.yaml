@@ -38,6 +38,9 @@ tools:
   verify_index_integrity: |
     Verify per-project consistency between the canonical chunk_ids.pkl and the dependent artifacts (fts5.db, metadata.db, stats.json) for every indexed project (or one project if `project` prefix is given). Treats chunk_ids.pkl as the single source of truth — surfaces fts5 orphans, metadata orphans, and stats.json drift as actionable counts. Returns JSON with per-project entries (status: clean | inconsistent | unscannable) and a summary block. When inconsistencies exist, the response includes a `remediation` field pointing at `scripts/cleanup_index_orphans.py --apply-all` (run with the MCP server quiesced). Read-only — never modifies state.
 
+  get_file_context: |
+    Returns the chunks code-search has indexed for a specific file (and optionally a line-range window). Bridges from "I'm reading this file" to "what does code-search have indexed for this region" without forcing a search query. Takes file_path (string, matched as exact or suffix against relative_path), optional line_range string in "start-end" format, and optional max_chunks (default 20). Returns JSON with matched_path, total_chunks_in_file, and a sorted chunks array (chunk_id, start_line, end_line, chunk_type, name, parent_name, tags, content_preview). Useful for inspecting what is indexed for a specific file without running a search, triaging "what was indexed here when this file changed", and debugging "why didn't this chunk surface for this query". Read-only.
+
 help: |
   # Find similar code
 

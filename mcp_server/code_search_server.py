@@ -2003,3 +2003,119 @@ class CodeSearchServer:
             error_msg = f"Cancel indexing failed: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return json.dumps({"success": False, "error": error_msg})
+
+    def get_file_context(
+        self,
+        file_path: str,
+        line_range: Optional[str] = None,
+        max_chunks: int = 20,
+    ) -> str:
+        """Implementation of get_file_context tool.
+
+        Returns indexed chunks that cover `file_path` (and optionally a
+        line-range window). Bridges from "I'm reading this file" to "what
+        does code-search have indexed for this location" without forcing
+        a search query.
+        """
+        try:
+            index_manager = self.get_index_manager()
+
+            # Parse line_range if provided
+            line_lo: Optional[int] = None
+            line_hi: Optional[int] = None
+            if line_range:
+                try:
+                    parts = line_range.split("-")
+                    if len(parts) != 2:
+                        raise ValueError("expected format: 'start-end'")
+                    line_lo = int(parts[0].strip())
+                    line_hi = int(parts[1].strip())
+                    if line_lo > line_hi:
+                        raise ValueError(
+                            f"start ({line_lo}) > end ({line_hi})"
+                        )
+                except (ValueError, AttributeError) as ve:
+                    return json.dumps({
+                        "error": f"Invalid line_range '{line_range}': {ve}",
+                        "expected_format": "start-end (e.g., '10-50')",
+                    })
+
+            # Match path: tolerant of forward/back slash and substring matches.
+            # The user typically provides an absolute path or a project-relative
+            # path; the index stores `relative_path` (project-relative). Try
+            # exact match first; fall back to substring on either form.
+            target_norm = file_path.replace("\\", "/")
+
+            file_chunks: list[dict] = []
+            matched_path: Optional[str] = None
+
+            for chunk_id in index_manager._chunk_ids:
+                entry = index_manager.metadata_db.get(chunk_id)
+                if not entry:
+                    continue
+                metadata = entry.get("metadata", {})
+                rel = metadata.get("relative_path") or metadata.get("file_path") or ""
+                rel_norm = rel.replace("\\", "/")
+
+                # Exact match OR suffix match (handle absolute paths)
+                if rel_norm != target_norm and not rel_norm.endswith(target_norm) \
+                        and not target_norm.endswith(rel_norm):
+                    continue
+
+                if matched_path is None:
+                    matched_path = rel
+
+                start = metadata.get("start_line")
+                end = metadata.get("end_line")
+
+                # Line-range overlap check (inclusive). Chunks with no line
+                # info are kept (whole-file shape like Markdown sections).
+                if line_lo is not None and line_hi is not None:
+                    if start is not None and end is not None:
+                        # No overlap if chunk ends before range start
+                        # or chunk starts after range end
+                        if end < line_lo or start > line_hi:
+                            continue
+
+                content = metadata.get("full_content") or metadata.get("content_preview", "")
+                preview = (content or "")[:200]
+
+                file_chunks.append({
+                    "chunk_id": chunk_id,
+                    "start_line": start,
+                    "end_line": end,
+                    "chunk_type": metadata.get("chunk_type"),
+                    "name": metadata.get("name"),
+                    "parent_name": metadata.get("parent_name"),
+                    "tags": metadata.get("tags", []),
+                    "content_preview": preview,
+                })
+
+            # Sort by start_line (None last) for predictable output.
+            file_chunks.sort(key=lambda c: (c["start_line"] is None, c["start_line"] or 0))
+            total = len(file_chunks)
+            truncated = total > max_chunks
+            returned = file_chunks[:max_chunks]
+
+            response: dict = {
+                "file_path": file_path,
+                "matched_path": matched_path,
+                "line_range": line_range,
+                "total_chunks_in_file": total,
+                "chunks_returned": len(returned),
+                "truncated": truncated,
+                "chunks": returned,
+            }
+
+            if matched_path is None:
+                response["hint"] = (
+                    "No chunks found. Check that the file is in the active "
+                    "project's index (use list_projects + switch_project) and "
+                    "that the path matches as exact, suffix, or basename."
+                )
+
+            return json.dumps(response, indent=2)
+        except Exception as e:
+            error_msg = f"get_file_context failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return json.dumps({"error": error_msg})

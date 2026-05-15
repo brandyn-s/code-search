@@ -26,6 +26,7 @@ TOOL_ANNOTATIONS = {
     "delete_project": ToolAnnotations(destructiveHint=True, idempotentHint=False),
     "cancel_indexing": ToolAnnotations(destructiveHint=True, idempotentHint=True),
     "verify_index_integrity": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "get_file_context": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
 }
 
 
