@@ -41,6 +41,9 @@ tools:
   get_file_context: |
     Returns the chunks code-search has indexed for a specific file (and optionally a line-range window). Bridges from "I'm reading this file" to "what does code-search have indexed for this region" without forcing a search query. Takes file_path (string, matched as exact or suffix against relative_path), optional line_range string in "start-end" format, and optional max_chunks (default 20). Returns JSON with matched_path, total_chunks_in_file, and a sorted chunks array (chunk_id, start_line, end_line, chunk_type, name, parent_name, tags, content_preview). Useful for inspecting what is indexed for a specific file without running a search, triaging "what was indexed here when this file changed", and debugging "why didn't this chunk surface for this query". Read-only.
 
+  code_localize: |
+    Aggregates chunk-level search_code results into a file-level ranking. Best for VERBOSE natural-language issues where the consumer needs file paths, not chunks (e.g. "where would I add support for X?", "what files implement Y?"). Takes query (string), k (top files to return, default 10), max_chunks_per_search (internal chunk pool, default 50), and search_mode (passed through to search_code, default "auto"). Each file's score combines max chunk similarity (0.6 weight), log-scaled chunk count (0.3), and chunk-type diversity (0.1). Returns JSON with files array (file_path, score, max_similarity, chunk_count, chunk_types, top_chunks) plus the underlying search_code _metadata envelope. Wraps search_code so auto-reindex / reranker / freshness behavior is identical. Read-only.
+
 help: |
   # Find similar code
 

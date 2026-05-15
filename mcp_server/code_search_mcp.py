@@ -27,6 +27,7 @@ TOOL_ANNOTATIONS = {
     "cancel_indexing": ToolAnnotations(destructiveHint=True, idempotentHint=True),
     "verify_index_integrity": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "get_file_context": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "code_localize": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
 }
 
 

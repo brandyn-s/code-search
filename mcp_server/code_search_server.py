@@ -2119,3 +2119,143 @@ class CodeSearchServer:
             error_msg = f"get_file_context failed: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return json.dumps({"error": error_msg})
+
+    def code_localize(
+        self,
+        query: str,
+        k: int = 10,
+        max_chunks_per_search: int = 50,
+        search_mode: str = "auto",
+    ) -> str:
+        """Implementation of code_localize tool.
+
+        Aggregates chunk-level search_code results into a file-level
+        ranking. Useful for verbose natural-language issues ("where would
+        I add support for X?", "what files implement Y?") where the
+        consumer needs file paths, not chunks.
+
+        Score combines max chunk similarity, log-scaled chunk count, and
+        chunk-type diversity:
+
+            score = 0.6 * max_similarity
+                  + 0.3 * log10(1 + chunk_count)
+                  + 0.1 * min(1.0, distinct_chunk_types / 4)
+
+        max_similarity dominates (best-evidence chunk is the strongest
+        signal); chunk_count adds breadth (a file with 5 relevant chunks
+        beats one with 1 at similar peak score); chunk-type diversity
+        adds a small bonus (function+class+module > 3 functions of the
+        same type).
+        """
+        import math
+
+        try:
+            # Delegate to search_code for the chunk-level lookup, then
+            # aggregate. We deliberately call the same MCP-surface method
+            # rather than reaching into the underlying searcher so any
+            # cross-cutting concerns (auto-reindex, reranker, freshness
+            # metadata) apply uniformly.
+            chunk_response_json = self.search_code(
+                query=query,
+                k=max_chunks_per_search,
+                search_mode=search_mode,
+                file_pattern=None,
+                chunk_type=None,
+                include_context=True,
+                auto_reindex=True,
+            )
+            chunk_response = json.loads(chunk_response_json)
+
+            # Propagate errors / indexing-in-progress from search_code
+            if "error" in chunk_response:
+                return chunk_response_json
+            if chunk_response.get("indexing_in_progress"):
+                return chunk_response_json
+
+            chunks = chunk_response.get("results") or []
+            if not chunks:
+                return json.dumps({
+                    "query": query,
+                    "k": k,
+                    "files_returned": 0,
+                    "files": [],
+                    "underlying_search_metadata": chunk_response.get("_metadata", {}),
+                    "hint": (
+                        "search_code returned 0 chunks for this query. "
+                        "Check that a project is active (list_projects + "
+                        "switch_project) and that the query terms appear "
+                        "in the indexed corpus."
+                    ),
+                })
+
+            # Aggregate by file path
+            file_buckets: dict = {}
+            for c in chunks:
+                path = c.get("file") or ""
+                if not path:
+                    continue
+                bucket = file_buckets.setdefault(path, {
+                    "file_path": path,
+                    "max_similarity": 0.0,
+                    "chunk_count": 0,
+                    "chunk_types": set(),
+                    "chunk_entries": [],
+                })
+                sim = float(c.get("score") or 0.0)
+                bucket["max_similarity"] = max(bucket["max_similarity"], sim)
+                bucket["chunk_count"] += 1
+                ck_type = c.get("kind")
+                if ck_type:
+                    bucket["chunk_types"].add(ck_type)
+                bucket["chunk_entries"].append({
+                    "chunk_id": c.get("chunk_id"),
+                    "name": c.get("name"),
+                    "lines": c.get("lines"),
+                    "chunk_type": ck_type,
+                    "similarity_score": sim,
+                })
+
+            # Compute composite score per file
+            scored_files = []
+            for bucket in file_buckets.values():
+                chunk_types = bucket["chunk_types"]
+                diversity = min(1.0, len(chunk_types) / 4.0)
+                score = (
+                    0.6 * bucket["max_similarity"]
+                    + 0.3 * math.log10(1.0 + bucket["chunk_count"])
+                    + 0.1 * diversity
+                )
+                # Keep top 3 chunks per file in the response (sorted by sim
+                # descending). The full chunk list is recoverable via
+                # search_code or get_file_context if needed.
+                top_chunks = sorted(
+                    bucket["chunk_entries"],
+                    key=lambda c: -c["similarity_score"],
+                )[:3]
+                scored_files.append({
+                    "file_path": bucket["file_path"],
+                    "score": round(score, 4),
+                    "max_similarity": round(bucket["max_similarity"], 4),
+                    "chunk_count": bucket["chunk_count"],
+                    "chunk_types": sorted(chunk_types),
+                    "top_chunks": top_chunks,
+                })
+
+            # Sort by composite score descending, take top k
+            scored_files.sort(key=lambda f: -f["score"])
+            top = scored_files[:k]
+
+            response = {
+                "query": query,
+                "k": k,
+                "files_returned": len(top),
+                "total_files_seen": len(scored_files),
+                "files": top,
+                "scoring": "0.6*max_sim + 0.3*log10(1+chunk_count) + 0.1*type_diversity",
+                "underlying_search_metadata": chunk_response.get("_metadata", {}),
+            }
+            return json.dumps(response, indent=2)
+        except Exception as e:
+            error_msg = f"code_localize failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return json.dumps({"error": error_msg})
