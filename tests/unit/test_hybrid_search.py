@@ -123,6 +123,29 @@ def test_expand_query_passthrough_unknown():
     assert result == "foobar baz"
 
 
+def test_expand_query_stem_strips_whole_suffix_not_char_class():
+    """Stem must strip a whole suffix, not a character class.
+
+    Regression: prior implementation chained `token.rstrip("s").rstrip("ing")
+    .rstrip("tion").rstrip("ed")`. Each rstrip(<chars>) removes a SET of
+    trailing chars, not a suffix. So "navigations" stemmed to "naviga"
+    (s -> ing-chars -> tion-chars -> ed-chars), never matching the
+    CODE_SYNONYMS key "navigation". This test exercises the stem-equivalence
+    path that the existing tests don't (they pass the key directly).
+    """
+    from search.searcher import expand_code_query, _query_stem
+
+    # Direct stemmer assertions
+    assert _query_stem("navigations") == "navigation"
+    assert _query_stem("sensors") == "sensor"
+    assert _query_stem("logging") == "logg"  # strips "ing" suffix cleanly
+    assert _query_stem("powered") == "power"
+    assert _query_stem("xy") == "xy"  # too short to stem
+    # Stem-via-expansion: "sensors" should hit the "sensor" key and expand
+    expanded = expand_code_query("sensors data")
+    assert "internal-svc-62" in expanded.lower() or "internal-svc-51" in expanded.lower() or "internal-svc-28" in expanded.lower(), expanded
+
+
 def test_expand_query_nix_domain():
     """Nix-domain synonyms should expand network/service queries."""
     from search.searcher import expand_code_query

@@ -150,13 +150,29 @@ CODE_SYNONYMS = {
 }
 
 
+# Order matters: longest suffix first so "navigations" -> strip "s" (not "tion").
+# Each token has AT MOST one suffix stripped — we only need stem-equivalence to a
+# CODE_SYNONYMS key, not full English morphology. `str.rstrip(<chars>)` is a
+# character-class strip and was the prior implementation's bug
+# (e.g. "navigation".rstrip("ing") removes trailing n, producing "navigatio";
+# subsequent rstrip("tion") strips o/i/t producing "naviga" — never matches "navigation").
+_QUERY_STEM_SUFFIXES = ("tion", "ing", "ed", "s")
+
+
+def _query_stem(token: str) -> str:
+    for suffix in _QUERY_STEM_SUFFIXES:
+        if token.endswith(suffix) and len(token) > len(suffix) + 2:
+            return token[: -len(suffix)]
+    return token
+
+
 def expand_code_query(query: str) -> str:
     """Expand a query with code-domain synonyms for better BM25 recall."""
     tokens = query.lower().split()
     expanded_tokens = list(tokens)
 
     for token in tokens:
-        stem = token.rstrip("s").rstrip("ing").rstrip("tion").rstrip("ed")
+        stem = _query_stem(token)
         for key, synonyms in CODE_SYNONYMS.items():
             if token == key or stem == key or token in synonyms:
                 for syn in synonyms:
