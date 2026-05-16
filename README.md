@@ -84,9 +84,11 @@ Three embedding providers are available:
 
 MRR (Mean Reciprocal Rank) is measured on 102 golden queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo. A score of 0.828 means the correct answer is almost always the #1 result.
 
+> **Note (2026-05-14 multitarget baseline)**: The 0.828 figure above is the Voyage-only MRR measured 2026-04-26 on the original 102-query golden set. The current production stack adds a Sonnet 4.6 reranker (see "Reranking" below) and the most recent PSM multitarget eval reports golden MRR=0.670 / HR@1=0.569 and harvested real-session MRR=0.814 / HR@1=0.770 on a broader, harder query mix. See [benchmarks/eval_v4/run_psm-full-voyage-multitarget/summary.json](benchmarks/eval_v4/run_psm-full-voyage-multitarget/summary.json) and `CLAUDE.md` for the defended current numbers.
+
 **Why Voyage over local models?** The quality gap is enormous. Local sentence-transformers (all-MiniLM-L6-v2) score 0.35-0.45 MRR — the right answer is typically at position #3-5. Voyage-4-large scores 0.828 — position #1 almost every time. For an AI assistant consuming results in a token-limited context window, the difference between "right answer at #1" and "right answer at #4" means 3-4x fewer wasted tokens per query.
 
-**Why not reranking?** Cross-encoder reranking (rerank-2.5) was tested and *degraded* quality by -30% MRR. The cross-encoder reshuffles well-ranked RRF output into a worse order. This was counterintuitive — reranking usually helps — but the golden eval confirmed it consistently across all 4 languages. The reranker code is preserved for future evaluation but disabled by default.
+**Reranking.** The current default is **Sonnet 4.6 query-time reranking** (`RERANKER=sonnet`, validated 2026-05-03+ at +0.087 MRR / +0.137 HR@1 on n=183 multi-target real_session, see `CLAUDE.md`). Reranks top-15 hybrid candidates via Anthropic API with always-on graceful fallback to hybrid order. The earlier "cross-encoder rerank (rerank-2.5) degrades quality by -30% MRR" finding still holds and is preserved as the off-by-default `RERANKER=cross-encoder` legacy path; `RERANKER=off` skips reranking entirely.
 
 ### 3. Search (Hybrid BM25 + Vector with RRF Fusion)
 
