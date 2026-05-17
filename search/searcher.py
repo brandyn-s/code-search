@@ -634,6 +634,73 @@ class IntelligentSearcher:
                 "reason": "not_invoked_insufficient_candidates",
                 "latency_ms": 0,
             }
+        elif rerank_mode == "listwise" and len(candidates) > k:
+            # Listwise reranker (opt-in canary, validated 2026-05-16 Phase C
+            # v2 with bootstrap CI gates ALL PASS):
+            #   - PSM golden: +0.047 nDCG@10 CI [+0.004, +0.095] favorable
+            #   - PSM harvested: +0.044 MRR CI [+0.003, +0.084] favorable
+            #   - PSM nix subset: +0.008 MRR (parity confirmed, regression
+            #     from v1 reversed by nix-aware rubric clause)
+            #   - flask/requests adversarial: +0.13 to +0.22 MRR favorable
+            # Replaces pointwise (15 isolated Sonnet calls) with ONE
+            # comparative call. Architecturally cleaner: removes the
+            # slowest-of-15 latency pattern + arbitrary-tie behavior +
+            # per-domain pointwise inconsistency. Retires the
+            # SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES hack.
+            #
+            # Hard deadline default 10s per Phase C v2 simulated-deadline
+            # analysis (smallest deadline where all 4 fixtures stay
+            # favorable on MRR + nDCG@10; harvested applied 76.5% at 10s).
+            # On deadline/error/parse-failure, listwise returns baseline
+            # order — graceful fallback per the always-on contract.
+            #
+            # Override deadline via SONNET_LISTWISE_TIMEOUT env var.
+            from search.listwise_sonnet_reranker import (
+                listwise_rerank_with_sonnet,
+            )
+
+            n_to_rerank = min(15, len(candidates))
+            top_candidates = candidates[:n_to_rerank]
+            rerank_input = []
+            for r in top_candidates:
+                meta = metadata_lookup.get(r.chunk_id, {}) or {}
+                full = (meta.get("full_content")
+                        or meta.get("content")
+                        or r.content_preview
+                        or "")
+                rerank_input.append({
+                    "chunk_id": r.chunk_id,
+                    "file_path": r.relative_path,
+                    "name": r.name,
+                    "parent_name": r.parent_name,
+                    "chunk_type": r.chunk_type,
+                    "start_line": r.start_line,
+                    "end_line": r.end_line,
+                    "content_preview": full,
+                    "similarity_score": r.similarity_score,
+                    "_orig": r,
+                })
+            try:
+                listwise_timeout = float(
+                    os.environ.get("SONNET_LISTWISE_TIMEOUT", "10.0")
+                )
+            except ValueError:
+                listwise_timeout = 10.0
+            reranked, rerank_meta = listwise_rerank_with_sonnet(
+                query, rerank_input, top_k=k,
+                timeout=listwise_timeout,
+                return_metadata=True,
+            )
+            self.last_reranker_metadata = rerank_meta
+            new_top = [d["_orig"] for d in reranked]
+            tail = candidates[n_to_rerank:]
+            candidates = new_top + tail
+        elif rerank_mode == "listwise" and len(candidates) <= k:
+            self.last_reranker_metadata = {
+                "applied": False,
+                "reason": "not_invoked_insufficient_candidates",
+                "latency_ms": 0,
+            }
         elif rerank_mode == "cross-encoder" and candidates:
             # Legacy cross-encoder path (off by default; degrades quality
             # per 2026-03-22 A/B eval but kept for fallback/comparison).
