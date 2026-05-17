@@ -70,6 +70,13 @@ RANKING RUBRIC:
 - Exact symbol, function, class, method, file, or error-string matches are strong evidence.
 - Implementation code usually ranks above call sites, tests, docs, or examples,
   unless the query explicitly asks for those.
+- For Nix/NixOS/configuration queries, treat `option` and `binding` chunks as primary
+  definitions. If the query asks about `mkOption`, `services.<name>`, enable /
+  configuration / module setup, systemd service configuration, hardware configuration,
+  or NixOS modules, prefer the Nix module or option declaration over daemon
+  implementation code, tests, call sites, or docs. For service setup queries,
+  `nix/modules/<service>.nix` is usually the implementation of the user-visible
+  configuration surface.
 - Prefer specific local evidence over broad topical similarity.
 - If two candidates are equally relevant, preserve their lower baseline_rank.
 - Every candidate ID MUST appear exactly once in ranked_ids.
@@ -90,9 +97,13 @@ def _candidate_id(i: int) -> str:
 
 
 def _extract_snippet(cand: dict) -> str:
-    """Pull snippet preview from candidate; cap to SNIPPET_MAX_LINES lines."""
+    """Pull snippet preview from candidate; cap to SNIPPET_MAX_LINES lines.
+
+    Accepts dataclass-shape (content_preview) and MCP-JSON-shape (snippet).
+    """
     body = (
         cand.get("content_preview")
+        or cand.get("snippet")
         or cand.get("content")
         or cand.get("full_content")
         or ""
@@ -113,9 +124,10 @@ def _extract_path(cand: dict) -> str:
 
 
 def _extract_symbol(cand: dict) -> str:
+    """Accepts dataclass-shape (chunk_type) and MCP-JSON-shape (kind)."""
     name = cand.get("name") or ""
     parent = cand.get("parent_name") or ""
-    chunk_type = cand.get("chunk_type") or ""
+    chunk_type = cand.get("chunk_type") or cand.get("kind") or ""
     if parent and name:
         return f"{chunk_type} {parent}.{name}".strip()
     if name:
@@ -124,10 +136,14 @@ def _extract_symbol(cand: dict) -> str:
 
 
 def _extract_lines(cand: dict) -> str:
+    """Accepts both (start_line, end_line) tuple-shape and string "N-M" shape."""
     s = cand.get("start_line")
     e = cand.get("end_line")
     if s is not None and e is not None:
         return f"{s}-{e}"
+    lines = cand.get("lines")
+    if isinstance(lines, str) and lines:
+        return lines
     return ""
 
 
@@ -185,31 +201,85 @@ CANDIDATES:
 {OUTPUT_SCHEMA_DESC}"""
 
 
+def _extract_json_block(text: str) -> str | None:
+    """Find the first balanced {...} JSON block in `text`, returning the
+    block string or None if no balanced block is found.
+
+    Handles chain-of-thought-prefixed responses (e.g. Sonnet emits
+    "Looking at the query 'X'... {ranked_ids: [...]}") by scanning for
+    the first '{' and tracking brace depth, respecting string literals
+    and escape sequences. Returns the substring spanning the matching
+    outer braces.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\":
+            escape_next = True
+            continue
+        if c == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    return None
+
+
 def _validate_response(
     raw_text: str, id_to_orig: list[tuple[str, int]],
 ) -> tuple[list[int] | None, str | None]:
     """Parse and validate the model response.
+
+    Tolerates chain-of-thought-prefixed responses by extracting the first
+    balanced {...} JSON block (Sonnet 4.6 doesn't support assistant-prefill
+    via the standard messages API; this is the alternative recovery path
+    per the 2026-05-16 Phase C v2 attempt).
 
     Returns (ordered_original_indices, error_reason). On success,
     error_reason is None and ordered_original_indices is a permutation of
     range(len(id_to_orig)). On failure, ordered_original_indices is None
     and error_reason is one of REASON_PARSE_FAILED / REASON_ID_MISMATCH.
     """
+    text = raw_text.strip()
+    # Strip code-fence if model wrapped it
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline > 0:
+            text = text[first_newline+1:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+    # Try direct parse first (cleanest case)
+    obj = None
     try:
-        # Strip code-fence if model wrapped it
-        text = raw_text.strip()
-        if text.startswith("```"):
-            # Remove leading ``` and optional language
-            first_newline = text.find("\n")
-            if first_newline > 0:
-                text = text[first_newline+1:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
         obj = json.loads(text)
-    except (json.JSONDecodeError, ValueError) as e:
-        LOG.warning("[LISTWISE] JSON parse failed: %s; head=%r", e, raw_text[:200])
-        return None, REASON_PARSE_FAILED
+    except (json.JSONDecodeError, ValueError):
+        # Fallback: extract first balanced {...} block (handles CoT prefix)
+        block = _extract_json_block(text)
+        if block is None:
+            LOG.warning("[LISTWISE] no JSON block found; head=%r", raw_text[:200])
+            return None, REASON_PARSE_FAILED
+        try:
+            obj = json.loads(block)
+        except (json.JSONDecodeError, ValueError) as e:
+            LOG.warning("[LISTWISE] JSON parse failed even after block extraction: %s; head=%r",
+                        e, raw_text[:200])
+            return None, REASON_PARSE_FAILED
 
     if not isinstance(obj, dict):
         return None, REASON_PARSE_FAILED
@@ -302,7 +372,12 @@ def listwise_rerank_with_sonnet(
             timeout=timeout,
         )
 
-    # Single Sonnet call
+    # Single Sonnet call.
+    # NOTE: Anthropic Sonnet 4.6 does NOT support assistant-message prefill
+    # ("This model does not support assistant message prefill. The conversation
+    # must end with a user message.", 400 error). Tried 2026-05-16 Phase C v2,
+    # reverted. Chain-of-thought-before-JSON leak is handled in the validator
+    # via brace-balanced extraction instead.
     try:
         resp = client.messages.create(
             model=os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL),
@@ -322,7 +397,10 @@ def listwise_rerank_with_sonnet(
         LOG.warning("[LISTWISE] unexpected error: %s; using hybrid order", e)
         return _emit(candidates[:top_k], False, REASON_UNEXPECTED_ERROR)
 
-    # Extract text from response (Anthropic API shape)
+    # Extract text from response (Anthropic API shape).
+    # NOTE: the assistant pre-fill ("{") is NOT echoed in resp.content — Anthropic
+    # returns only the continuation. We must prepend "{" before JSON parsing so
+    # the validator sees a well-formed object.
     try:
         # resp.content is a list of content blocks; pull text from first text block
         blocks = getattr(resp, "content", None) or []

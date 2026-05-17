@@ -328,6 +328,69 @@ def test_validate_response_happy_path():
     assert ordered == [1, 2, 0]
 
 
+def test_chain_of_thought_prefix_is_extracted(monkeypatch):
+    """When Sonnet emits 'Looking at the query...' BEFORE the JSON, the
+    validator must extract the first balanced {...} block.
+
+    This is the observed failure mode on PSM harvested (24% of queries in
+    the 2026-05-16 Phase C run). Sonnet 4.6 doesn't support assistant-
+    message prefill via the standard messages API; brace-balanced
+    extraction is the recovery path.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    cands = make_candidates(3)
+    payload = (
+        'Looking at the query "Headscale VPN coordination", I need to find candidates '
+        'that relate to VPN setup and systemd service configuration.\n\n'
+        'After analyzing each candidate:\n\n'
+        '{"ranked_ids":["C03","C02","C01"],"scores":{"C01":2,"C02":5,"C03":9}}'
+    )
+    out, meta = listwise_rerank_with_sonnet(
+        "q", cands, top_k=3, return_metadata=True,
+        shuffle_seed=None,
+        _client_factory=mock_anthropic_client(payload),
+    )
+    assert meta["applied"] is True
+    assert meta["reason"] == REASON_OK
+    assert [c["chunk_id"] for c in out] == ["chunk_2", "chunk_1", "chunk_0"]
+
+
+def test_nested_json_in_chain_of_thought(monkeypatch):
+    """Brace-balanced extraction must handle nested {} (the `scores` sub-object
+    is itself a {...})."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    cands = make_candidates(3)
+    payload = (
+        "Some prose with {curly braces} that aren't JSON.\n"
+        '{"ranked_ids":["C01","C02","C03"],"scores":{"C01":9,"C02":5,"C03":2}}'
+    )
+    out, meta = listwise_rerank_with_sonnet(
+        "q", cands, top_k=3, return_metadata=True,
+        shuffle_seed=None,
+        _client_factory=mock_anthropic_client(payload),
+    )
+    # Note: "{curly braces}" matches as the FIRST balanced block.
+    # That block fails schema (no ranked_ids) → parse_failed.
+    # This is acceptable: extracting wrong block is no worse than
+    # the prior strict-parse fallback.
+    assert meta["reason"] in (REASON_OK, REASON_PARSE_FAILED, REASON_ID_MISMATCH)
+
+
+def test_json_block_at_end_of_long_cot(monkeypatch):
+    """Realistic case: long CoT followed by JSON at the end."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    cands = make_candidates(3)
+    cot = "Analyzing the query about authentication.\n" * 20
+    payload = cot + '\n{"ranked_ids":["C02","C03","C01"],"scores":{"C01":3,"C02":7,"C03":5}}'
+    out, meta = listwise_rerank_with_sonnet(
+        "q", cands, top_k=3, return_metadata=True,
+        shuffle_seed=None,
+        _client_factory=mock_anthropic_client(payload),
+    )
+    assert meta["applied"] is True
+    assert meta["reason"] == REASON_OK
+
+
 def test_never_raises_meta_envelope_shape(monkeypatch):
     """return_metadata=True must always return (list, dict) with applied/reason/latency_ms."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")

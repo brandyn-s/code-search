@@ -233,3 +233,6 @@ benchmarks/_a1b_work/
 benchmarks/_d4b_work/
 benchmarks/_inspect_gold.py
 benchmarks/_inspect_codegraph.py
+
+# Phase C / listwise eval outputs (regenerable artifacts)
+bench/research/listwise_2026-*/
