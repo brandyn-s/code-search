@@ -79,9 +79,9 @@ def _build_dispatcher_call(rerank_mode, candidates, k, monkeypatch,
                 })
             try:
                 listwise_timeout = float(
-                    os.environ.get("SONNET_LISTWISE_TIMEOUT", "10.0"))
+                    os.environ.get("SONNET_LISTWISE_TIMEOUT", "12.0"))
             except ValueError:
-                listwise_timeout = 10.0
+                listwise_timeout = 12.0
             reranked, rerank_meta = listwise_rerank_with_sonnet(
                 "test query", rerank_input, top_k=k,
                 timeout=listwise_timeout,
@@ -102,7 +102,7 @@ def test_dispatcher_routes_listwise_when_RERANKER_listwise(fake_candidates, monk
     assert mock_lw.called
     call_kwargs = mock_lw.call_args.kwargs
     assert call_kwargs["top_k"] == 10
-    assert call_kwargs["timeout"] == 10.0  # default per Phase C v2
+    assert call_kwargs["timeout"] == 12.0  # default per Phase C v2 (user choice 2026-05-16)
     assert call_kwargs["return_metadata"] is True
     # First positional arg = query, second = rerank_input
     args = mock_lw.call_args.args
@@ -123,12 +123,12 @@ def test_dispatcher_honors_custom_timeout(fake_candidates, monkeypatch):
 def test_dispatcher_falls_back_to_default_on_invalid_timeout(
     fake_candidates, monkeypatch,
 ):
-    """Garbage SONNET_LISTWISE_TIMEOUT falls back to 10.0s default."""
+    """Garbage SONNET_LISTWISE_TIMEOUT falls back to 12.0s default."""
     mock_lw, _, _ = _build_dispatcher_call(
         "listwise", fake_candidates, k=10, monkeypatch=monkeypatch,
         timeout_env="not_a_float",
     )
-    assert mock_lw.call_args.kwargs["timeout"] == 10.0
+    assert mock_lw.call_args.kwargs["timeout"] == 12.0
 
 
 def test_dispatcher_caps_rerank_input_at_top_15(monkeypatch):

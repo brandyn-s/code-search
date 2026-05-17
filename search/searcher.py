@@ -648,9 +648,12 @@ class IntelligentSearcher:
             # per-domain pointwise inconsistency. Retires the
             # SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES hack.
             #
-            # Hard deadline default 10s per Phase C v2 simulated-deadline
-            # analysis (smallest deadline where all 4 fixtures stay
-            # favorable on MRR + nDCG@10; harvested applied 76.5% at 10s).
+            # Hard deadline default 12s per Phase C v2 simulated-deadline
+            # analysis. 10s is the smallest deadline where all 4 fixtures
+            # stay favorable; 12s captures more of the listwise lift
+            # (harvested applied 93.4% vs 76.5% at 10s; worst Δ nDCG@10
+            # +0.010 vs +0.004) at the cost of 2s more p99. User picked
+            # 12s 2026-05-16 for the higher applied rate.
             # On deadline/error/parse-failure, listwise returns baseline
             # order — graceful fallback per the always-on contract.
             #
@@ -682,10 +685,10 @@ class IntelligentSearcher:
                 })
             try:
                 listwise_timeout = float(
-                    os.environ.get("SONNET_LISTWISE_TIMEOUT", "10.0")
+                    os.environ.get("SONNET_LISTWISE_TIMEOUT", "12.0")
                 )
             except ValueError:
-                listwise_timeout = 10.0
+                listwise_timeout = 12.0
             reranked, rerank_meta = listwise_rerank_with_sonnet(
                 query, rerank_input, top_k=k,
                 timeout=listwise_timeout,
