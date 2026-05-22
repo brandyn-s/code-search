@@ -156,7 +156,15 @@ class MultiLanguageChunker:
                 folder_structure=folder_parts,
             )
         except Exception as e:
-            logger.error(f"Failed to chunk file {file_path}: {e}")
+            # Structured per-file diagnostic. The caller (IncrementalIndexer)
+            # only sees `[]` and counts this as a zero-chunk file in its
+            # ChunkingDiagnostics summary; this log line preserves per-file
+            # detail (error class name) so operators can disambiguate parse
+            # vs encoding vs other failures by grepping the sidecar log.
+            logger.error(
+                "[CHUNKING_DIAG_FILE] file=%s error_class=%s error=%s",
+                file_path, type(e).__name__, e,
+            )
             return []
     
     def _convert_tree_chunks(self, tree_chunks: List[TreeSitterChunk], file_path: str) -> List[CodeChunk]:

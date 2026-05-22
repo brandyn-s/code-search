@@ -19,6 +19,50 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ChunkingDiagnostics:
+    """Per-run summary of chunking-loop outcomes.
+
+    Surfaces the silent failure modes (parse errors, empty results) that
+    `MultiLanguageChunker.chunk_file` masks by returning `[]`. Counts here
+    are coarse (per-file outcome categories); per-file detail lives in
+    structured `[CHUNKING_DIAG_FILE]` log lines.
+
+    Fields:
+        files_attempted: Files passed to the chunker (all supported types).
+        files_with_chunks: Files that produced ≥1 chunk.
+        files_zero_chunks: Files that produced 0 chunks. Causes: parse
+            error (chunker raised; see CHUNKING_DIAG_FILE log line),
+            encoding error (UnicodeDecodeError), or genuinely empty file.
+            All three look the same from the caller's perspective; check
+            the log file to disambiguate per-file.
+        chunks_extracted: Total CodeChunk count across all files.
+    """
+
+    files_attempted: int = 0
+    files_with_chunks: int = 0
+    files_zero_chunks: int = 0
+    chunks_extracted: int = 0
+
+    @property
+    def zero_chunk_rate(self) -> float:
+        """Fraction of attempted files that produced no chunks. Useful
+        signal for `should I be worried?` — sustained >5% probably means
+        parse errors or encoding issues warranting investigation."""
+        if self.files_attempted == 0:
+            return 0.0
+        return self.files_zero_chunks / self.files_attempted
+
+    def to_dict(self) -> Dict:
+        return {
+            "files_attempted": self.files_attempted,
+            "files_with_chunks": self.files_with_chunks,
+            "files_zero_chunks": self.files_zero_chunks,
+            "chunks_extracted": self.chunks_extracted,
+            "zero_chunk_rate": round(self.zero_chunk_rate, 4),
+        }
+
+
+@dataclass
 class IncrementalIndexResult:
     """Result of incremental indexing operation."""
 
@@ -30,10 +74,11 @@ class IncrementalIndexResult:
     time_taken: float
     success: bool
     error: Optional[str] = None
+    chunking_diagnostics: Optional[ChunkingDiagnostics] = None
 
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
-        return {
+        out = {
             "files_added": self.files_added,
             "files_removed": self.files_removed,
             "files_modified": self.files_modified,
@@ -43,6 +88,9 @@ class IncrementalIndexResult:
             "success": self.success,
             "error": self.error,
         }
+        if self.chunking_diagnostics is not None:
+            out["chunking_diagnostics"] = self.chunking_diagnostics.to_dict()
+        return out
 
 
 class IncrementalIndexer:
@@ -81,6 +129,31 @@ class IncrementalIndexer:
         self.change_detector = ChangeDetector(self.snapshot_manager)
         self._progress_fn = progress_fn or (lambda phase, current, total: None)
         self._cancel_check = cancel_check
+        # Latest chunking diagnostics from _add_new_chunks (incremental path)
+        # or _full_index (full path). Attached to IncrementalIndexResult on
+        # the next return so callers can inspect zero-chunk rate.
+        self._last_chunking_diag: Optional[ChunkingDiagnostics] = None
+
+    @staticmethod
+    def _log_chunking_diag(
+        diag: "ChunkingDiagnostics", scope: str, project_name: str
+    ) -> None:
+        """Emit a single structured summary line to the sidecar log.
+
+        Operator visibility: `tail -f ~/.claude/logs/code-search-mcp.log
+        | grep CHUNKING_DIAG` shows zero-chunk rates across runs without
+        scrolling through per-file noise. The threshold for "should I
+        investigate?" is roughly zero_chunk_rate > 0.05.
+        """
+        logger.warning(
+            "[CHUNKING_DIAG] %s project=%s files_attempted=%d "
+            "files_with_chunks=%d files_zero_chunks=%d chunks_extracted=%d "
+            "zero_chunk_rate=%.4f",
+            scope, project_name,
+            diag.files_attempted, diag.files_with_chunks,
+            diag.files_zero_chunks, diag.chunks_extracted,
+            diag.zero_chunk_rate,
+        )
 
     def detect_changes(self, project_path: str) -> Tuple[FileChanges, MerkleDAG]:
         """Detect changes in project since last snapshot.
@@ -114,6 +187,10 @@ class IncrementalIndexer:
 
         if not project_name:
             project_name = Path(project_path).name
+
+        # Reset chunking diag for this run so a subsequent "no changes" call
+        # doesn't return a stale diag from a previous indexing pass.
+        self._last_chunking_diag = None
 
         # REINDEX PROGRESS: structured milestones land in the file-sidecar
         # logger (~/.claude/logs/code-search-mcp.log) so an operator can
@@ -221,6 +298,7 @@ class IncrementalIndexer:
                 chunks_removed=chunks_removed,
                 time_taken=time.time() - start_time,
                 success=True,
+                chunking_diagnostics=self._last_chunking_diag,
             )
 
         except Exception as e:
@@ -278,16 +356,28 @@ class IncrementalIndexer:
 
             # Collect all chunks first, then embed in a single pass for efficiency
             all_chunks = []
+            diag = ChunkingDiagnostics()
             self._progress_fn("chunking", 0, len(supported_files))
             for idx, file_path in enumerate(supported_files):
                 full_path = Path(project_path) / file_path
+                diag.files_attempted += 1
                 try:
                     chunks = self.chunker.chunk_file(str(full_path))
-                    if chunks:
-                        all_chunks.extend(chunks)
                 except Exception as e:
+                    # chunk_file's own try/except returns [] on most failures,
+                    # so this is a belt-and-suspenders catch for unexpected
+                    # propagation. Either way, count as zero-chunk.
                     logger.warning(f"Failed to chunk {file_path}: {e}")
+                    chunks = []
+                if chunks:
+                    all_chunks.extend(chunks)
+                    diag.files_with_chunks += 1
+                    diag.chunks_extracted += len(chunks)
+                else:
+                    diag.files_zero_chunks += 1
                 self._progress_fn("chunking", idx + 1, len(supported_files))
+            self._log_chunking_diag(diag, scope="_full_index", project_name=project_name)
+            self._last_chunking_diag = diag
 
             # Embed chunks — use Batch API for large full reindexes if enabled
             all_embedding_results = []
@@ -424,6 +514,7 @@ class IncrementalIndexer:
                 chunks_removed=0,
                 time_taken=time.time() - start_time,
                 success=True,
+                chunking_diagnostics=self._last_chunking_diag,
             )
 
         except Exception as e:
@@ -483,17 +574,26 @@ class IncrementalIndexer:
 
         # Collect all chunks first, then embed in a single pass
         chunks_to_embed = []
+        diag = ChunkingDiagnostics()
         total_files = len(supported_files)
         self._progress_fn("chunking", 0, total_files)
         for idx, file_path in enumerate(supported_files):
             full_path = Path(project_path) / file_path
+            diag.files_attempted += 1
             try:
                 chunks = self.chunker.chunk_file(str(full_path))
-                if chunks:
-                    chunks_to_embed.extend(chunks)
             except Exception as e:
                 logger.warning(f"Failed to chunk {file_path}: {e}")
+                chunks = []
+            if chunks:
+                chunks_to_embed.extend(chunks)
+                diag.files_with_chunks += 1
+                diag.chunks_extracted += len(chunks)
+            else:
+                diag.files_zero_chunks += 1
             self._progress_fn("chunking", idx + 1, total_files)
+        self._log_chunking_diag(diag, scope="_add_new_chunks", project_name=project_name)
+        self._last_chunking_diag = diag
 
         all_embedding_results = []
         if chunks_to_embed:

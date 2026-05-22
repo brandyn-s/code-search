@@ -145,6 +145,14 @@ class CodeIndexManager:
         self._logger = logging.getLogger(__name__)
         self._on_gpu = False
 
+        # Observability: status of the most recent _commit_epoch_manifest call.
+        # Stable string vocabulary: "ok", "skipped_empty", "consistency_error",
+        # "build_error", "commit_error", or None (no commit attempted yet).
+        # Callers (incremental_indexer, MCP layer) can surface this in
+        # `_metadata` to distinguish silent-success-with-stale-manifest from
+        # true success.
+        self.last_manifest_commit_status: Optional[str] = None
+
         # Initialize FTS5
         self._init_fts5()
         
@@ -863,22 +871,29 @@ class CodeIndexManager:
         """Build + commit an epoch manifest covering the just-written artifacts.
 
         Called from save_index after FAISS + chunk_ids.pkl + stats are
-        written. If any artifact is missing or counts disagree, raises
-        through to the caller — better to fail loudly than commit a
-        manifest that lies about state.
+        written.
 
-        Failure modes are caught at the manifest layer; the artifacts on
-        disk remain whatever save_index put there. The manifest commit is
-        the "publish" signal — readers (E3) verify SHAs against current.json
-        and fall back to prior.json on mismatch.
+        Failure modes and their handling:
+        - ManifestConsistencyError (cross-artifact record counts disagree):
+          re-raised. This is a structural-invariant violation — on-disk
+          artifacts are demonstrably inconsistent (e.g., FAISS ntotal !=
+          len(chunk_ids)). Silently swallowing this masks the chunk-truncation
+          regression class. Caller learns about it via the propagated
+          exception AND `self.last_manifest_commit_status == "consistency_error"`.
+        - Other build_manifest errors (e.g., sha256 IO failure): logged and
+          swallowed. Transient; readers safely fall back to prior.json.
+        - commit_manifest errors (rename/fsync failure): logged and swallowed.
+          Same rationale — prior epoch's manifest stays current; readers OK.
+
+        Always sets `self.last_manifest_commit_status` to a stable string
+        ("ok", "skipped_empty", "consistency_error", "build_error",
+        "commit_error") for observability.
         """
         from search.epoch_manifest import (
             ArtifactSpec,
             ManifestConsistencyError,
             build_manifest,
             commit_manifest,
-            count_metadata_db,
-            count_fts5_db,
         )
 
         # WAL checkpoint guard: metadata.db is opened with journal_mode=WAL
@@ -939,18 +954,30 @@ class CodeIndexManager:
                 count=ntotal,
             ))
 
-        # Sidecar SQLite stores. Counts via stdlib sqlite (no driver init).
+        # Sidecar SQLite stores. Pass count=None so they participate in
+        # SHA verification but NOT in the cross-artifact record-count
+        # consistency check.
+        #
+        # Why exclude them: remove_file_chunks updates metadata.db + fts5.db
+        # (the rows are deleted) but intentionally leaves chunk_ids.pkl and
+        # FAISS at their previous size — FAISS row removal is "rebuild on
+        # demand" (see test_save_index_allows_small_legitimate_shrinks).
+        # Treating sidecars as strict-count artifacts would fire a false
+        # consistency error on every incremental run with deletions. The
+        # invariant that DOES matter (the 2026-05-04 chunk-truncation
+        # regression signature: chunk_ids.pkl row count != FAISS ntotal)
+        # is preserved by chunk_ids + code.index above.
         if self.metadata_path.exists():
             artifacts.append(ArtifactSpec(
                 name="metadata.db",
                 path=self.metadata_path,
-                count=count_metadata_db(self.metadata_path),
+                count=None,
             ))
         if self._fts_db_path.exists():
             artifacts.append(ArtifactSpec(
                 name="fts5.db",
                 path=self._fts_db_path,
-                count=count_fts5_db(self._fts_db_path),
+                count=None,
             ))
         # stats.json is metadata, not a record-bearing artifact (count=None).
         if self.stats_path.exists():
@@ -964,6 +991,7 @@ class CodeIndexManager:
             self._logger.info(
                 "[EPOCH_MANIFEST] no artifacts to commit (empty index?); skipping"
             )
+            self.last_manifest_commit_status = "skipped_empty"
             return
 
         try:
@@ -977,21 +1005,27 @@ class CodeIndexManager:
                 pipeline_version=getattr(self, "_pipeline_version", "") or "",
             )
         except ManifestConsistencyError as exc:
-            # Cross-artifact consistency failure — the new structural
-            # invariant. Surface loudly so operators can investigate.
+            # Cross-artifact consistency failure: on-disk artifacts have
+            # mismatched record counts (e.g., FAISS ntotal != len(chunk_ids)).
+            # This is a structural-invariant violation, not a transient
+            # error — silently swallowing it masks the chunk-truncation
+            # regression class. Re-raise so the caller (IncrementalIndexer)
+            # learns the operation produced inconsistent state.
             self._logger.error(
                 "[EPOCH_MANIFEST] consistency check failed; refusing to commit: %s",
                 exc,
             )
-            return
+            self.last_manifest_commit_status = "consistency_error"
+            raise
         except Exception as exc:
-            # Unexpected error in manifest construction — log + continue.
-            # Don't let manifest issues block the existing write path
-            # behavior. Operators can detect missing-manifest later via
-            # verify_index_integrity.
+            # Unexpected error in manifest construction — log + swallow.
+            # Transient (e.g., sha256 IO failure on a slow disk); readers
+            # safely fall back to prior.json. Operators can detect via
+            # verify_index_integrity or last_manifest_commit_status.
             self._logger.warning(
                 "[EPOCH_MANIFEST] build failed (non-blocking): %s", exc,
             )
+            self.last_manifest_commit_status = "build_error"
             return
 
         try:
@@ -1000,6 +1034,7 @@ class CodeIndexManager:
                 "[EPOCH_MANIFEST] committed epoch=%s artifacts=%d at %s",
                 manifest["epoch_id"], len(artifacts), committed,
             )
+            self.last_manifest_commit_status = "ok"
         except Exception as exc:
             # Commit-time error (rename failure, fsync failure). Log; the
             # artifacts on disk are unchanged — readers see the previous
@@ -1007,6 +1042,7 @@ class CodeIndexManager:
             self._logger.warning(
                 "[EPOCH_MANIFEST] commit failed (non-blocking): %s", exc,
             )
+            self.last_manifest_commit_status = "commit_error"
     
     def _update_stats(self):
         """Update index statistics."""
