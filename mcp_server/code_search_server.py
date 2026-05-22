@@ -1241,6 +1241,23 @@ class CodeSearchServer:
             response["chunks_done"] = job["current"]
             response["chunks_total"] = job["total"]
             response["percent"] = round(100 * job["current"] / job["total"], 1)
+            # Disambiguate the unit because chunks_done/chunks_total are
+            # named "chunks" but actually count FILES during the chunking
+            # and removing phases (files are scanned/chunked one at a time)
+            # then switch to counting chunks during embedding/saving. Without
+            # this label the total appears to "jump" mid-job (e.g. 936
+            # during chunking, 4709 during embedding) which looks like a
+            # bug. Phases that count files vs chunks per current pipeline:
+            #   chunking: files (one file may yield 1-N chunks)
+            #   removing: files (whose chunks are being removed)
+            #   detecting_changes: not counted (total is 0)
+            #   embedding: chunks
+            #   saving: chunks (total is 0 during this phase currently)
+            phase = job.get("phase", "")
+            if phase in ("chunking", "removing"):
+                response["unit"] = "files"
+            elif phase in ("embedding", "saving"):
+                response["unit"] = "chunks"
 
         if job["status"] in ("completed", "failed") and job.get("result"):
             response["result"] = job["result"]
