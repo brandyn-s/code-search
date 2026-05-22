@@ -142,6 +142,7 @@ class IncrementalIndexer:
                 "[REINDEX_PROGRESS] detect_changes: starting project=%s",
                 project_name,
             )
+            self._progress_fn("detecting_changes", 0, 0)
             changes, current_dag = self.detect_changes(project_path)
             logger.warning(
                 "[REINDEX_PROGRESS] detect_changes: done in %.1fs project=%s "
@@ -451,11 +452,14 @@ class IncrementalIndexer:
         files_to_remove = self.change_detector.get_files_to_remove(changes)
         chunks_removed = 0
 
-        for file_path in files_to_remove:
+        total = len(files_to_remove)
+        self._progress_fn("removing", 0, total)
+        for idx, file_path in enumerate(files_to_remove):
             # Remove from metadata
             removed = self.indexer.remove_file_chunks(file_path, project_name)
             chunks_removed += removed
             logger.debug(f"Removed {removed} chunks from {file_path}")
+            self._progress_fn("removing", idx + 1, total)
 
         return chunks_removed
 
@@ -479,7 +483,9 @@ class IncrementalIndexer:
 
         # Collect all chunks first, then embed in a single pass
         chunks_to_embed = []
-        for file_path in supported_files:
+        total_files = len(supported_files)
+        self._progress_fn("chunking", 0, total_files)
+        for idx, file_path in enumerate(supported_files):
             full_path = Path(project_path) / file_path
             try:
                 chunks = self.chunker.chunk_file(str(full_path))
@@ -487,9 +493,11 @@ class IncrementalIndexer:
                     chunks_to_embed.extend(chunks)
             except Exception as e:
                 logger.warning(f"Failed to chunk {file_path}: {e}")
+            self._progress_fn("chunking", idx + 1, total_files)
 
         all_embedding_results = []
         if chunks_to_embed:
+            self._progress_fn("embedding", 0, len(chunks_to_embed))
             try:
                 all_embedding_results = self.embedder.embed_chunks_grouped(
                     chunks_to_embed
@@ -500,11 +508,15 @@ class IncrementalIndexer:
                 ):
                     embedding_result.metadata["project_name"] = project_name
                     embedding_result.metadata["content"] = chunk.content
+                self._progress_fn(
+                    "embedding", len(chunks_to_embed), len(chunks_to_embed)
+                )
             except Exception as e:
                 logger.warning(f"Embedding failed: {e}")
 
         # Add all embeddings to index at once
         if all_embedding_results:
+            self._progress_fn("saving", 0, 0)
             self.indexer.add_embeddings(all_embedding_results)
 
         return len(all_embedding_results)
