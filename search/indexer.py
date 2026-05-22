@@ -881,6 +881,40 @@ class CodeIndexManager:
             count_fts5_db,
         )
 
+        # WAL checkpoint guard: metadata.db is opened with journal_mode=WAL
+        # (see the metadata_db property). Without an explicit checkpoint
+        # here, pending writes sit in the .db-wal sidecar and the main
+        # metadata.db file still reflects an earlier (often empty) state.
+        # sha256(metadata.db) computed below would then capture that stale
+        # state, and any later auto-checkpoint (SQLite default ≥1000 pages)
+        # merges the WAL into the main file, breaking sha verification
+        # permanently. Observed 2026-05-22: 16/24 projects had identical
+        # manifest sha for metadata.db (42f67cde...) because all were
+        # captured at the empty-schema state. TRUNCATE merges WAL → main
+        # db and reclaims the .wal file space.
+        if self._metadata_db is not None:
+            try:
+                self._metadata_db.commit()
+            except Exception as exc:
+                self._logger.warning(
+                    "[EPOCH_MANIFEST] metadata_db.commit() failed before "
+                    "checkpoint: %s", exc,
+                )
+        if self.metadata_path.exists():
+            try:
+                import sqlite3
+                _con = sqlite3.connect(str(self.metadata_path))
+                try:
+                    _con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    _con.commit()
+                finally:
+                    _con.close()
+            except Exception as exc:
+                self._logger.warning(
+                    "[EPOCH_MANIFEST] metadata.db WAL checkpoint failed "
+                    "(manifest may capture stale sha): %s", exc,
+                )
+
         artifacts: list[ArtifactSpec] = []
         chunk_count = len(self._chunk_ids)
 
