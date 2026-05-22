@@ -1075,10 +1075,23 @@ class CodeSearchServer:
                 # progress_callback, which doesn't run until chunking
                 # begins — useless when the merkle walk itself is the
                 # slow phase.
+                # Provider-scoped snapshot manager: each provider gets its
+                # own merkle snapshot keyed by (path, provider) so voyage's
+                # snapshot doesn't suppress voyage-context's incremental
+                # change detection (and vice versa). Without this scope,
+                # the first provider to index a path saves a snapshot
+                # against the current disk state, and any subsequent
+                # provider's incremental call finds that snapshot fresh
+                # against the disk and exits without indexing anything —
+                # producing the empty-provider-index ghost class verified
+                # 2026-05-22.
+                from merkle.snapshot_manager import SnapshotManager
+                _snapshot_manager = SnapshotManager(provider=provider or "")
                 incremental_indexer = IncrementalIndexer(
                     indexer=index_manager,
                     embedder=embedder,
                     chunker=chunker,
+                    snapshot_manager=_snapshot_manager,
                     progress_fn=_progress_callback,
                     cancel_check=lambda jid=job_id: bool(
                         self._indexing_job

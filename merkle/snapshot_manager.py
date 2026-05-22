@@ -12,29 +12,53 @@ from merkle.merkle_dag import MerkleDAG
 
 class SnapshotManager:
     """Manages loading and saving of Merkle DAG snapshots."""
-    
-    def __init__(self, storage_dir: Optional[Path] = None):
+
+    def __init__(
+        self,
+        storage_dir: Optional[Path] = None,
+        provider: str = "",
+    ):
         """Initialize snapshot manager.
-        
+
         Args:
             storage_dir: Directory to store snapshots (default: ~/.claude_code_search/merkle)
+            provider: Embedding provider name (e.g. "voyage", "voyage-context").
+                When non-empty, included in the project_id hash so each
+                provider gets its own snapshot file. When empty, legacy
+                MD5(path) behavior is preserved for backward compat with
+                callers that don't know which provider's snapshot they
+                want (staleness warning, project-deletion cleanup).
         """
         if storage_dir is None:
             storage_dir = Path.home() / '.claude_code_search' / 'merkle'
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        
+        self.provider = provider or ""
+
     def get_project_id(self, project_path: str) -> str:
-        """Generate a unique ID for a project based on its path.
-        
+        """Generate a unique ID for a project based on its path (and provider).
+
         Args:
             project_path: Path to project
-            
+
         Returns:
-            MD5 hash of the normalized path
+            MD5 hash of the key. When self.provider is set, key is
+            "path:provider"; otherwise key is just the path (legacy).
+
+        Why provider-scoping: SnapshotManager previously keyed on path
+        only. When voyage runs first and saves a snapshot, voyage-context's
+        later incremental call finds the same snapshot up-to-date against
+        the disk and returns "no changes" — but voyage-context has its
+        OWN index (separate dir, separate FAISS store) that hasn't been
+        updated. Verified 2026-05-22 by recovering 5 ghost voyage-context
+        indexes that all came back empty for this exact reason.
         """
         normalized_path = str(Path(project_path).resolve())
-        return hashlib.md5(normalized_path.encode()).hexdigest()
+        if self.provider:
+            key = f"{normalized_path}:{self.provider}"
+        else:
+            key = normalized_path
+        return hashlib.md5(key.encode()).hexdigest()
     
     def get_snapshot_path(self, project_path: str) -> Path:
         """Get the snapshot file path for a project.
@@ -77,7 +101,7 @@ class SnapshotManager:
             'dag': dag.to_dict()
         }
         
-        with open(snapshot_path, 'w') as f:
+        with open(snapshot_path, 'w', encoding='utf-8') as f:
             json.dump(snapshot_data, f, indent=2)
         
         # Save metadata
@@ -91,7 +115,7 @@ class SnapshotManager:
             'root_hash': dag.get_root_hash()
         })
         
-        with open(metadata_path, 'w') as f:
+        with open(metadata_path, 'w', encoding='utf-8') as f:
             json.dump(metadata_data, f, indent=2)
     
     def load_snapshot(self, project_path: str) -> Optional[MerkleDAG]:
@@ -109,7 +133,7 @@ class SnapshotManager:
             return None
             
         try:
-            with open(snapshot_path, 'r') as f:
+            with open(snapshot_path, 'r', encoding='utf-8') as f:
                 snapshot_data = json.load(f)
                 
             # Check version compatibility
@@ -137,7 +161,7 @@ class SnapshotManager:
             return None
             
         try:
-            with open(metadata_path, 'r') as f:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except (json.JSONDecodeError, Exception) as e:
             print(f"Error loading metadata: {e}")
@@ -179,7 +203,7 @@ class SnapshotManager:
         
         for metadata_file in self.storage_dir.glob('*_metadata.json'):
             try:
-                with open(metadata_file, 'r') as f:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
                     snapshots.append(metadata)
             except Exception:
