@@ -1107,6 +1107,21 @@ class CodeSearchServer:
                     except Exception:
                         pass
 
+                # Empty-index guard: SnapshotManager keys snapshots on
+                # MD5(path) only — not provider. When voyage runs first and
+                # saves a snapshot, a subsequent voyage-context incremental
+                # call for the same path finds that snapshot up-to-date and
+                # exits with 0 chunks indexed, producing a ghost project dir
+                # (project_info.json + empty fts5.db, no code.index, no
+                # chunk_ids.pkl). Detect the zero-chunk state and force
+                # full reindex. Mirrors the pipeline-version check above.
+                if effective_incremental and index_manager.get_index_size() == 0:
+                    logger.warning(
+                        f"Index is empty for provider={provider} project={project_name}, "
+                        f"forcing full reindex (snapshot may be shared with another provider)"
+                    )
+                    effective_incremental = False
+
                 result = incremental_indexer.incremental_index(
                     str(directory_path_obj), project_name, force_full=not effective_incremental
                 )
