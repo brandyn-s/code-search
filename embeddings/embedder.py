@@ -92,6 +92,32 @@ def _factory_voyage(model_name: str, cache_dir: str, device: str) -> Any:
     )
 
 
+@register_provider("voyage-code-3")
+def _factory_voyage_code3(model_name: str, cache_dir: str, device: str) -> Any:
+    """voyage-code-3 via the standard /v1/embeddings endpoint (non-default).
+
+    Uses the same OpenAI-compatible client path as the "voyage" provider.
+    Reads VOYAGE_API_KEY + EMBEDDING_MODEL (defaults to "voyage-code-3").
+
+    A/B vs voyage-4-large (PSM-full, n=102 golden + 183 harvested, rerank=off,
+    2026-05-15): aggregate CI includes zero; per-subproject CI excludes zero on
+    mithrandir TypeScript (+0.119 MRR) and nix declarative config (-0.091 MRR).
+    Production default stays voyage-4-large. Enable with
+    EMBEDDING_PROVIDER=voyage-code-3 for TypeScript-heavy corpora.
+    See docs/findings/2026-05-15-voyage-code-3-ab-finding.md.
+    """
+    from embeddings.openai_embedder import OpenAIEmbeddingModel
+    model_name = model_name or os.environ.get(
+        "EMBEDDING_MODEL", "voyage-code-3"
+    )
+    api_key = os.environ.get("VOYAGE_API_KEY", "")
+    return OpenAIEmbeddingModel(
+        api_key=api_key,
+        model_name=model_name,
+        base_url="https://api.voyageai.com/v1",
+    )
+
+
 @register_provider("voyage-context")
 def _factory_voyage_context(model_name: str, cache_dir: str, device: str) -> Any:
     from embeddings.voyage_context_embedder import VoyageContextEmbedder

@@ -74,13 +74,16 @@ Source files are parsed into Abstract Syntax Trees using tree-sitter, then split
 
 Each chunk is converted to a high-dimensional vector using [Voyage AI](https://voyageai.com)'s `voyage-4-large` model (MoE architecture, SOTA retrieval quality). The vectors are stored in a FAISS index with int8 quantization (4x smaller than float32, negligible quality loss on normalized vectors).
 
-Three embedding providers are available:
+Four embedding providers are available:
 
 | Provider | Model | Quality (MRR) | Data leaves machine? | Cost | Setup |
 |----------|-------|:---:|:---:|:---:|---|
-| **`voyage`** (recommended) | voyage-4-large | **0.828** | Yes (API call) | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
+| **`voyage`** (default) | voyage-4-large | **0.828** | Yes (API call) | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
+| `voyage-code-3` | voyage-code-3 | 0.623–0.748¹ | Yes (API call) | ~$0.06/1M tokens | Set `VOYAGE_API_KEY`; use `EMBEDDING_PROVIDER=voyage-code-3` |
 | `jina` | jina-code-0.5b | 0.638-0.742 | **No** (runs locally) | **Free** | Nothing — downloads model on first run |
 | `local` | all-MiniLM-L6-v2 | ~0.35-0.45 | No | Free | Nothing |
+
+¹ `voyage-code-3` aggregate A/B vs voyage-4-large: CI includes zero (PSM-full, n=102 golden + 183 harvested, rerank=off, 2026-05-15). Per-subproject: wins on TypeScript/mithrandir (+0.119 MRR, CI excludes zero), regresses on Nix (-0.091 MRR, CI excludes zero). Use for TypeScript-heavy corpora. See `docs/findings/2026-05-15-voyage-code-3-ab-finding.md`.
 
 MRR (Mean Reciprocal Rank) is measured on 102 golden queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo. A score of 0.828 means the correct answer is almost always the #1 result.
 
@@ -114,11 +117,14 @@ Quality was measured using golden test sets — hand-verified query-to-expected-
 
 | Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) | Weighted Avg |
 |----------|-------|:---:|:---:|:---:|:---:|:---:|
-| **`voyage`** | **voyage-4-large** | **0.826** | **0.917** | 0.861 | **0.683** | **0.828** |
+| **`voyage`** (default) | **voyage-4-large** | **0.826** | **0.917** | 0.861 | 0.683 | **0.828** |
+| `voyage-code-3` | voyage-code-3 | 0.517 (↓) | — | — | **0.596** (↑) | 0.623¹ |
 | `voyage-context` | voyage-context-3 | 0.792 | 0.783 | **0.861** | 0.662 | 0.775 |
 | `voyage` | voyage-4 | 0.803 | 0.892 | 0.861 | 0.650 | 0.806 |
 | **`jina`** (local) | jina-code-0.5b | 0.638 | 0.742 | ~0.86 | 0.660 | ~0.72 |
 | `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 | ~0.42 |
+
+¹ voyage-code-3 evaluated on PSM-full (4 subprojects, n=102 golden, rerank=off, 2026-05-15). Aggregate CI includes zero; Nix regression CI excludes zero (-0.091); TypeScript improvement CI excludes zero (+0.119). Aggregate column shows golden MRR. Rust rows omitted (not measured in this A/B). See `docs/findings/2026-05-15-voyage-code-3-ab-finding.md`.
 
 ### What the numbers mean
 

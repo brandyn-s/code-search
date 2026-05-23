@@ -17,7 +17,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 
 ## Architecture
 
-- **Embedding providers**: Voyage AI (`voyage-4-large` default — +0.053 weighted avg MRR over `voyage-context-3` across 4 langs), `voyage-context-3` legacy, OpenAI, local sentence-transformers
+- **Embedding providers**: Voyage AI (`voyage-4-large` default — +0.053 weighted avg MRR over `voyage-context-3` across 4 langs), `voyage-code-3` (available, non-default — wins on TypeScript, regresses on Nix vs voyage-4-large per 2026-05-15 A/B; see `docs/findings/`), `voyage-context-3` legacy, OpenAI, local sentence-transformers
 - **Search**: Weighted RRF fusion of FAISS vector + FTS5 BM25. Content mode boosts (code: function/method 1.3x, docs: section 1.3x)
 - **Chunking**: Tree-sitter AST for 12+ languages, regex-based for TOML/YAML/HCL/Markdown/Nix. Post-processing merge step (cAST-style) greedily combines small adjacent chunks to 1500 NWS char budget, capturing gap code (imports, constants) between semantic units.
 - **Per-project config**: `project_info.json` stores embedding provider, model, content mode. Server creates correct embedder on project switch.
@@ -39,7 +39,7 @@ redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set) | Provider: `voyage` (recommended, uses voyage-4-large), `voyage-context` (legacy contextualized), `openai`, `jina` (local, code-optimized), `local` |
+| `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set) | Provider: `voyage` (recommended, uses voyage-4-large), `voyage-code-3` (available non-default; TypeScript-optimized, regresses on Nix — see `docs/findings/2026-05-15-voyage-code-3-ab-finding.md`), `voyage-context` (legacy contextualized), `openai`, `jina` (local, code-optimized), `local` |
 | `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for jina provider (0.5b: 64-896, 1.5b: 128-1536) |
 | `VOYAGE_API_KEY` | - | Voyage AI API key |
 | `CONTENT_MODE` | `code` | `code` or `docs` - affects search weights and provider auto-select |
