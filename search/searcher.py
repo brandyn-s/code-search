@@ -11,71 +11,14 @@ from search.indexer import CodeIndexManager
 from embeddings.embedder import CodeEmbedder
 
 
-def _parse_env_int(
-    name: str,
-    default: int,
-    min_value: Optional[int] = None,
-    logger: Optional[logging.Logger] = None,
-) -> int:
-    """Parse an int from an env var with graceful fallback on bad input.
-
-    Pre-R3, malformed values (e.g., FUSION_K=abc) propagated a ValueError
-    out of _hybrid_search, breaking the search call. Operator misconfig
-    should degrade to defaults with a clear warning, not crash.
-
-    Values that parse but fall below `min_value` are treated as invalid.
-    The check skips quietly if the env var is unset; only set-but-bad
-    values trigger the warning.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        val = int(raw)
-    except (TypeError, ValueError):
-        if logger:
-            logger.warning(
-                "[CONFIG] env var %s=%r is not a valid int; using default %s",
-                name, raw, default,
-            )
-        return default
-    if min_value is not None and val < min_value:
-        if logger:
-            logger.warning(
-                "[CONFIG] env var %s=%s below min_value=%s; using default %s",
-                name, val, min_value, default,
-            )
-        return default
-    return val
-
-
-def _parse_env_float(
-    name: str,
-    default: float,
-    min_value: Optional[float] = None,
-    logger: Optional[logging.Logger] = None,
-) -> float:
-    """Float counterpart to _parse_env_int — same semantics."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        if logger:
-            logger.warning(
-                "[CONFIG] env var %s=%r is not a valid float; using default %s",
-                name, raw, default,
-            )
-        return default
-    if min_value is not None and val < min_value:
-        if logger:
-            logger.warning(
-                "[CONFIG] env var %s=%s below min_value=%s; using default %s",
-                name, val, min_value, default,
-            )
-        return default
-    return val
+# R11 (PR forthcoming): the env-var parsing primitives moved to
+# search.config so all callers go through the same validation contract.
+# Re-exported here for backwards compatibility with tests/external code that
+# imported the R3 helpers directly from this module.
+from search.config import (
+    parse_env_int as _parse_env_int,
+    parse_env_float as _parse_env_float,
+)
 
 
 def reciprocal_rank_fusion(
@@ -109,12 +52,11 @@ def reciprocal_rank_fusion(
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 
-# Content mode configurations: (vector_weight, bm25_weight)
-CONTENT_MODE_WEIGHTS = {
-    "code": (0.65, 0.35),  # Tuned 2026-05-03: vw=0.65 wins over vw=0.5 by MRR +0.016 on n=99 multi-target gold (B2 per-arm sweep, PR #90)
-    "docs": (0.7, 0.3),
-    "all": (0.5, 0.5),
-}
+# Content mode configurations re-exported from search.config for callers
+# (CONTENT_MODE_WEIGHTS values: code=(0.65, 0.35) tuned 2026-05-03,
+# vw=0.65 wins over vw=0.5 by MRR +0.016 on n=99 multi-target gold,
+# B2 per-arm sweep PR #90). Source-of-truth lives in search.config now.
+from search.config import CONTENT_MODE_WEIGHTS  # noqa: E402
 
 # Chunk type boost multipliers per content mode
 CHUNK_TYPE_BOOSTS = {
@@ -495,31 +437,20 @@ class IntelligentSearcher:
     ) -> List[SearchResult]:
         """Hybrid BM25 + vector search with weighted RRF fusion and content mode boosting."""
 
-        # R3: wrap env-var parsing so a malformed operator config (e.g.,
-        # FUSION_K=abc, VECTOR_WEIGHT=not_a_float) doesn't crash the
-        # search path. Bad values log a warning and fall through to the
-        # default. Negative numerics are also rejected — they're nonsense
-        # in this context (FUSION_K<=0 would div-by-zero in RRF;
-        # VECTOR_WEIGHT<0 would invert ranking).
-        fusion_k = _parse_env_int(
-            "FUSION_K", default=20, min_value=1, logger=self._logger,
-        )  # k=20 wins over k=60 (sharper rank fusion)
+        # R11: read all search-time knobs through the validated SearchConfig.
+        # Pre-R11 these were scattered `os.environ.get(...)` calls with
+        # inconsistent failure modes (some crashed on malformed input,
+        # some silently mapped to defaults). SearchConfig parses + validates
+        # once, logs warnings for bad values, and provides typed access.
+        from search.config import get_search_config, resolve_hybrid_weights
+        cfg = get_search_config()
+
+        fusion_k = cfg.fusion_k
         candidate_k = 50  # Retrieve 50 from each source
 
         # Determine content mode and weights
-        content_mode = os.environ.get("CONTENT_MODE", "code").lower()
-        vw = _parse_env_float(
-            "VECTOR_WEIGHT", default=0.0, min_value=0.0, logger=self._logger,
-        )
-        bw = _parse_env_float(
-            "BM25_WEIGHT", default=0.0, min_value=0.0, logger=self._logger,
-        )
-        if vw > 0 or bw > 0:
-            vector_weight, bm25_weight = vw or 0.5, bw or 0.5
-        else:
-            vector_weight, bm25_weight = CONTENT_MODE_WEIGHTS.get(
-                content_mode, (0.5, 0.5)
-            )
+        content_mode = cfg.content_mode
+        vector_weight, bm25_weight = resolve_hybrid_weights(cfg)
 
         # Vector search
         optimized_query = self._optimize_query(query)
@@ -529,10 +460,10 @@ class IntelligentSearcher:
 
         # BM25 search: LLM rewrite (if enabled) then static expansion
         bm25_query = query
-        if os.environ.get("BM25_REWRITE", "off") == "on":
+        if cfg.bm25_rewrite:
             from search.query_rewriter import rewrite_query_for_bm25
             bm25_query = rewrite_query_for_bm25(query)
-        if os.environ.get("QUERY_EXPANSION", "on") == "on":
+        if cfg.query_expansion:
             bm25_query = expand_code_query(bm25_query)
         bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k, filters=filters)
         bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
@@ -700,7 +631,7 @@ class IntelligentSearcher:
         # Disable explicitly with RERANKER=off. Legacy cross-encoder via
         # RERANKER=cross-encoder (off-by-default since A/B showed quality
         # regression).
-        rerank_mode = os.environ.get("RERANKER", "sonnet").lower()
+        rerank_mode = cfg.reranker_mode
         # Surface "no candidates" as the most specific signal, regardless of
         # mode. This catches empty-index searches; downstream consumers don't
         # need to disambiguate "no candidates because mode=off" vs "no
@@ -724,15 +655,12 @@ class IntelligentSearcher:
             # specific — set per-deployment based on local similarity_score
             # distribution. See CLAUDE.md SONNET_RERANKER_SKIP_THRESHOLD
             # for tuning guidance.
-            skip_threshold_raw = os.environ.get(
-                "SONNET_RERANKER_SKIP_THRESHOLD")
-            if skip_threshold_raw:
-                try:
-                    skip_threshold = float(skip_threshold_raw)
-                except ValueError:
-                    skip_threshold = 0.0
+            # R11: skip threshold is None when unset / non-positive (handled
+            # by SearchConfig._parse_optional_float).
+            skip_threshold = cfg.sonnet_skip_threshold
+            if skip_threshold is not None:
                 top_1_score = candidates[0].similarity_score
-                if skip_threshold > 0 and top_1_score >= skip_threshold:
+                if top_1_score >= skip_threshold:
                     self._logger.info(
                         "[RERANK_REASON] skipped_high_confidence "
                         "top_1_score=%.4f threshold=%.4f "
@@ -837,15 +765,10 @@ class IntelligentSearcher:
                     "similarity_score": r.similarity_score,
                     "_orig": r,
                 })
-            try:
-                listwise_timeout = float(
-                    os.environ.get("SONNET_LISTWISE_TIMEOUT", "12.0")
-                )
-            except ValueError:
-                listwise_timeout = 12.0
+            # R11: timeout validated + parsed by SearchConfig.
             reranked, rerank_meta = listwise_rerank_with_sonnet(
                 query, rerank_input, top_k=k,
-                timeout=listwise_timeout,
+                timeout=cfg.listwise_timeout_s,
                 return_metadata=True,
             )
             self.last_reranker_metadata = rerank_meta

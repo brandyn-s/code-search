@@ -146,6 +146,15 @@ def reset_global_state():
     except ImportError:
         pass  # Module might not be available in some tests
 
+    # R11: SearchConfig is memoized via lru_cache for production efficiency,
+    # but tests routinely monkey-patch env vars between calls. Clear the
+    # cache before every test so each test sees a fresh env-var read.
+    try:
+        from search.config import get_search_config
+        get_search_config.cache_clear()
+    except ImportError:
+        pass
+
     yield
 
     # Cleanup after test if needed

@@ -3,7 +3,7 @@
 import os
 import logging
 from collections import OrderedDict
-from typing import List, Optional, Dict, Any
+from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass
 import numpy as np
 
@@ -20,6 +20,189 @@ class EmbeddingResult:
     metadata: Dict[str, Any]
 
 
+# ---------------------------------------------------------------------------
+# Provider registry (R12)
+#
+# Pre-R12: CodeEmbedder.__init__ was a 6-branch if/elif over EMBEDDING_PROVIDER.
+# Each branch handled its own model_name default, env-var reads, and
+# constructor signature. Adding a new provider meant editing __init__.
+# The registry pattern below decouples provider implementations from the
+# wrapper, letting each provider self-register via @register_provider and
+# letting the wrapper dispatch by string name.
+# ---------------------------------------------------------------------------
+
+# A factory takes (model_name, cache_dir, device) and returns the embedding
+# model instance. Each provider's factory owns its own EMBEDDING_MODEL /
+# LOCAL_EMBEDDING_MODEL / API_KEY defaults.
+ProviderFactory = Callable[[str, str, str], Any]
+_PROVIDER_REGISTRY: Dict[str, ProviderFactory] = {}
+
+
+def register_provider(*names: str):
+    """Register a factory under one or more provider names.
+
+    Multiple names support aliases — e.g., `@register_provider("jina",
+    "jina-code")` exposes the same factory under both strings.
+
+    Idempotent re-registration overwrites; this is intentional so tests
+    can swap factories without monkey-patching the dict directly.
+    """
+    def decorator(fn: ProviderFactory) -> ProviderFactory:
+        for name in names:
+            _PROVIDER_REGISTRY[name.lower()] = fn
+        return fn
+    return decorator
+
+
+def list_providers() -> list[str]:
+    """Return the registered provider names, sorted. Used in error
+    messages and exposed for inspection."""
+    return sorted(_PROVIDER_REGISTRY)
+
+
+# Each provider's factory is registered below. The functions are kept tiny
+# and self-contained — they own only the provider-specific setup that used
+# to live inline in the giant if/elif.
+
+@register_provider("openai")
+def _factory_openai(model_name: str, cache_dir: str, device: str) -> Any:
+    from embeddings.openai_embedder import OpenAIEmbeddingModel
+    model_name = model_name or os.environ.get(
+        "EMBEDDING_MODEL", "text-embedding-3-small"
+    )
+    return OpenAIEmbeddingModel(model_name=model_name)
+
+
+@register_provider("voyage")
+def _factory_voyage(model_name: str, cache_dir: str, device: str) -> Any:
+    """voyage-4-large via the standard /embeddings endpoint.
+
+    +0.053 weighted-avg MRR over voyage-context-3 across 4 languages,
+    102 queries (2026-04-08).
+    """
+    from embeddings.openai_embedder import OpenAIEmbeddingModel
+    model_name = model_name or os.environ.get(
+        "EMBEDDING_MODEL", "voyage-4-large"
+    )
+    api_key = os.environ.get("VOYAGE_API_KEY", "")
+    return OpenAIEmbeddingModel(
+        api_key=api_key,
+        model_name=model_name,
+        base_url="https://api.voyageai.com/v1",
+    )
+
+
+@register_provider("voyage-context")
+def _factory_voyage_context(model_name: str, cache_dir: str, device: str) -> Any:
+    from embeddings.voyage_context_embedder import VoyageContextEmbedder
+    model_name = model_name or os.environ.get(
+        "EMBEDDING_MODEL", "voyage-context-3"
+    )
+    api_key = os.environ.get("VOYAGE_API_KEY", "")
+    return VoyageContextEmbedder(api_key=api_key, model_name=model_name)
+
+
+@register_provider("jina", "jina-code")
+def _factory_jina(model_name: str, cache_dir: str, device: str) -> Any:
+    from embeddings.jina_code_embedder import JinaCodeEmbedder
+    model_name = model_name or os.environ.get(
+        "LOCAL_EMBEDDING_MODEL", "jinaai/jina-code-embeddings-0.5b"
+    )
+    truncate_dim_str = os.environ.get("JINA_TRUNCATE_DIM", "")
+    truncate_dim = int(truncate_dim_str) if truncate_dim_str else None
+    return JinaCodeEmbedder(
+        model_name=model_name,
+        cache_dir=cache_dir,
+        device=device,
+        truncate_dim=truncate_dim,
+    )
+
+
+@register_provider("local")
+def _factory_local(model_name: str, cache_dir: str, device: str) -> Any:
+    from embeddings.sentence_transformer import SentenceTransformerModel
+    model_name = model_name or os.environ.get(
+        "LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    )
+    return SentenceTransformerModel(
+        model_name=model_name, cache_dir=cache_dir, device=device,
+    )
+
+
+@register_provider("gemma")
+def _factory_gemma(model_name: str, cache_dir: str, device: str) -> Any:
+    from embeddings.gemma import GemmaEmbeddingModel
+    # Gemma constructor doesn't accept model_name; keep the original
+    # behavior of ignoring it.
+    return GemmaEmbeddingModel(cache_dir=cache_dir, device=device)
+
+
+def _resolve_provider_name() -> str:
+    """Resolve the active provider name from env + sensible fallbacks.
+
+    Same precedence as pre-R12: explicit EMBEDDING_PROVIDER wins; otherwise
+    auto-detect by which API key is present; finally fall back to local.
+    """
+    provider = os.environ.get("EMBEDDING_PROVIDER", "").strip().lower()
+    if provider:
+        return provider
+    # +0.053 weighted avg MRR over voyage-context-3 across 4 languages
+    # (102 queries, 2026-04-08) — auto-pick voyage when key is present.
+    if os.environ.get("VOYAGE_API_KEY"):
+        return "voyage"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    return "local"
+
+
+# ---------------------------------------------------------------------------
+# Metadata dedup helper (R12)
+#
+# Pre-R12: three byte-for-byte-identical chunk_id + metadata + EmbeddingResult
+# construction blocks at embed_chunk:276-302, embed_chunks:344-370, and
+# embed_chunks_grouped:423-449. Adding a new metadata field meant editing
+# three places.
+# ---------------------------------------------------------------------------
+
+
+def _make_embedding_result(chunk: CodeChunk, embedding: Any) -> EmbeddingResult:
+    """Build an EmbeddingResult from a chunk + its computed embedding.
+
+    Single source of truth for chunk_id format + metadata shape. All three
+    embedder code paths route through this so the schema stays consistent.
+    """
+    chunk_id = (
+        f"{chunk.relative_path}:{chunk.start_line}-{chunk.end_line}:"
+        f"{chunk.chunk_type}"
+    )
+    if chunk.name:
+        chunk_id += f":{chunk.name}"
+
+    content_preview = (
+        chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content
+    )
+    metadata = {
+        "file_path": chunk.file_path,
+        "relative_path": chunk.relative_path,
+        "folder_structure": chunk.folder_structure,
+        "chunk_type": chunk.chunk_type,
+        "start_line": chunk.start_line,
+        "end_line": chunk.end_line,
+        "name": chunk.name,
+        "parent_name": chunk.parent_name,
+        "docstring": chunk.docstring,
+        "decorators": chunk.decorators,
+        "imports": chunk.imports,
+        "complexity_score": chunk.complexity_score,
+        "tags": chunk.tags,
+        "content_preview": content_preview,
+        "full_content": chunk.content,
+    }
+    return EmbeddingResult(
+        embedding=embedding, chunk_id=chunk_id, metadata=metadata,
+    )
+
+
 class CodeEmbedder:
     """Wrapper for embedding code chunks."""
 
@@ -34,84 +217,25 @@ class CodeEmbedder:
         self.device = device
         self._logger = logging.getLogger(__name__)
 
-        # Determine provider from env
-        provider = os.environ.get("EMBEDDING_PROVIDER", "").lower()
-        if not provider:
-            # Default: voyage-4-large if Voyage key exists (+0.053 weighted avg MRR
-            # over voyage-context-3 across 4 languages, 102 queries, 2026-04-08).
-            # Uses standard /embeddings endpoint (not /contextualizedembeddings).
-            if os.environ.get("VOYAGE_API_KEY"):
-                provider = "voyage"
-            elif os.environ.get("OPENAI_API_KEY"):
-                provider = "openai"
-            else:
-                provider = "local"
-
-        if provider == "openai":
-            from embeddings.openai_embedder import OpenAIEmbeddingModel
-
-            model_name = model_name or os.environ.get(
-                "EMBEDDING_MODEL", "text-embedding-3-small"
-            )
-            self._model = OpenAIEmbeddingModel(model_name=model_name)
-        elif provider == "voyage":
-            from embeddings.openai_embedder import OpenAIEmbeddingModel
-
-            model_name = model_name or os.environ.get(
-                "EMBEDDING_MODEL", "voyage-4-large"
-            )
-            api_key = os.environ.get("VOYAGE_API_KEY", "")
-            self._model = OpenAIEmbeddingModel(
-                api_key=api_key,
-                model_name=model_name,
-                base_url="https://api.voyageai.com/v1",
-            )
-        elif provider == "voyage-context":
-            from embeddings.voyage_context_embedder import VoyageContextEmbedder
-
-            model_name = model_name or os.environ.get(
-                "EMBEDDING_MODEL", "voyage-context-3"
-            )
-            api_key = os.environ.get("VOYAGE_API_KEY", "")
-            self._model = VoyageContextEmbedder(
-                api_key=api_key,
-                model_name=model_name,
-            )
-        elif provider in ("jina", "jina-code"):
-            from embeddings.jina_code_embedder import JinaCodeEmbedder
-
-            model_name = model_name or os.environ.get(
-                "LOCAL_EMBEDDING_MODEL", "jinaai/jina-code-embeddings-0.5b"
-            )
-            truncate_dim_str = os.environ.get("JINA_TRUNCATE_DIM", "")
-            truncate_dim = int(truncate_dim_str) if truncate_dim_str else None
-            self._model = JinaCodeEmbedder(
-                model_name=model_name,
-                cache_dir=cache_dir,
-                device=device,
-                truncate_dim=truncate_dim,
-            )
-        elif provider == "local":
-            from embeddings.sentence_transformer import SentenceTransformerModel
-
-            model_name = model_name or os.environ.get(
-                "LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
-            )
-            self._model = SentenceTransformerModel(
-                model_name=model_name, cache_dir=cache_dir, device=device
-            )
-        elif provider == "gemma":
-            from embeddings.gemma import GemmaEmbeddingModel
-
-            model_name = model_name or "google/embeddinggemma-300m"
-            self._model = GemmaEmbeddingModel(cache_dir=cache_dir, device=device)
-        else:
+        # R12: provider dispatch via registry instead of 6-branch if/elif.
+        # Each factory owns its own model_name + API-key defaults.
+        provider = _resolve_provider_name()
+        factory = _PROVIDER_REGISTRY.get(provider)
+        if factory is None:
             raise ValueError(
-                f"Unknown EMBEDDING_PROVIDER: {provider}. "
-                f"Use 'voyage-context', 'voyage', 'openai', 'jina', 'local', or 'gemma'."
+                f"Unknown EMBEDDING_PROVIDER: {provider!r}. "
+                f"Available: {list_providers()}"
             )
-
-        self._logger.info(f"Embedding provider: {provider}, model: {model_name}")
+        self._model = factory(model_name, cache_dir, device)
+        # Provider name is recorded for observability; factories own their
+        # model_name resolution and the model itself knows its name.
+        self._provider = provider
+        resolved_model_name = getattr(self._model, "model_name", None) or getattr(
+            self._model, "_model_name", None,
+        ) or model_name or "(unknown)"
+        self._logger.info(
+            f"Embedding provider: {provider}, model: {resolved_model_name}"
+        )
 
     @property
     def model(self):
@@ -271,36 +395,9 @@ class CodeEmbedder:
         embedding = self._model.encode(
             [content], prompt_name="Retrieval-document", show_progress_bar=False
         )[0]
-
-        # Create chunk ID
-        chunk_id = f"{chunk.relative_path}:{chunk.start_line}-{chunk.end_line}:{chunk.chunk_type}"
-        if chunk.name:
-            chunk_id += f":{chunk.name}"
-
-        # Prepare metadata
-        metadata = {
-            "file_path": chunk.file_path,
-            "relative_path": chunk.relative_path,
-            "folder_structure": chunk.folder_structure,
-            "chunk_type": chunk.chunk_type,
-            "start_line": chunk.start_line,
-            "end_line": chunk.end_line,
-            "name": chunk.name,
-            "parent_name": chunk.parent_name,
-            "docstring": chunk.docstring,
-            "decorators": chunk.decorators,
-            "imports": chunk.imports,
-            "complexity_score": chunk.complexity_score,
-            "tags": chunk.tags,
-            "content_preview": chunk.content[:200] + "..."
-            if len(chunk.content) > 200
-            else chunk.content,
-            "full_content": chunk.content,
-        }
-
-        return EmbeddingResult(
-            embedding=embedding, chunk_id=chunk_id, metadata=metadata
-        )
+        # R12: route through _make_embedding_result for consistent
+        # chunk_id format + metadata shape across all three embed paths.
+        return _make_embedding_result(chunk, embedding)
 
     def embed_chunks(
         self, chunks: List[CodeChunk], batch_size: int = 32
@@ -339,37 +436,9 @@ class CodeEmbedder:
                 **encode_kwargs,
             )
 
-            # Create results
+            # Create results — R12 dedup
             for chunk, embedding in zip(batch, batch_embeddings):
-                chunk_id = f"{chunk.relative_path}:{chunk.start_line}-{chunk.end_line}:{chunk.chunk_type}"
-                if chunk.name:
-                    chunk_id += f":{chunk.name}"
-
-                metadata = {
-                    "file_path": chunk.file_path,
-                    "relative_path": chunk.relative_path,
-                    "folder_structure": chunk.folder_structure,
-                    "chunk_type": chunk.chunk_type,
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                    "name": chunk.name,
-                    "parent_name": chunk.parent_name,
-                    "docstring": chunk.docstring,
-                    "decorators": chunk.decorators,
-                    "imports": chunk.imports,
-                    "complexity_score": chunk.complexity_score,
-                    "tags": chunk.tags,
-                    "content_preview": chunk.content[:200] + "..."
-                    if len(chunk.content) > 200
-                    else chunk.content,
-                    "full_content": chunk.content,
-                }
-
-                results.append(
-                    EmbeddingResult(
-                        embedding=embedding, chunk_id=chunk_id, metadata=metadata
-                    )
-                )
+                results.append(_make_embedding_result(chunk, embedding))
 
             if i + batch_size < len(chunks):
                 self._logger.info(f"Processed {i + batch_size}/{len(chunks)} chunks")
@@ -418,37 +487,9 @@ class CodeEmbedder:
                 grouped_texts, input_type="document"
             )
 
-            # Create results
+            # Create results — R12 dedup
             for chunk, embedding in zip(batch_chunks, batch_embeddings):
-                chunk_id = f"{chunk.relative_path}:{chunk.start_line}-{chunk.end_line}:{chunk.chunk_type}"
-                if chunk.name:
-                    chunk_id += f":{chunk.name}"
-
-                metadata = {
-                    "file_path": chunk.file_path,
-                    "relative_path": chunk.relative_path,
-                    "folder_structure": chunk.folder_structure,
-                    "chunk_type": chunk.chunk_type,
-                    "start_line": chunk.start_line,
-                    "end_line": chunk.end_line,
-                    "name": chunk.name,
-                    "parent_name": chunk.parent_name,
-                    "docstring": chunk.docstring,
-                    "decorators": chunk.decorators,
-                    "imports": chunk.imports,
-                    "complexity_score": chunk.complexity_score,
-                    "tags": chunk.tags,
-                    "content_preview": chunk.content[:200] + "..."
-                    if len(chunk.content) > 200
-                    else chunk.content,
-                    "full_content": chunk.content,
-                }
-
-                results.append(
-                    EmbeddingResult(
-                        embedding=embedding, chunk_id=chunk_id, metadata=metadata
-                    )
-                )
+                results.append(_make_embedding_result(chunk, embedding))
 
             if batch_start + batch_size < len(file_items):
                 self._logger.info(
