@@ -537,23 +537,6 @@ class IntelligentSearcher:
                 path_boost = 1.0 + (path_boost - 1.0) * 3.0
             result.similarity_score *= path_boost
 
-            # R10 consumer (PR forthcoming): deboost chunks tagged
-            # `multi_chunk_merge` by `cfg.multi_chunk_merge_deboost`. The
-            # tag is set by chunk_merging when 2+ named non-gap chunks fuse
-            # across a boundary (e.g., authenticate + render_template into
-            # one chunk). Default 1.0 = no effect; operator opts in by
-            # setting MULTI_CHUNK_MERGE_DEBOOST=0.7 (or wherever eval lands).
-            #
-            # Tags live in metadata, not on the SearchResult directly. Read
-            # from metadata_lookup to avoid mutating SearchResult shape.
-            if cfg.multi_chunk_merge_deboost < 1.0:
-                tags = (
-                    metadata_lookup.get(result.chunk_id, {}).get("tags", [])
-                    or []
-                )
-                if "multi_chunk_merge" in tags:
-                    result.similarity_score *= cfg.multi_chunk_merge_deboost
-
         # Phase H fix (2026-05-10): sort candidates by post-boost
         # similarity_score BEFORE the rerank branch. This ensures all paths
         # (sonnet success, sonnet override-fallback, RERANKER=off) start

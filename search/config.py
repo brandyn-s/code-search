@@ -222,14 +222,6 @@ class SearchConfig:
     Default 12s per Phase C v2 simulated-deadline analysis. Below 8s
     degrades quality below hybrid baseline."""
 
-    multi_chunk_merge_deboost: float
-    """Score multiplier for chunks tagged ``multi_chunk_merge`` by the chunk
-    merger (2+ named non-gap chunks fused across a boundary; see R10 PR #193).
-    Default 1.0 = no effect (additive metadata, no scoring change). Set below
-    1.0 to penalize cross-boundary fuses. Range (0.0, 1.0].
-    Sized by paired-bootstrap CI on the harvested holdout — see
-    ``bench/research/`` for the harness."""
-
     sonnet_skip_threshold: Optional[float]
     """When set, skip Sonnet rerank if top-1 hybrid score >= threshold.
     None disables the gate (Phase B'''(b) opt-in)."""
@@ -289,16 +281,6 @@ def get_search_config() -> SearchConfig:
             "SONNET_LISTWISE_TIMEOUT", default=12.0, min_value=0.1,
         ),
         sonnet_skip_threshold=_parse_optional_float("SONNET_RERANKER_SKIP_THRESHOLD"),
-
-        # R10: deboost knob for cross-boundary chunk-merges (default no-op).
-        # Bounded (0.0, 1.0]: 1.0 disables the deboost, 0.0 would zero out
-        # the score (invalid; clamp via min_value=0.001). Values above 1.0
-        # would be a boost, which contradicts the knob's intent — clamp
-        # via max_value=1.0.
-        multi_chunk_merge_deboost=parse_env_float(
-            "MULTI_CHUNK_MERGE_DEBOOST", default=1.0,
-            min_value=0.001, max_value=1.0,
-        ),
 
         # R11 phase 2: PPR consolidation. Previously read by
         # ppr_scorer.get_env_config() directly; that helper now delegates
