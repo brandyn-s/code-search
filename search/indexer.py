@@ -553,17 +553,27 @@ class CodeIndexManager:
             self._logger.warning(f"Failed to move FAISS index to GPU, continuing on CPU: {e}")
     
     def search(
-        self, 
-        query_embedding: np.ndarray, 
+        self,
+        query_embedding: np.ndarray,
         k: int = 5,
         filters: Optional[Dict[str, Any]] = None
     ) -> List[Tuple[str, float, Dict[str, Any]]]:
         """Search for similar code chunks."""
         import logging
         logger = logging.getLogger(__name__)
-        
+
+        # R2: reject k <= 0 with a clean ValueError instead of letting it
+        # hit the FAISS bindings (which raise an AssertionError with no
+        # context). The MCP surface accepts a k arg from external callers
+        # who can trivially pass 0 or a negative; an explicit error here
+        # is the right boundary.
+        if not isinstance(k, int) or k <= 0:
+            raise ValueError(
+                f"k must be a positive integer, got {k!r} (type={type(k).__name__})"
+            )
+
         logger.info(f"Index manager search called with k={k}, filters={filters}")
-        
+
         # Use property to trigger lazy loading
         index = self.index
         if index is None or index.ntotal == 0:
@@ -620,8 +630,25 @@ class CodeIndexManager:
         return results
     
     def _matches_filters(self, metadata: Dict[str, Any], filters: Dict[str, Any]) -> bool:
-        """Check if metadata matches the provided filters."""
+        """Check if metadata matches the provided filters.
+
+        R1: filters with `None` values are treated as "filter absent" rather
+        than "match nothing". Pre-fix, `chunk_type=None` would compare
+        `metadata['chunk_type'] != None` which is True for every indexed
+        chunk → filter rejects all results silently. Pre-fix,
+        `file_pattern=None` would crash with TypeError on the for-loop.
+        Both are operator-facing failure shapes (the MCP `search_code`
+        tool accepts these args from external callers) so we normalize
+        to a no-op filter here rather than at every call site.
+        """
         for key, value in filters.items():
+            # R1: a None value means "this filter is not provided" — skip it.
+            # If a caller wants to filter for chunks where chunk_type IS
+            # literally None (it's not, but for symmetry), they must pass
+            # the explicit string the indexer stores.
+            if value is None:
+                continue
+
             if key == 'file_pattern':
                 # Glob matching for file paths. fnmatch does shell-style:
                 # `*.rs` matches `foo.rs`, `internal/x/foo.rs`, etc. (against
@@ -635,10 +662,14 @@ class CodeIndexManager:
                 # write `*.rs` (basename pattern) or `internal/**/*.rs`
                 # (path pattern) interchangeably.
                 basename = relative_path.split('/')[-1].split('\\')[-1]
+                # Accept both a single pattern string and a list of patterns.
+                # Pre-R1 the for-pattern-in-value path crashed on a single
+                # string (it'd iterate chars); normalize first.
+                patterns = value if isinstance(value, (list, tuple)) else [value]
                 if not any(
                     fnmatch.fnmatch(relative_path, pattern)
                     or fnmatch.fnmatch(basename, pattern)
-                    for pattern in value
+                    for pattern in patterns
                 ):
                     return False
             elif key == 'chunk_type':

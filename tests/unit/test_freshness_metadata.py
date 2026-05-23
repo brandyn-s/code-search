@@ -100,18 +100,27 @@ def test_freshness_nonblocking_dispatches_background_reindex(server, monkeypatch
 
 def test_freshness_nonblocking_when_already_active(server, monkeypatch):
     """If a background reindex is already running, search returns
-    'stale_reindex_in_progress' without dispatching a second."""
+    'stale_reindex_in_progress'. Post-R4/R5 (watchdog + lock), the
+    nonblocking search path always calls _dispatch_background_reindex
+    and lets the dispatch internals decide whether to start a fresh
+    thread (under lock) or refuse (in-flight + within watchdog deadline)
+    or pre-empt (in-flight but past watchdog deadline). Freshness is
+    'stale_reindex_in_progress' in all of those cases since the result
+    we're returning is from the pre-reindex index either way."""
     monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
     monkeypatch.setenv("CODE_SEARCH_NONBLOCKING_SEARCH", "1")
     _stub_searcher_returning_empty(server)
     server._current_project = "/some/path"
     server._background_reindex_active = True
-    with patch.object(server, "_dispatch_background_reindex") as mock_dispatch:
+    # The dispatch is now ALWAYS called; its internal lock+watchdog
+    # determines what to do. Stub it to return False (no fresh dispatch)
+    # to simulate the "already in flight, within watchdog" case.
+    with patch.object(server, "_dispatch_background_reindex",
+                       return_value=False) as mock_dispatch:
         raw = server.search_code(query="x", k=5, auto_reindex=True)
     out = json.loads(raw)
     assert out["_metadata"]["freshness"] == "stale_reindex_in_progress"
-    # Did NOT dispatch a second one
-    mock_dispatch.assert_not_called()
+    mock_dispatch.assert_called_once()
 
 
 def test_dispatch_background_reindex_is_idempotent(server):

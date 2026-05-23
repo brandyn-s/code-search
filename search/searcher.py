@@ -11,6 +11,73 @@ from search.indexer import CodeIndexManager
 from embeddings.embedder import CodeEmbedder
 
 
+def _parse_env_int(
+    name: str,
+    default: int,
+    min_value: Optional[int] = None,
+    logger: Optional[logging.Logger] = None,
+) -> int:
+    """Parse an int from an env var with graceful fallback on bad input.
+
+    Pre-R3, malformed values (e.g., FUSION_K=abc) propagated a ValueError
+    out of _hybrid_search, breaking the search call. Operator misconfig
+    should degrade to defaults with a clear warning, not crash.
+
+    Values that parse but fall below `min_value` are treated as invalid.
+    The check skips quietly if the env var is unset; only set-but-bad
+    values trigger the warning.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        if logger:
+            logger.warning(
+                "[CONFIG] env var %s=%r is not a valid int; using default %s",
+                name, raw, default,
+            )
+        return default
+    if min_value is not None and val < min_value:
+        if logger:
+            logger.warning(
+                "[CONFIG] env var %s=%s below min_value=%s; using default %s",
+                name, val, min_value, default,
+            )
+        return default
+    return val
+
+
+def _parse_env_float(
+    name: str,
+    default: float,
+    min_value: Optional[float] = None,
+    logger: Optional[logging.Logger] = None,
+) -> float:
+    """Float counterpart to _parse_env_int — same semantics."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        if logger:
+            logger.warning(
+                "[CONFIG] env var %s=%r is not a valid float; using default %s",
+                name, raw, default,
+            )
+        return default
+    if min_value is not None and val < min_value:
+        if logger:
+            logger.warning(
+                "[CONFIG] env var %s=%s below min_value=%s; using default %s",
+                name, val, min_value, default,
+            )
+        return default
+    return val
+
+
 def reciprocal_rank_fusion(
     vector_results: List[Tuple[str, float]],
     bm25_results: List[Tuple[str, float]],
@@ -225,6 +292,23 @@ class IntelligentSearcher:
             "reason": "not_invoked",
             "latency_ms": 0,
         }
+        # R8 (2026-05-23): structured PPR metadata, mirroring the
+        # reranker envelope. PPR is an opt-in feature (CODE_SEARCH_PPR_ENABLED)
+        # whose enable/disable, missing-graph-db, and empty-subgraph paths
+        # were invisible to consumers before this — only sidecar [PPR_DIAG]
+        # log lines signaled anything. The MCP layer emits this as
+        # `_metadata.ppr = {applied, reason, latency_ms}`. Reason vocab:
+        #   ok                  PPR applied; scores blended into candidates
+        #   disabled_by_env     CODE_SEARCH_PPR_ENABLED is off (default)
+        #   alpha_zero          CODE_SEARCH_PPR_ALPHA=0.0 (correctness gate)
+        #   no_candidates       upstream produced empty candidate list
+        #   no_graph_db         graph DB missing (PPRScorer returned {})
+        #   error               exception caught; hybrid order preserved
+        self.last_ppr_metadata: Dict[str, Any] = {
+            "applied": False,
+            "reason": "not_invoked",
+            "latency_ms": 0,
+        }
 
         # Query patterns for intent detection
         self.query_patterns = {
@@ -324,14 +408,23 @@ class IntelligentSearcher:
             self.last_reranker_metadata = {
                 "applied": False, "reason": "not_invoked_keyword_mode", "latency_ms": 0,
             }
+            self.last_ppr_metadata = {
+                "applied": False, "reason": "not_invoked_keyword_mode", "latency_ms": 0,
+            }
             return self._keyword_search(query, k, filters)
         elif mode == "semantic":
             self.last_reranker_metadata = {
                 "applied": False, "reason": "not_invoked_semantic_mode", "latency_ms": 0,
             }
+            self.last_ppr_metadata = {
+                "applied": False, "reason": "not_invoked_semantic_mode", "latency_ms": 0,
+            }
             return self._semantic_search(query, k, context_depth, filters)
-        else:  # hybrid — _hybrid_search will populate metadata
+        else:  # hybrid — _hybrid_search will populate both metadata fields
             self.last_reranker_metadata = {
+                "applied": False, "reason": "not_invoked", "latency_ms": 0,
+            }
+            self.last_ppr_metadata = {
                 "applied": False, "reason": "not_invoked", "latency_ms": 0,
             }
             return self._hybrid_search(query, k, context_depth, filters)
@@ -402,13 +495,25 @@ class IntelligentSearcher:
     ) -> List[SearchResult]:
         """Hybrid BM25 + vector search with weighted RRF fusion and content mode boosting."""
 
-        fusion_k = int(os.environ.get("FUSION_K", "20"))  # k=20 wins over k=60 (sharper rank fusion)
+        # R3: wrap env-var parsing so a malformed operator config (e.g.,
+        # FUSION_K=abc, VECTOR_WEIGHT=not_a_float) doesn't crash the
+        # search path. Bad values log a warning and fall through to the
+        # default. Negative numerics are also rejected — they're nonsense
+        # in this context (FUSION_K<=0 would div-by-zero in RRF;
+        # VECTOR_WEIGHT<0 would invert ranking).
+        fusion_k = _parse_env_int(
+            "FUSION_K", default=20, min_value=1, logger=self._logger,
+        )  # k=20 wins over k=60 (sharper rank fusion)
         candidate_k = 50  # Retrieve 50 from each source
 
         # Determine content mode and weights
         content_mode = os.environ.get("CONTENT_MODE", "code").lower()
-        vw = float(os.environ.get("VECTOR_WEIGHT", "0"))
-        bw = float(os.environ.get("BM25_WEIGHT", "0"))
+        vw = _parse_env_float(
+            "VECTOR_WEIGHT", default=0.0, min_value=0.0, logger=self._logger,
+        )
+        bw = _parse_env_float(
+            "BM25_WEIGHT", default=0.0, min_value=0.0, logger=self._logger,
+        )
         if vw > 0 or bw > 0:
             vector_weight, bm25_weight = vw or 0.5, bw or 0.5
         else:
@@ -518,11 +623,36 @@ class IntelligentSearcher:
         # from `CODE_SEARCH_PPR_ALPHA` (default 0.5). Mechanism-correctness
         # gate (Plan A2.4 falsifier): with PPR disabled OR alpha=0.0, this
         # block is a no-op and candidates pass through unchanged.
+        #
+        # R8 (2026-05-23): write `self.last_ppr_metadata` on every path so
+        # the MCP `_metadata.ppr` envelope can surface enable/disable/
+        # missing-DB to consumers. Previously this was visible only via
+        # sidecar log lines.
+        import time as _time
         from search.ppr_scorer import (
             PPRScorer, blend_ppr_into_candidates, get_env_config,
         )
         ppr_enabled, ppr_alpha = get_env_config()
-        if ppr_enabled and ppr_alpha != 0.0 and candidates:
+        ppr_start = _time.monotonic()
+        if not ppr_enabled:
+            self.last_ppr_metadata = {
+                "applied": False,
+                "reason": "disabled_by_env",
+                "latency_ms": 0,
+            }
+        elif ppr_alpha == 0.0:
+            self.last_ppr_metadata = {
+                "applied": False,
+                "reason": "alpha_zero",
+                "latency_ms": 0,
+            }
+        elif not candidates:
+            self.last_ppr_metadata = {
+                "applied": False,
+                "reason": "no_candidates",
+                "latency_ms": 0,
+            }
+        else:
             try:
                 hint = None
                 for c in candidates:
@@ -533,11 +663,35 @@ class IntelligentSearcher:
                 with PPRScorer() as ppr:
                     cps = [(c.relative_path, c.similarity_score) for c in candidates]
                     ppr_scores = ppr.score(cps, hint_abs_path=hint)
+                latency_ms = int((_time.monotonic() - ppr_start) * 1000)
                 if ppr_scores:
                     blend_ppr_into_candidates(candidates, ppr_alpha, ppr_scores)
                     candidates.sort(key=lambda r: r.similarity_score, reverse=True)
+                    self.last_ppr_metadata = {
+                        "applied": True,
+                        "reason": "ok",
+                        "latency_ms": latency_ms,
+                        "scored_candidates": len(ppr_scores),
+                        "alpha": ppr_alpha,
+                    }
+                else:
+                    # Empty dict from PPRScorer.score() means either the
+                    # graph DB is missing or the subgraph was too small.
+                    # The scorer logs which via [PPR_DIAG]; both surface
+                    # here as no_graph_db (the dominant cause in practice).
+                    self.last_ppr_metadata = {
+                        "applied": False,
+                        "reason": "no_graph_db",
+                        "latency_ms": latency_ms,
+                    }
             except Exception as ppr_err:
                 self._logger.warning("[PPR_DIAG] ppr_blend_failed err=%s", ppr_err)
+                self.last_ppr_metadata = {
+                    "applied": False,
+                    "reason": "error",
+                    "latency_ms": int((_time.monotonic() - ppr_start) * 1000),
+                    "error_class": type(ppr_err).__name__,
+                }
 
         # Reranking. Default mode is "sonnet" (validated 2026-05-03 PR #93+:
         # +0.087 MRR, +0.137 HR@1 on n=183 multi-target real_session). The

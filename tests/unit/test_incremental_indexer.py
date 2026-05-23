@@ -328,6 +328,64 @@ class TestChunkingDiagnosticsLive:
         assert diag.files_with_chunks + diag.files_zero_chunks == 3
         _close_manager(indexer)
 
+    def test_encoding_error_emits_structured_log(
+        self, tmp_path, indexer_components, caplog
+    ):
+        """Encoding errors are caught inside tree_sitter.chunk_file (before
+        the outer try/except in multi_language_chunker.chunk_file ever sees
+        them). The structured [CHUNKING_DIAG_FILE] line must still fire so
+        operators can distinguish encoding failures from genuinely empty
+        files — both look the same in `files_zero_chunks`.
+
+        Without this signal, a 5% encoding-error rate (mixed-encoding
+        corpus) would be invisible: the diag count would say "zero-chunk
+        files" with no way to tell why.
+        """
+        import logging
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "good.py").write_text("def good():\n    return 1\n")
+        # Invalid UTF-8 bytes — `open(..., encoding='utf-8').read()` raises
+        # UnicodeDecodeError on this content.
+        (proj / "bad_encoding.py").write_bytes(
+            b"def foo():\n    return '\xff\xfe\xfd'\n"
+        )
+
+        indexer, embedder, chunker, snapshot_manager = indexer_components
+        chunker.root_path = str(proj)
+        ii = IncrementalIndexer(
+            indexer=indexer, embedder=embedder, chunker=chunker,
+            snapshot_manager=snapshot_manager,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="chunking.tree_sitter"):
+            result = ii.incremental_index(str(proj), project_name="proj")
+
+        assert result.success
+        # Two files attempted, one zero-chunk (the bad-encoding one).
+        diag = result.chunking_diagnostics
+        assert diag is not None
+        assert diag.files_attempted == 2
+        assert diag.files_zero_chunks == 1
+        assert diag.files_with_chunks == 1
+
+        # Crucially, the structured per-file log line must have fired so
+        # the operator can grep CHUNKING_DIAG_FILE and see which file +
+        # error_class triggered the zero-chunk outcome.
+        diag_lines = [
+            r.getMessage() for r in caplog.records
+            if "[CHUNKING_DIAG_FILE]" in r.getMessage()
+            and "bad_encoding.py" in r.getMessage()
+        ]
+        assert len(diag_lines) >= 1, (
+            f"expected [CHUNKING_DIAG_FILE] log line for bad_encoding.py, "
+            f"got: {[r.getMessage() for r in caplog.records]}"
+        )
+        assert "UnicodeDecodeError" in diag_lines[0], (
+            f"expected error_class=UnicodeDecodeError, got: {diag_lines[0]}"
+        )
+        _close_manager(indexer)
+
     def test_diag_reset_between_runs_no_changes_path(
         self, project_dir, indexer_components
     ):

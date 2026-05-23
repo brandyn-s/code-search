@@ -69,13 +69,30 @@ class TreeSitterChunker:
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
             except Exception as e:
-                logger.error(f"Failed to read file {file_path}: {e}")
+                # Structured per-file diagnostic. The outer chunker
+                # (multi_language_chunker.chunk_file) never sees this — we
+                # return [] gracefully — so emit the [CHUNKING_DIAG_FILE]
+                # log line here so encoding-error and other file-read
+                # failures are visible alongside parse failures in
+                # `grep CHUNKING_DIAG_FILE`. Without this, encoding errors
+                # show up only as `files_zero_chunks` with no per-file
+                # signal to disambiguate from genuinely empty files.
+                logger.error(
+                    "[CHUNKING_DIAG_FILE] file=%s error_class=%s error=%s",
+                    file_path, type(e).__name__, e,
+                )
                 return []
 
         try:
             return chunker.chunk_code(content)
         except Exception as e:
-            logger.warning(f"Tree-sitter parsing failed for {file_path}: {e}")
+            # Same rationale as the file-read catch above: surface parse
+            # failures as a structured per-file diagnostic so operators can
+            # categorize without grepping mixed log shapes.
+            logger.warning(
+                "[CHUNKING_DIAG_FILE] file=%s error_class=%s error=%s",
+                file_path, type(e).__name__, e,
+            )
             return []
 
     def is_supported(self, file_path: str) -> bool:

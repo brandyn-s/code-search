@@ -162,7 +162,19 @@ class CodeSearchServer:
         # Concurrent searches use the OLD _searcher reference (held in
         # local var of in-flight calls); after reindex completes, _searcher
         # is set to None so the next call rebuilds against the fresh index.
+        #
+        # The lock guards the check-and-set of `_background_reindex_active`.
+        # Without it, two concurrent search_code calls can both observe the
+        # flag as False, both enter the dispatch path, and both start a
+        # reindex thread (TOCTOU). `_background_reindex_started_at` carries
+        # a monotonic start timestamp so a stuck reindex (hung Merkle walk,
+        # API stall) can be detected and the flag forcibly released — a
+        # crashed thread between line 596's `finally` and process restart
+        # is the failure shape this guards against.
+        import threading as _threading
+        self._background_reindex_lock = _threading.Lock()
         self._background_reindex_active = False
+        self._background_reindex_started_at: Optional[float] = None
         self._background_reindex_thread: Optional[Any] = None
 
         # Query logging (ported from memory-search)
@@ -547,21 +559,61 @@ class CodeSearchServer:
 
         return self._searcher
 
+    # Watchdog deadline: a background reindex is considered stuck if it
+    # has been "active" for longer than this. Pathologically large
+    # projects can legitimately take 10-20 min; 30 min is a generous
+    # ceiling that still catches genuinely-hung reindexes (e.g., the
+    # crashed-thread-before-finally case, or auto_reindex_if_needed
+    # blocking on a wedge with no cancel propagation).
+    BG_REINDEX_WATCHDOG_SECONDS = 1800
+
     def _dispatch_background_reindex(
         self, project_path: str, max_age_minutes: float,
     ) -> bool:
         """Dispatch auto_reindex_if_needed to a daemon thread.
 
         Returns True if a fresh thread was started, False if a reindex
-        was already in flight. Plan-2 F2 (2026-05-05). Concurrent search
-        safety: in-flight searches use the OLD self._searcher reference
-        (held in their local var); after the reindex completes, _searcher
-        is set to None so the NEXT call rebuilds against the fresh index.
+        was already in flight (and not exceeding the watchdog deadline).
+        Plan-2 F2 (2026-05-05). Concurrent search safety: in-flight
+        searches use the OLD self._searcher reference (held in their
+        local var); after the reindex completes, _searcher is set to
+        None so the NEXT call rebuilds against the fresh index.
+
+        Concurrency:
+          The check-and-set of `_background_reindex_active` is performed
+          under `_background_reindex_lock`. Without it, two concurrent
+          search_code calls observing `active=False` could both enter and
+          dispatch (TOCTOU). The lock is held only across the flag
+          mutation, not the indexing run itself.
+
+        Watchdog:
+          If `_background_reindex_active` is True AND
+          `_background_reindex_started_at` is older than
+          BG_REINDEX_WATCHDOG_SECONDS, the previous thread is assumed
+          stuck (crashed before `finally`, hung Merkle walk, etc.). The
+          flag is reset and a fresh dispatch proceeds. The stuck thread
+          itself is a daemon and will not be join()ed — it dies with the
+          process.
         """
         import threading
-        if self._background_reindex_active:
-            return False
-        self._background_reindex_active = True
+        import time as _time
+
+        now = _time.monotonic()
+        with self._background_reindex_lock:
+            if self._background_reindex_active:
+                started = self._background_reindex_started_at or now
+                age = now - started
+                if age <= self.BG_REINDEX_WATCHDOG_SECONDS:
+                    return False
+                # Watchdog fires: previous thread is assumed stuck.
+                logger.warning(
+                    "[F2-bg] watchdog: prior reindex 'active' for %.1fs (>%.0fs deadline); "
+                    "releasing flag and dispatching fresh reindex. Stuck thread name=%s",
+                    age, self.BG_REINDEX_WATCHDOG_SECONDS,
+                    getattr(self._background_reindex_thread, "name", "?"),
+                )
+            self._background_reindex_active = True
+            self._background_reindex_started_at = now
 
         def _run():
             try:
@@ -593,7 +645,9 @@ class CodeSearchServer:
             except Exception as e:
                 logger.warning(f"[F2-bg] background reindex failed: {e}")
             finally:
-                self._background_reindex_active = False
+                with self._background_reindex_lock:
+                    self._background_reindex_active = False
+                    self._background_reindex_started_at = None
 
         t = threading.Thread(target=_run, daemon=True, name="bg-reindex")
         t.start()
@@ -674,15 +728,18 @@ class CodeSearchServer:
                 if nonblocking:
                     # Background dispatch: kick off reindex if not already
                     # running, return immediately with current index.
-                    if self._background_reindex_active:
-                        freshness = "stale_reindex_in_progress"
-                    else:
-                        dispatched = self._dispatch_background_reindex(
-                            self._current_project, max_age_minutes,
-                        )
-                        freshness = (
-                            "stale_reindex_in_progress" if dispatched else "fresh"
-                        )
+                    # _dispatch_background_reindex owns the active-flag
+                    # check (under lock) and the watchdog (auto-recovery
+                    # from a stuck reindex past BG_REINDEX_WATCHDOG_SECONDS).
+                    # Returns True if a fresh thread was started, False if
+                    # a previous reindex is still legitimately in flight.
+                    # Either way the search result we're about to return
+                    # comes from the pre-reindex index, so freshness is
+                    # stale-in-progress in both cases.
+                    self._dispatch_background_reindex(
+                        self._current_project, max_age_minutes,
+                    )
+                    freshness = "stale_reindex_in_progress"
                 else:
                     # Blocking path (existing default).
                     from search.incremental_indexer import IncrementalIndexer
@@ -827,6 +884,35 @@ class CodeSearchServer:
             except Exception as e:
                 # Never let metadata propagation break a search response.
                 logger.debug(f"reranker metadata propagation failed: {e}")
+
+            # R8 (2026-05-23): structured PPR metadata, mirroring the
+            # reranker envelope. PPR is an opt-in feature
+            # (CODE_SEARCH_PPR_ENABLED) whose enable/disable/missing-DB
+            # paths were invisible before — only sidecar [PPR_DIAG] log
+            # lines signaled anything. Reason vocab is documented at
+            # `IntelligentSearcher.last_ppr_metadata`. Optional `alpha`
+            # and `scored_candidates` fields appear when applied=True so
+            # consumers (and PPR canary observation) can correlate blend
+            # strength with quality.
+            try:
+                ppr_meta = getattr(searcher, "last_ppr_metadata", None)
+                if ppr_meta and isinstance(ppr_meta, dict):
+                    ppr_envelope: Dict[str, Any] = {
+                        "applied": bool(ppr_meta.get("applied", False)),
+                        "reason": str(ppr_meta.get("reason", "unknown")),
+                        "latency_ms": int(ppr_meta.get("latency_ms", 0)),
+                    }
+                    # Optional diagnostic fields (only present when applied
+                    # or when an error class is known).
+                    if "alpha" in ppr_meta:
+                        ppr_envelope["alpha"] = ppr_meta["alpha"]
+                    if "scored_candidates" in ppr_meta:
+                        ppr_envelope["scored_candidates"] = ppr_meta["scored_candidates"]
+                    if "error_class" in ppr_meta:
+                        ppr_envelope["error_class"] = ppr_meta["error_class"]
+                    response_metadata["ppr"] = ppr_envelope
+            except Exception as e:
+                logger.debug(f"ppr metadata propagation failed: {e}")
             # PR Plan-2 F2 (2026-05-05): freshness metadata. Stable string
             # vocabulary documented in CLAUDE.md.
             response_metadata["freshness"] = freshness
