@@ -222,6 +222,31 @@ class SearchConfig:
     Default 12s per Phase C v2 simulated-deadline analysis. Below 8s
     degrades quality below hybrid baseline."""
 
+    multi_chunk_merge_deboost: float
+    """Score multiplier for chunks tagged ``multi_chunk_merge`` by the chunk
+    merger (2+ named non-gap chunks fused across a boundary; see R10 PR #193).
+    Default 1.0 = no effect (additive metadata, no scoring change). Set below
+    1.0 to penalize cross-boundary fuses. Range (0.0, 1.0].
+    Sized by paired-bootstrap CI on the harvested holdout — see
+    ``bench/research/`` for the harness."""
+
+    sonnet_skip_threshold: Optional[float]
+    """When set, skip Sonnet rerank if top-1 hybrid score >= threshold.
+    None disables the gate (Phase B'''(b) opt-in)."""
+
+    # PPR (Personalized PageRank over code-graph) — consolidated R11 phase 2.
+    ppr_enabled: bool
+    """Whether the PPR re-ranking signal blends into post-boost scores.
+    Default False (opt-in)."""
+
+    ppr_alpha: float
+    """Blend strength; ``score *= (1 + alpha * ppr_norm)``. alpha=0.0 is a
+    bit-exact correctness gate documented in ``search.ppr_scorer``."""
+
+    # Dispatch-level fallback (R11 phase 2)
+    default_search_mode: str
+    """Used by ``search()`` when the caller doesn't pass ``search_mode``.
+    Pre-R11 this read ``SEARCH_MODE`` env directly with no allowlist."""
     sonnet_skip_threshold: Optional[float]
     """When set, skip Sonnet rerank if top-1 hybrid score >= threshold.
     None disables the gate (Phase B'''(b) opt-in).
@@ -264,6 +289,30 @@ def get_search_config() -> SearchConfig:
             "SONNET_LISTWISE_TIMEOUT", default=12.0, min_value=0.1,
         ),
         sonnet_skip_threshold=_parse_optional_float("SONNET_RERANKER_SKIP_THRESHOLD"),
+
+        # R10: deboost knob for cross-boundary chunk-merges (default no-op).
+        # Bounded (0.0, 1.0]: 1.0 disables the deboost, 0.0 would zero out
+        # the score (invalid; clamp via min_value=0.001). Values above 1.0
+        # would be a boost, which contradicts the knob's intent — clamp
+        # via max_value=1.0.
+        multi_chunk_merge_deboost=parse_env_float(
+            "MULTI_CHUNK_MERGE_DEBOOST", default=1.0,
+            min_value=0.001, max_value=1.0,
+        ),
+
+        # R11 phase 2: PPR consolidation. Previously read by
+        # ppr_scorer.get_env_config() directly; that helper now delegates
+        # here so both modules share one source of truth.
+        ppr_enabled=parse_env_bool("CODE_SEARCH_PPR_ENABLED", default=False),
+        ppr_alpha=parse_env_float(
+            "CODE_SEARCH_PPR_ALPHA", default=0.5, min_value=0.0,
+        ),
+
+        # R11 phase 2: SEARCH_MODE fallback. Pre-fix this was read inline
+        # in search() with no allowlist — typos silently became "hybrid"-ish.
+        default_search_mode=parse_env_enum(
+            "SEARCH_MODE", default="hybrid", allowed=SEARCH_MODES,
+        ),
     )
 
 

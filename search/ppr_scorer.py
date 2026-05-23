@@ -295,11 +295,24 @@ def blend_ppr_into_candidates(candidates, alpha: float, ppr_scores: Dict[str, fl
 
 
 def get_env_config() -> Tuple[bool, float]:
-    """Return (enabled, alpha) from env vars. Defaults: disabled, alpha=0.5."""
-    enabled_raw = os.environ.get("CODE_SEARCH_PPR_ENABLED", "")
-    enabled = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
-    try:
-        alpha = float(os.environ.get("CODE_SEARCH_PPR_ALPHA", "0.5"))
-    except ValueError:
-        alpha = 0.5
+    """Return ``(enabled, alpha)`` from env vars. Defaults: disabled, alpha=0.5.
+
+    R11 phase 2: same env var names + same parsing helpers as
+    ``SearchConfig.ppr_enabled`` / ``SearchConfig.ppr_alpha`` (both go
+    through ``search.config.parse_env_*``), but this wrapper reads env
+    fresh on every call instead of going through the cached SearchConfig.
+
+    Why bypass the cache: legacy callers (and the existing test suite)
+    expect this function to reflect env changes immediately, including
+    multiple env mutations within a single test. The cached config is
+    invalidated only between tests by the autouse fixture in conftest.
+
+    New call sites should prefer ``cfg.ppr_enabled`` / ``cfg.ppr_alpha``
+    via ``get_search_config()`` — they're typed and validated identically.
+    """
+    from search.config import parse_env_bool, parse_env_float
+    enabled = parse_env_bool("CODE_SEARCH_PPR_ENABLED", default=False)
+    alpha = parse_env_float(
+        "CODE_SEARCH_PPR_ALPHA", default=0.5, min_value=0.0,
+    )
     return enabled, alpha
