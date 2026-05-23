@@ -121,6 +121,19 @@ flip" or "ship the knob; eval decides what value to set."
   paired-bootstrap CI (see `docs/EVAL_RUNBOOK.md`). When that cost is
   unavailable, the correct closing is BLOCKED, not a softened DONE.
 
+## Structural enforcement
+
+These rules are policy. Documentation alone has weak enforcement —
+relies on every Claude session remembering to apply them. For
+mechanical enforcement, use the wrapper at `.claude/skills/goal-disciplined.md`
+(invoke as `/goal-disciplined` instead of `/goal` for outcome-shaped
+goals) and the Stop hook at `.claude/hooks/check_rule10_closing.sh`.
+
+The hook's detector (`.claude/lib/rule10_check.py`) is tested at
+`tests/unit/test_rule10_closing_detector.py` — including a regression
+pin on the exact PR #199 closing-pattern this rule was designed to
+catch. See `.claude/README.md` for install instructions.
+
 ---
 
 ## Case study — PR #191 → #199 retrospective applied to rules 9-10

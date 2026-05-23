@@ -1,4 +1,15 @@
-.claude/
+# .claude/ direct children are ignored EXCEPT the operator-facing
+# skill / hook / lib artifacts below. Per-session state, transcripts,
+# caches, worktrees, etc. created under .claude/ stay ignored because
+# the patterns below don't list them.
+.claude/*
+!.claude/README.md
+!.claude/skills/
+!.claude/hooks/
+!.claude/lib/
+# NOTE: explicit re-include of .claude/lib/*.py lives at the bottom of
+# this file because gitignore is last-match-wins, and a bare `lib/`
+# pattern further down re-excludes it.
 
 ignore/
 # Byte-compiled / optimized / DLL files
@@ -236,3 +247,7 @@ benchmarks/_inspect_codegraph.py
 
 # Phase C / listwise eval outputs (regenerable artifacts)
 bench/research/listwise_2026-*/
+
+# Re-include .claude/lib/*.py (overrides the bare lib/ pattern above)
+!.claude/lib/
+!.claude/lib/*.py
