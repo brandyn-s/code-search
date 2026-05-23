@@ -1,8 +1,8 @@
-# Listwise Reranker — Canary Operations Runbook
+# Listwise Reranker — Deployment + p99 Monitoring Runbook
 
-**Status (2026-05-16): CANARY-GO, DEFAULT-NO-GO.** Listwise reranker shipped as opt-in feature flag with 12s hard deadline + graceful hybrid fallback. Default reranker remains `RERANKER=sonnet` (pointwise). This document is the operational runbook for the canary observation period that precedes any default flip.
+**Status (2026-05-23): DEFAULT-GO.** Listwise reranker is the production default (`RERANKER=listwise`) per Phase C v2 bootstrap CI clearing the eval-shipping-discipline binary ship gate: +0.044 MRR CI [+0.003, +0.084] harvested, +0.047 nDCG@10 CI [+0.004, +0.095] golden, +0.13-0.22 MRR adversarial — all gates favorable, CI excludes zero. Pointwise (`RERANKER=sonnet`) stays selectable as a fallback knob for regression observation; cross-encoder and off paths unchanged. This document is the post-graduation operational runbook covering p99 monitoring and rollback.
 
-> Authoritative external review: [GPT-5.5-pro pass 5 — Phase C v2 ship-readiness](https://github.com/redacted-org/claude-knowledge-base/pull/554) and [pass 6 — what's next](https://github.com/redacted-org/claude-knowledge-base/pull/556). Pre-committed kill-switch rule and graduation criteria are in pass 3 / pass 5.
+> Graduation history: the 2026-05-16 canary phase shipped listwise as opt-in (`RERANKER=listwise`) per [GPT-5.5-pro pass 5 — Phase C v2 ship-readiness](https://github.com/redacted-org/claude-knowledge-base/pull/554). The default flipped to listwise on 2026-05-23 once `eval-shipping-discipline.md`'s binary {SHIP, RETIRE} rule replaced the older canary-then-flip pattern: the Phase C v2 bootstrap CI evidence had already cleared the gate, and opt-in defaults are documented non-decisions.
 
 ---
 
@@ -17,19 +17,28 @@ The listwise reranker (`RERANKER=listwise`) replaces those 15 calls with **one c
 
 ---
 
-## How to enable
+## Deployment state
+
+Listwise is the default; no env vars required to enable it. The MCP server uses it on a fresh install:
 
 ```bash
-# On the MCP server host
-export RERANKER=listwise
-export SONNET_LISTWISE_TIMEOUT=12.0   # default; override if needed
-export ANTHROPIC_API_KEY=...           # required (else REASON_API_KEY_MISSING)
+# Required for any Sonnet rerank path (listwise or pointwise)
+export ANTHROPIC_API_KEY=...           # missing → REASON_API_KEY_MISSING, hybrid fallback
+
+# Optional overrides (defaults shown)
+export SONNET_LISTWISE_TIMEOUT=12.0    # hard deadline; see "Why 12s default" below
 
 # Then start the MCP server normally
 .venv/Scripts/python.exe -m mcp_server.server
 ```
 
-No other code changes required. The dispatcher in `search/searcher.py` routes to `listwise_rerank_with_sonnet` when `RERANKER=listwise`.
+To explicitly select pointwise (the prior default, kept as fallback for regression observation):
+
+```bash
+export RERANKER=sonnet
+```
+
+The dispatcher in `search/searcher.py` routes to `listwise_rerank_with_sonnet` when `RERANKER` is `listwise` (the new default) or unset; pointwise (`rerank_with_sonnet`) is reachable via `RERANKER=sonnet`.
 
 ---
 
@@ -71,7 +80,9 @@ The contract: **failures degrade quality, never break the search response.**
 
 ---
 
-## What to monitor during canary
+## What to monitor in production
+
+These signals were the canary graduation criteria; they remain the post-ship p99 monitoring contract. A sustained breach is the rollback signal.
 
 ### Log signals
 
@@ -95,46 +106,31 @@ grep "LISTWISE_REASON.*ok.*latency_ms=" ~/.claude/logs/code-search-mcp.log | \
 
 Every `search_code` response includes `_metadata.reranker.{applied, reason, latency_ms}`. The MCP layer surfaces this to consumers; LLM agents observing `applied: false` know they got hybrid fallback.
 
-### Graduation criteria (per GPT pass 5)
+### Production SLO thresholds (originally the canary graduation criteria, now the rollback triggers)
 
-| Criterion | Threshold | Source signal |
-|---|---|---|
-| `applied: true` rate ≥ 85% | over rolling 1000 queries | `LISTWISE_REASON.*ok` count / total |
-| `parse_failed` rate < 5% | over rolling 1000 queries | grep `parse_failed` |
-| `timeout` rate < 15% | over rolling 1000 queries | grep `LISTWISE_REASON.*timeout` |
-| User-visible p99 ≤ 13s | wall-clock latency from query start to response | external timing or `_metadata.reranker.latency_ms` |
-| No new user complaints on nix/exact-match queries | qualitative | issue tracker / user reports |
+| Criterion | Threshold | Source signal | Breach action |
+|---|---|---|---|
+| `applied: true` rate ≥ 85% | over rolling 1000 queries | `LISTWISE_REASON.*ok` count / total | Investigate API key / timeout cohort before rollback |
+| `parse_failed` rate < 5% | over rolling 1000 queries | grep `parse_failed` | Inspect a sample of failed queries; if persistent, rollback |
+| `timeout` rate < 15% | over rolling 1000 queries | grep `LISTWISE_REASON.*timeout` | Tighten `SONNET_LISTWISE_TIMEOUT` (do NOT go below 8s) or rollback |
+| User-visible p99 ≤ 13s | wall-clock latency from query start to response | external timing or `_metadata.reranker.latency_ms` | Rollback to `RERANKER=sonnet` if SLO breach is sustained |
+| No new user complaints on nix/exact-match queries | qualitative | issue tracker / user reports | Investigate first; rollback if pattern reproduces |
 
 ---
 
 ## Rollback
 
-To revert to pointwise (default):
+To fall back to pointwise (kept as the regression-observation fallback):
 ```bash
-unset RERANKER             # or
 export RERANKER=sonnet
 ```
 
-To revert to no reranking (hybrid only):
+To skip reranking entirely and return RRF+boost order:
 ```bash
 export RERANKER=off
 ```
 
-**No code rollback needed.** The listwise branch in `searcher.py` is opt-in; pointwise is unchanged.
-
----
-
-## Decision: when to flip default to listwise
-
-Flip the production default from `RERANKER=sonnet` to `RERANKER=listwise` ONLY when ALL of:
-
-1. **Canary observation period ≥ 7 days** of meaningful traffic (≥ 1000 search queries observed)
-2. **Graduation criteria thresholds met** (see table above)
-3. **Bootstrap CI re-confirmed on production traffic** — sample 100 queries with both arms (export `RERANKER=sonnet` vs `RERANKER=listwise` in shadow mode), compute paired bootstrap on MRR delta. CI must exclude zero in favorable direction.
-4. **No regression on nix-service queries** observed qualitatively (this was the killer in Phase C v1)
-5. **Operational signoff** from the team owning the search service
-
-The default flip is a 2-line PR (edit `RERANKER` default in `searcher.py` from `"sonnet"` to `"listwise"`). The observation period — not the code — is the gate.
+**No code rollback needed.** Both the pointwise (`search/sonnet_reranker.py`) and listwise (`search/listwise_sonnet_reranker.py`) modules remain in tree; the dispatcher in `search/searcher.py` routes on the `RERANKER` env. Unsetting `RERANKER` returns to the listwise default.
 
 ---
 
@@ -177,8 +173,7 @@ Six GPT-5.5-pro consultation passes informed the design. Most important:
 
 ## Open questions / future work
 
-- **Default flip timing**: 7+ days canary observation + graduation criteria met → flip default. PR scope is 2 lines.
-- **Path-override retirement**: `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES` is the containment hack the listwise architecture was meant to retire. After default flip, deprecate the env var with a 1-version warning, then remove.
+- **Path-override retirement**: `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES` is the containment hack the listwise architecture was meant to retire. Now that listwise is the default, deprecate the env var with a 1-version warning, then remove.
 - **Phase B′′ subsumption**: the "per-query routing selective rerank" target from yesterday's ABC roadmap terminal is now subsumed by listwise (which already routes deadline-based). Terminal-doc Phase B′′ after canary stabilizes.
 - **Listwise + PPR additive**: the 2026-05-11 Nix arc shipped PPR env-off in `searcher.py:500-524`. A separate measurement could test whether `CODE_SEARCH_PPR_ENABLED=1` + `RERANKER=listwise` is additive (lift on Nix specifically). Cost ~$2 + 30min if pursued.
 - **Phase A′′′′ Option α (syn-based Rust extractor)** for code-graph remains queued at 4-6 session arc — separate from the code-search listwise work.
