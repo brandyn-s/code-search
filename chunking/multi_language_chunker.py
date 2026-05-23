@@ -127,11 +127,27 @@ class MultiLanguageChunker:
             tree_chunks = self.tree_sitter_chunker.chunk_file(file_path)
             code_chunks = self._convert_tree_chunks(tree_chunks, file_path)
 
-            # Read source for merge step
+            # Read source for merge step. tree_sitter.chunk_file already
+            # opened the same file for parsing — if that succeeded, this
+            # second read is almost always a no-op. But race conditions
+            # (file deleted/replaced between the two reads) or transient
+            # IO errors are possible, and the previous bare `except` here
+            # silently fell back to unmerged with zero log signal — the
+            # last remaining silent-swallow in the chunking layer.
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     source_code = f.read()
-            except Exception:
+            except Exception as e:
+                # Same structured-diag pattern as the catches in
+                # tree_sitter.py. Operators grep CHUNKING_DIAG_FILE to
+                # disambiguate "file was empty" from "file vanished
+                # mid-chunk" from "encoding error on the rare files where
+                # the first read decoded but the second didn't".
+                logger.warning(
+                    "[CHUNKING_DIAG_FILE] file=%s error_class=%s error=%s "
+                    "stage=merge_read fallback=unmerged",
+                    file_path, type(e).__name__, e,
+                )
                 return code_chunks  # fall back to unmerged
 
             # Build path metadata for merged chunks

@@ -162,6 +162,12 @@ def merge_file_chunks(
         docstring = None
         decorators = []
         parent_name = None
+        # Count distinctly-named non-gap segments. This is the load-bearing
+        # signal for "this chunk merged semantic units across a boundary"
+        # — not just "function body + its imports" (one named chunk + gaps)
+        # but actual e.g. authenticate() + render_template() smushed together
+        # because their NWS sum fit under MAX_CHUNK_NWS.
+        named_non_gap_count = 0
 
         for seg in group:
             if seg.name:
@@ -177,6 +183,8 @@ def merge_file_chunks(
                     decorators.extend(oc.decorators)
                 if oc.parent_name and not parent_name:
                     parent_name = oc.parent_name
+                if oc.name:
+                    named_non_gap_count += 1
 
         # Determine chunk type for the merged result
         non_gap_types = types - {'module_level'}
@@ -186,6 +194,21 @@ def merge_file_chunks(
             chunk_type = 'merged'
         else:
             chunk_type = 'module_level'
+
+        # R10: signal cross-boundary merges via a stable tag so downstream
+        # search consumers can filter or deboost them. The chunk_type alone
+        # is lossy: two `function` chunks fused with a comment gap currently
+        # come out as `chunk_type='function'`, indistinguishable from a
+        # single function. Adding `multi_chunk_merge` is additive (existing
+        # downstream code ignores unknown tags) and preserves the existing
+        # taxonomy that the eval data has been baked against.
+        #
+        # Threshold of 2+ NAMED non-gap chunks: a single function chunk
+        # merged with its preceding imports/comments is NOT a cross-
+        # boundary merge — only one semantic unit. Two functions merged
+        # via a small gap IS the bad pattern.
+        if named_non_gap_count >= 2:
+            all_tags.add('multi_chunk_merge')
 
         merged_name = ' + '.join(names) if names else None
 

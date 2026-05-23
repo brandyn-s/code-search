@@ -230,6 +230,16 @@ Rate the relevance on a scale of 0-10:
 - 1-3 = Tangentially related
 - 0 = Not relevant at all
 
+Domain notes:
+- For Nix/NixOS/configuration queries, treat `option` and `binding` chunks
+  as primary definitions. If the query asks about `mkOption`,
+  `services.<name>`, enable / configuration / module setup, systemd
+  service configuration, hardware configuration, or NixOS modules, prefer
+  the Nix module or option declaration over daemon implementation code,
+  tests, call sites, or docs. For service setup queries,
+  `nix/modules/<service>.nix` is usually the implementation of the
+  user-visible configuration surface.
+
 Respond with ONLY valid JSON:
 {{"score": <int 0-10>, "reasoning": "<one sentence>"}}"""
 
