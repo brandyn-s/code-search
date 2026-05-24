@@ -38,10 +38,13 @@ from search.config import (
 
 class TestDefaults:
     """Pre-R11, each value lived in a separate hardcoded constant in
-    searcher.py. Phase 1 pinned defaults. The reranker default flipped from
-    'sonnet' (pointwise) to 'listwise' on 2026-05-23 after Phase C v2
-    bootstrap CI cleared the eval-shipping-discipline binary ship gate;
-    every other default here is unchanged."""
+    searcher.py. Phase 1 pinned defaults. The reranker default briefly
+    flipped to 'listwise' (PR #199, 2026-05-23) on stale Phase C v2
+    evidence and was reverted the same day after a rule-9 re-eval showed
+    listwise harvested MRR delta −0.0456 CI [−0.0891, −0.0024]
+    excludes zero unfavorable (finding doc
+    docs/findings/2026-05-23-listwise-default-eval-finding.md).
+    Default is pointwise ('sonnet') with the R9 Nix-aware clause."""
 
     def test_defaults_match_current_constants(self, monkeypatch):
         # Strip every env var the config reads so defaults apply.
@@ -59,7 +62,7 @@ class TestDefaults:
         assert cfg.vector_weight == 0.0
         assert cfg.bm25_weight == 0.0
         assert cfg.content_mode == "code"
-        assert cfg.reranker_mode == "listwise"  # flipped from 'sonnet' 2026-05-23
+        assert cfg.reranker_mode == "sonnet"  # listwise flip reverted 2026-05-23
         assert cfg.query_expansion is True   # default on
         assert cfg.bm25_rewrite is False     # default off
         assert cfg.short_query_rewrite is False
@@ -209,35 +212,40 @@ class TestResolveHybridWeights:
 # ---------------------------------------------------------------------------
 
 class TestRerankerDefaultGraduation:
-    """Regression-pin for the 2026-05-23 listwise default-flip.
+    """Regression-pin for the reranker default after the 2026-05-23
+    listwise flip + same-day revert.
 
-    Phase C v2 bootstrap CI cleared the eval-shipping-discipline binary
-    ship gate (+0.044 MRR CI [+0.003, +0.084] harvested, +0.047 nDCG@10
-    CI [+0.004, +0.095] golden, +0.13-0.22 MRR adversarial). Listwise is
-    now the production default. Pointwise (sonnet) stays selectable.
+    PR #199 flipped the default to 'listwise' citing Phase C v2 bootstrap
+    CI as evidence. The rule-9 re-eval against current main (with R9's
+    Nix-aware pointwise clause from PR #193, which post-dated Phase C v2)
+    showed listwise harvested MRR delta −0.0456 CI [−0.0891, −0.0024]
+    excludes zero unfavorable — REVERT per the ship-gate matrix. See
+    docs/findings/2026-05-23-listwise-default-eval-finding.md.
 
-    These tests exist so a future env-default refactor can't silently
-    re-revert the default to pointwise without a deliberate code change.
+    These tests pin the post-revert state: pointwise is the default;
+    listwise / pointwise / off all stay selectable.
     """
 
-    def test_reranker_default_is_listwise(self, monkeypatch):
-        """Fresh install with no env vars uses listwise."""
+    def test_reranker_default_is_sonnet(self, monkeypatch):
+        """Fresh install with no env vars uses pointwise ('sonnet')."""
         monkeypatch.delenv("RERANKER", raising=False)
-        cfg = get_search_config()
-        assert cfg.reranker_mode == "listwise"
-
-    def test_pointwise_remains_selectable(self, monkeypatch):
-        """RERANKER=sonnet still routes to pointwise; not removed by the flip."""
-        monkeypatch.setenv("RERANKER", "sonnet")
         cfg = get_search_config()
         assert cfg.reranker_mode == "sonnet"
 
-    def test_explicit_listwise_still_works(self, monkeypatch):
-        """RERANKER=listwise (the pre-flip opt-in form) still works as an
-        explicit selection — equivalent to the new default, not an error."""
+    def test_listwise_remains_selectable(self, monkeypatch):
+        """RERANKER=listwise still routes to listwise reranker; not
+        removed by the revert. Available for latency-sensitive callers
+        who accept the harvested-MRR cost documented in the finding doc."""
         monkeypatch.setenv("RERANKER", "listwise")
         cfg = get_search_config()
         assert cfg.reranker_mode == "listwise"
+
+    def test_pointwise_explicit_still_works(self, monkeypatch):
+        """RERANKER=sonnet explicit selection still works — equivalent to
+        the post-revert default."""
+        monkeypatch.setenv("RERANKER", "sonnet")
+        cfg = get_search_config()
+        assert cfg.reranker_mode == "sonnet"
 
     def test_off_still_selectable(self, monkeypatch):
         """RERANKER=off (skip rerank entirely) still routes."""
@@ -253,13 +261,14 @@ class TestRerankerModeValidation:
         cfg = get_search_config()
         assert cfg.reranker_mode == mode
 
-    def test_unknown_mode_logs_and_defaults_to_listwise(self, monkeypatch, caplog):
+    def test_unknown_mode_logs_and_defaults_to_sonnet(self, monkeypatch, caplog):
         # Default fallback for unknown RERANKER values tracks the current
-        # default (flipped from 'sonnet' to 'listwise' on 2026-05-23).
+        # default. Briefly 'listwise' on 2026-05-23 (PR #199); reverted to
+        # 'sonnet' the same day per the rule-9 re-eval finding.
         monkeypatch.setenv("RERANKER", "magick_reranker")
         with caplog.at_level(logging.WARNING, logger="search.config"):
             cfg = get_search_config()
-        assert cfg.reranker_mode == "listwise"
+        assert cfg.reranker_mode == "sonnet"
         assert any("RERANKER" in r.getMessage() for r in caplog.records)
 
 

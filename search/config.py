@@ -214,12 +214,14 @@ class SearchConfig:
 
     # Reranker selection + tuning
     reranker_mode: str
-    """One of RERANKER_MODES. Default 'listwise' (single comparative Sonnet
-    call). Graduated from opt-in canary on 2026-05-23 per Phase C v2
-    bootstrap CI: +0.044 MRR CI [+0.003, +0.084] harvested, +0.047 nDCG@10
-    CI [+0.004, +0.095] golden, +0.13-0.22 MRR adversarial — all gates
-    favorable and CI-excludes-zero. Pointwise ('sonnet') stays selectable
-    as a fallback knob for regression observation; see docs/LISTWISE_CANARY.md."""
+    """One of RERANKER_MODES. Default 'sonnet' (pointwise rubric, with R9
+    Nix-aware clause). The 2026-05-23 listwise default-flip (PR #199) was
+    REVERTED 2026-05-23 after the rule-9 re-eval on current main: listwise
+    harvested MRR delta −0.0456 CI [−0.0891, −0.0024], real_session_v1
+    delta −0.0622 CI [−0.108, −0.017] — both CIs exclude zero unfavorable.
+    See docs/findings/2026-05-23-listwise-default-eval-finding.md. Listwise
+    stays selectable via RERANKER=listwise for callers who want the
+    single-call latency profile and accept the harvested MRR cost."""
 
     listwise_timeout_s: float
     """Hard deadline for listwise reranker (RERANKER=listwise only).
@@ -272,7 +274,7 @@ def get_search_config() -> SearchConfig:
 
         # Modes
         content_mode=parse_env_enum("CONTENT_MODE", default="code", allowed=CONTENT_MODES),
-        reranker_mode=parse_env_enum("RERANKER", default="listwise", allowed=RERANKER_MODES),
+        reranker_mode=parse_env_enum("RERANKER", default="sonnet", allowed=RERANKER_MODES),
 
         # Toggles (default-on for query_expansion is documented; rest default-off)
         query_expansion=parse_env_bool("QUERY_EXPANSION", default=True),
