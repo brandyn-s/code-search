@@ -274,6 +274,50 @@ class CodeEmbedder:
     # embeddings for non-contextual models (Jina, local).
     _sibling_context: Dict[str, list] = {}
 
+    # Tier 2C (2026-05-24): LLM-generated context map, lazy-loaded from
+    # the JSON file at LLM_CONTEXT_PATH. Keyed by chunk_id; value is the
+    # context paragraph to prepend in place of the simple header. Cached
+    # at the class level (shared across embedder instances) because the
+    # file is read-only and identical across embedders for one index run.
+    # Sentinel `None` means "not yet attempted"; `{}` means "load failed
+    # or file empty" (don't retry).
+    _llm_context_map: Optional[Dict[str, str]] = None
+    _llm_context_map_path: Optional[str] = None
+
+    @classmethod
+    def _load_llm_context_map(cls, path: str) -> Dict[str, str]:
+        """Lazy-load the LLM context paragraphs JSON.
+
+        Memoizes by path so multiple embedder instances share one load.
+        Returns an empty dict on any load failure (file missing, invalid
+        JSON, type mismatch) so the caller's fallback path fires
+        naturally.
+        """
+        if cls._llm_context_map is not None and cls._llm_context_map_path == path:
+            return cls._llm_context_map
+        import json
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                cls._llm_context_map = {}
+            else:
+                cls._llm_context_map = {
+                    str(k): str(v)
+                    for k, v in data.items()
+                    if isinstance(v, str) and v
+                }
+        except (OSError, ValueError) as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "[LLM_CONTEXT_LOAD] failed path=%s err=%r; falling back to simple header",
+                path,
+                e,
+            )
+            cls._llm_context_map = {}
+        cls._llm_context_map_path = path
+        return cls._llm_context_map
+
     def set_sibling_context(self, chunks: list) -> None:
         """Build sibling name index from a batch of chunks grouped by file."""
         from collections import defaultdict
@@ -299,7 +343,39 @@ class CodeEmbedder:
 
         # Contextual header: prepend file path + type + name for better embeddings
         # (Anthropic research: +20-49% retrieval improvement)
-        if os.environ.get("CONTEXTUAL_HEADERS", "on") == "on":
+        #
+        # Tier 2C (2026-05-24): LLM_CONTEXT_PATH env var lets operators
+        # supply a pre-computed JSON map of {chunk_id: context_paragraph}
+        # produced by `bench/research/generate_llm_contexts.py`. When set
+        # AND the JSON contains the current chunk's id, the paragraph
+        # replaces the simple "# From <path> - <type> <name>" header.
+        # Falls back to the simple header on cache miss or JSON load
+        # failure — graceful degradation.
+        #
+        # Status per ship-discipline rule 10: BLOCKED ON MEASUREMENT
+        # until the A/B vs the simple-header baseline completes.
+        # On SHIP -> remove the LLM_CONTEXT_PATH gate and bake the
+        # LLM-context substrate into the default indexing pipeline.
+        # On REVERT -> remove the env var path entirely + the
+        # generate_llm_contexts.py helper.
+        llm_context_replaced = False
+        llm_context_path = os.environ.get("LLM_CONTEXT_PATH", "")
+        if llm_context_path:
+            llm_map = self._load_llm_context_map(llm_context_path)
+            # Reconstruct chunk_id using the same format as
+            # build_embedding_result() (single source of truth in this
+            # module). Keep in sync if that format ever changes.
+            cid = (
+                f"{chunk.relative_path}:{chunk.start_line}-"
+                f"{chunk.end_line}:{chunk.chunk_type}"
+            )
+            if chunk.name:
+                cid += f":{chunk.name}"
+            if cid in llm_map:
+                content_parts.append(llm_map[cid])
+                llm_context_replaced = True
+
+        if not llm_context_replaced and os.environ.get("CONTEXTUAL_HEADERS", "on") == "on":
             header_parts = [f"# From {chunk.relative_path}"]
             if chunk.parent_name and chunk.name:
                 header_parts.append(
