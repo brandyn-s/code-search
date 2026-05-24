@@ -783,49 +783,6 @@ class IntelligentSearcher:
                 "reason": "not_invoked_insufficient_candidates",
                 "latency_ms": 0,
             }
-        elif rerank_mode == "voyage" and len(candidates) > k:
-            # Voyage Rerank 2.5 cross-encoder (added 2026-05-24). Single
-            # /v1/rerank call with all candidates; ~600ms p99 per vendor
-            # benchmark, $0.05/1M tokens (~$0.0004/query for 15-cand cohorts).
-            # Same graceful-fallback contract as sonnet_reranker:
-            # missing VOYAGE_API_KEY, timeout, rate-limit, or HTTP error
-            # all return hybrid order with a structured
-            # _metadata.reranker.reason. Default model "rerank-2.5";
-            # override via VOYAGE_RERANKER_MODEL ("rerank-2.5-lite"
-            # available for lower cost/latency at slight quality cost).
-            # See docs/findings/2026-05-24-voyage-rerank-2-5-eval-finding.md
-            # for the SHIP-discipline A/B verdict (pending eval as of
-            # 2026-05-24).
-            from search.voyage_reranker import rerank_with_voyage
-
-            n_to_rerank = min(15, len(candidates))
-            top_candidates = candidates[:n_to_rerank]
-            rerank_input = []
-            for r in top_candidates:
-                meta = metadata_lookup.get(r.chunk_id, {}) or {}
-                full = (meta.get("full_content")
-                        or meta.get("content")
-                        or r.content_preview
-                        or "")
-                rerank_input.append({
-                    "chunk_id": r.chunk_id,
-                    "file_path": r.relative_path,
-                    "full_content": full,
-                    "_orig": r,
-                })
-            reranked, rerank_meta = rerank_with_voyage(
-                query, rerank_input, top_k=k, return_metadata=True,
-            )
-            self.last_reranker_metadata = rerank_meta
-            new_top = [d["_orig"] for d in reranked]
-            tail = candidates[n_to_rerank:]
-            candidates = new_top + tail
-        elif rerank_mode == "voyage" and len(candidates) <= k:
-            self.last_reranker_metadata = {
-                "applied": False,
-                "reason": "not_invoked_insufficient_candidates",
-                "latency_ms": 0,
-            }
         elif rerank_mode == "cross-encoder" and candidates:
             # Legacy cross-encoder path (off by default; degrades quality
             # per 2026-03-22 A/B eval but kept for fallback/comparison).

@@ -168,7 +168,7 @@ CONTENT_MODES: Tuple[str, ...] = ("code", "docs", "all")
 
 # Reranker mode allowlist. The dispatcher in searcher.py routes by this string.
 RERANKER_MODES: Tuple[str, ...] = (
-    "sonnet", "listwise", "voyage", "cross-encoder", "off",
+    "sonnet", "listwise", "cross-encoder", "off",
 )
 
 # Search mode allowlist (search_code's search_mode arg).
