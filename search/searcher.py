@@ -52,6 +52,41 @@ def reciprocal_rank_fusion(
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 
+def multi_ranking_rrf(
+    rankings_with_weights: List[Tuple[List[Tuple[str, float]], float]],
+    k: int = 60,
+) -> List[Tuple[str, float]]:
+    """Fuse N ranked lists using Weighted Reciprocal Rank Fusion.
+
+    Generalization of reciprocal_rank_fusion to N rankings. Each ranking
+    is a (results_list, weight) tuple where results_list is ordered by
+    rank (best first). Mirrors the 2-ranking formula:
+
+      score(c) = sum over rankings of weight * 1 / (k + rank_in_ranking + 1)
+
+    Added for Tier 1B (multi-query expansion / RAG-Fusion): when the
+    same query produces N rankings (original + N-1 alternatives, or
+    N modalities each at different alternatives), fusing them via RRF
+    is the standard pattern (Cormack et al. 2009; Raudaschl 2023).
+
+    Args:
+        rankings_with_weights: list of (ranking, weight) tuples. Each
+            ranking is a list of (chunk_id, score) pairs ordered by rank.
+            Weight is a float; recommended >= 0 to keep RRF well-formed.
+        k: Smoothing parameter (default 60, industry standard).
+
+    Returns:
+        List of (chunk_id, rrf_score) sorted by fused relevance descending.
+    """
+    scores: Dict[str, float] = {}
+    for ranking, weight in rankings_with_weights:
+        for rank, (chunk_id, _score) in enumerate(ranking):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + weight * (
+                1.0 / (k + rank + 1)
+            )
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
 # Content mode configurations re-exported from search.config for callers
 # (CONTENT_MODE_WEIGHTS values: code=(0.65, 0.35) tuned 2026-05-03,
 # vw=0.65 wins over vw=0.5 by MRR +0.016 on n=99 multi-target gold,
@@ -454,7 +489,7 @@ class IntelligentSearcher:
         content_mode = cfg.content_mode
         vector_weight, bm25_weight = resolve_hybrid_weights(cfg)
 
-        # Vector search
+        # Vector search (original query)
         optimized_query = self._optimize_query(query)
         query_embedding = self._get_query_embedding(optimized_query)
         vector_raw = self.index_manager.search(query_embedding, candidate_k, filters)
@@ -470,22 +505,95 @@ class IntelligentSearcher:
         bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k, filters=filters)
         bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
 
-        # Weighted RRF fusion
-        fused = reciprocal_rank_fusion(
-            vector_pairs,
-            bm25_pairs,
-            k=fusion_k,
-            vector_weight=vector_weight,
-            bm25_weight=bm25_weight,
-        )
+        # Multi-query expansion (Tier 1B, SHORT_QUERY_REWRITE env var,
+        # default off). Only fires when:
+        #   - cfg.short_query_rewrite is True
+        #   - the original query passes is_short_natural_query() (short,
+        #     no code tokens — the cohort where multi-query is hypothesized
+        #     to help per the 2026-05-24 reranker landscape research)
+        #   - rewrite_short_natural_query produces at least 1 alternative
+        # Alternatives weighted at 0.5 × the original-query weight, so the
+        # original dominates the fusion but alternatives can rescue
+        # queries where the original phrasing missed the target.
+        #
+        # Status per ship-discipline rule 10: BLOCKED ON MEASUREMENT until
+        # A/B vs the off path completes (see docs/EVAL_RUNBOOK.md).
+        # On A/B SHIP -> remove env var gate (default-on); on REVERT ->
+        # remove all multi-query plumbing including SHORT_QUERY_REWRITE.
+        self.last_multi_query_metadata: Dict[str, Any] = {
+            "applied": False,
+            "reason": "not_invoked_short_query_rewrite_off",
+            "alternatives_count": 0,
+        }
+        rankings_with_weights: List[Tuple[List[Tuple[str, float]], float]] = [
+            (vector_pairs, vector_weight),
+            (bm25_pairs, bm25_weight),
+        ]
+        all_vector_raw = [vector_raw]
+        all_bm25_raw = [bm25_raw]
+        if cfg.short_query_rewrite:
+            from search.query_rewriter import (
+                is_short_natural_query,
+                rewrite_short_natural_query,
+            )
+            if is_short_natural_query(query):
+                alternatives = rewrite_short_natural_query(query, n_alternatives=3)
+                if alternatives:
+                    self.last_multi_query_metadata = {
+                        "applied": True,
+                        "reason": "applied",
+                        "alternatives_count": len(alternatives),
+                    }
+                    alt_weight_vector = vector_weight * 0.5
+                    alt_weight_bm25 = bm25_weight * 0.5
+                    for alt_query in alternatives:
+                        alt_optimized = self._optimize_query(alt_query)
+                        alt_embedding = self._get_query_embedding(alt_optimized)
+                        alt_vector_raw = self.index_manager.search(
+                            alt_embedding, candidate_k, filters
+                        )
+                        all_vector_raw.append(alt_vector_raw)
+                        rankings_with_weights.append(
+                            (
+                                [(c, s) for c, s, _ in alt_vector_raw],
+                                alt_weight_vector,
+                            )
+                        )
+                        # Alternatives are already rewrites of the original;
+                        # don't apply rewrite_query_for_bm25 or
+                        # expand_code_query (would compound rewrites).
+                        alt_bm25_raw = self.index_manager.search_bm25(
+                            alt_query, k=candidate_k, filters=filters
+                        )
+                        all_bm25_raw.append(alt_bm25_raw)
+                        rankings_with_weights.append(
+                            (
+                                [(c, r) for c, r, _ in alt_bm25_raw],
+                                alt_weight_bm25,
+                            )
+                        )
+                else:
+                    self.last_multi_query_metadata["reason"] = (
+                        "no_alternatives_generated"
+                    )
+            else:
+                self.last_multi_query_metadata["reason"] = "not_short_natural_query"
+
+        # Weighted RRF fusion. multi_ranking_rrf with 2 rankings is
+        # equivalent to the legacy reciprocal_rank_fusion call; for >2
+        # rankings (multi-query branch) the same formula extends naturally.
+        fused = multi_ranking_rrf(rankings_with_weights, k=fusion_k)
 
         # Build SearchResult objects for top-k fused results
         metadata_lookup = {}
-        for chunk_id, _sim, metadata in vector_raw:
-            metadata_lookup[chunk_id] = metadata
-        for chunk_id, _rank, metadata in bm25_raw:
-            if chunk_id not in metadata_lookup:
-                metadata_lookup[chunk_id] = metadata
+        for vraw in all_vector_raw:
+            for chunk_id, _sim, metadata in vraw:
+                if chunk_id not in metadata_lookup:
+                    metadata_lookup[chunk_id] = metadata
+        for braw in all_bm25_raw:
+            for chunk_id, _rank, metadata in braw:
+                if chunk_id not in metadata_lookup:
+                    metadata_lookup[chunk_id] = metadata
 
         # Collect more candidates than k so chunk type boosting can re-order
         over_fetch = min(k * 3, len(fused))
