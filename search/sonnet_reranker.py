@@ -214,7 +214,12 @@ _ERR_HTTP = "_err_http"
 _ERR_UNPARSEABLE = "_err_unparseable"
 _ERR_EMPTY = "_err_empty"
 
-JUDGE_PROMPT = """You are evaluating whether a code chunk is relevant to a developer search query.
+# Base prompt with R9 nix-aware clause always-on (R9 SHIPped 2026-05-22 PR #193).
+# The {extra_clauses} slot is filled per-candidate at scoring time when
+# SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES injects path-prefix-matched clauses.
+# When the env var is unset (default), {extra_clauses} resolves to "" and the
+# prompt is byte-identical to the pre-Phase-2 R9-only baseline.
+JUDGE_PROMPT_TEMPLATE = """You are evaluating whether a code chunk is relevant to a developer search query.
 
 Query: {query}
 
@@ -238,10 +243,80 @@ Domain notes:
   the Nix module or option declaration over daemon implementation code,
   tests, call sites, or docs. For service setup queries,
   `nix/modules/<service>.nix` is usually the implementation of the
-  user-visible configuration surface.
+  user-visible configuration surface.{extra_clauses}
 
 Respond with ONLY valid JSON:
 {{"score": <int 0-10>, "reasoning": "<one sentence>"}}"""
+
+# Backward-compat alias: JUDGE_PROMPT == JUDGE_PROMPT_TEMPLATE with extra_clauses="".
+# Tests and external readers that imported JUDGE_PROMPT directly keep working.
+JUDGE_PROMPT = JUDGE_PROMPT_TEMPLATE.replace("{extra_clauses}", "")
+
+
+def _parse_clause_overrides(raw: str | None) -> dict[str, str]:
+    """Parse SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES env value.
+
+    Accepts a JSON object mapping path-prefix -> clause text (str).
+    Returns {} on missing, empty, or malformed input (never raises).
+
+    Example: '{"mithrandir/": "- For TypeScript React component queries..."}'
+    produces {"mithrandir/": "- For TypeScript React component queries..."}.
+
+    Path-prefix keys are normalized to forward-slash for cross-platform
+    matching, mirroring _parse_path_overrides. Clause-text values are
+    used verbatim.
+    """
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        LOG.warning(
+            f"SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES is not valid JSON; "
+            f"per-cohort clause overrides disabled. Got: {raw!r}"
+        )
+        return {}
+    if not isinstance(data, dict):
+        LOG.warning(
+            f"SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES must be a JSON object; "
+            f"got {type(data).__name__}, per-cohort clause overrides disabled."
+        )
+        return {}
+    out: dict[str, str] = {}
+    for k, v in data.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            LOG.warning(
+                f"SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES entry "
+                f"{k!r}: {v!r} is not str->str; skipped."
+            )
+            continue
+        out[k.replace("\\", "/")] = v
+    return out
+
+
+def _matching_clauses(file_path: str, clause_overrides: dict[str, str]) -> list[str]:
+    """Return clauses whose prefix matches file_path, sorted alphabetically by prefix.
+
+    Deterministic ordering (alphabetical-by-prefix) ensures the composed
+    prompt is reproducible across runs given the same env var value, which
+    matters for paired-bootstrap CI work.
+
+    Per-candidate (per-call) dispatch: each Sonnet scoring call sees ONLY
+    the clauses that match its candidate's file_path. Cross-cohort
+    interference is physically impossible — a clause keyed on
+    "mithrandir/" never appears in a prompt scoring a "libnet/" candidate.
+
+    Returns [] when clause_overrides is empty or no prefix matches.
+    """
+    if not clause_overrides or not file_path:
+        return []
+    norm = file_path.replace("\\", "/")
+    matched: list[tuple[str, str]] = []
+    for prefix, clause in clause_overrides.items():
+        if norm.startswith(prefix):
+            matched.append((prefix, clause))
+    matched.sort(key=lambda x: x[0])
+    return [clause for (_, clause) in matched]
 
 
 def _classify_call_error(exc: BaseException) -> str:
@@ -343,8 +418,19 @@ def _resolve_pool_size() -> int:
     return DEFAULT_RERANK_POOL_SIZE
 
 
-async def _score_one(client: Any, query: str, file_path: str, content: str):
+async def _score_one(client: Any, query: str, file_path: str, content: str,
+                     extra_clauses: str = ""):
     """Score one (query, chunk) pair.
+
+    Args:
+        client: Anthropic AsyncAnthropic client
+        query: original search query
+        file_path: candidate's file path (used in the prompt + for per-cohort
+            clause dispatch lookup at the caller layer)
+        content: candidate chunk content (truncated to MAX_CONTENT_CHARS)
+        extra_clauses: optional pre-rendered additional Domain notes clauses
+            (one per line, leading newline + dash). When empty (default), the
+            prompt is byte-identical to the R9-only baseline.
 
     Returns:
         int 0-10 on success.
@@ -357,10 +443,11 @@ async def _score_one(client: Any, query: str, file_path: str, content: str):
     """
     global _IN_FLIGHT_COUNT, _ATTEMPT_SEQ
     truncated = content[:MAX_CONTENT_CHARS] if len(content) > MAX_CONTENT_CHARS else content
-    prompt = JUDGE_PROMPT.format(
+    prompt = JUDGE_PROMPT_TEMPLATE.format(
         query=query,
         file_path=file_path or "(unknown)",
         content=truncated or "(empty content)",
+        extra_clauses=extra_clauses,
     )
 
     # Snapshot in-flight + attempt-seq under lock so the diag log line is
@@ -479,6 +566,7 @@ async def _rerank_async(
     return_metadata: bool = False,
     hybrid_prior_path_overrides: dict[str, int] | None = None,
     pool_size: int = 0,
+    clause_overrides: dict[str, str] | None = None,
 ):
     """Score candidates in parallel, sort by score, return top-k.
 
@@ -541,11 +629,21 @@ async def _rerank_async(
     sdk_max_retries = _resolve_sdk_max_retries()
     async with anthropic.AsyncAnthropic(max_retries=sdk_max_retries) as client:
         # Phase A: only score the pool; tail is preserved in hybrid order.
+        # Per-cohort clause dispatch (Phase 2, 2026-05-24): for each candidate,
+        # look up its file_path against clause_overrides; matching clauses are
+        # injected into THAT candidate's prompt only. Cross-cohort interference
+        # is physically impossible — a clause keyed on "mithrandir/" never
+        # appears in a prompt scoring a "libnet/" candidate.
         tasks = []
         for c in pool:
             full = c.get("full_content") or c.get("content") or c.get("content_preview") or ""
             file_path = c.get("file_path") or c.get("file") or c.get("relative_path") or ""
-            tasks.append(_bounded_score_one(sem, client, query, file_path, full))
+            matched = _matching_clauses(file_path, clause_overrides or {})
+            # Each clause rendered on its own line, leading newline so it
+            # follows the existing Nix-aware bullet cleanly. Empty when no
+            # clauses match → byte-identical to the R9-only baseline.
+            extra_clauses = ("\n" + "\n".join(matched)) if matched else ""
+            tasks.append(_bounded_score_one(sem, client, query, file_path, full, extra_clauses))
 
         try:
             scores = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=False),
@@ -673,6 +771,10 @@ def rerank_with_sonnet(
         os.environ.get("SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES")
     )
 
+    clause_overrides = _parse_clause_overrides(
+        os.environ.get("SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES")
+    )
+
     pool_size = _resolve_pool_size()
 
     try:
@@ -680,7 +782,8 @@ def rerank_with_sonnet(
             _rerank_async(query, candidates, top_k, timeout, threshold,
                           return_metadata=return_metadata,
                           hybrid_prior_path_overrides=path_overrides,
-                          pool_size=pool_size)
+                          pool_size=pool_size,
+                          clause_overrides=clause_overrides)
         )
         return result
     except RuntimeError as e:

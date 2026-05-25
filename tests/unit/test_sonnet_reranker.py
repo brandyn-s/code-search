@@ -110,7 +110,7 @@ async def test_hybrid_prior_threshold_low_max_uses_input_order(monkeypatch):
         for i in range(5)
     ]
     # Monkey-patch _score_one to return uniform low scores (max=3, below default threshold=7)
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return 3
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -130,7 +130,7 @@ async def test_hybrid_prior_threshold_high_max_uses_rerank(monkeypatch):
     ]
     # Mock: c2 scores highest (8), c0 mid (5), c1 low (3) — max=8 above threshold=7
     scores_iter = iter([5, 3, 8])
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return next(scores_iter)
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -150,7 +150,7 @@ async def test_hybrid_prior_threshold_disabled_when_zero(monkeypatch):
     ]
     # Mock: uniform low scores (max=2)
     scores_iter = iter([1, 2, 1])
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return next(scores_iter)
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -221,7 +221,7 @@ async def test_metadata_ok_path(monkeypatch):
         for i in range(3)
     ]
     scores_iter = iter([5, 3, 8])
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return next(scores_iter)
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -243,7 +243,7 @@ async def test_metadata_hybrid_prior_fallback(monkeypatch):
         {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
         for i in range(3)
     ]
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return 3  # uniformly low, max < threshold=7
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -266,7 +266,7 @@ async def test_metadata_too_many_failures(monkeypatch):
         {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
         for i in range(5)
     ]
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return _ERR_HTTP  # structured failure tag
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -290,7 +290,7 @@ async def test_metadata_rate_limit_dominant(monkeypatch):
         {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
         for i in range(5)
     ]
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return _ERR_RATE_LIMIT
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -311,7 +311,7 @@ async def test_metadata_timeout_dominant(monkeypatch):
         {"chunk_id": f"c{i}", "file_path": f"f{i}.py", "full_content": f"chunk {i}"}
         for i in range(5)
     ]
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return _ERR_TIMEOUT
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -333,7 +333,7 @@ async def test_metadata_overall_timeout(monkeypatch):
         for i in range(3)
     ]
     import asyncio as _asyncio
-    async def slow_score(client, query, file_path, content):
+    async def slow_score(client, query, file_path, content, extra_clauses=""):
         await _asyncio.sleep(2.0)  # exceeds tiny timeout below
         return 8
     monkeypatch.setattr("search.sonnet_reranker._score_one", slow_score)
@@ -426,7 +426,7 @@ async def test_concurrency_limit_caps_in_flight_calls(monkeypatch):
     max_concurrent = 0
     counter_lock = _asyncio.Lock()
 
-    async def slow_score(client, query, file_path, content):
+    async def slow_score(client, query, file_path, content, extra_clauses=""):
         nonlocal concurrent_now, max_concurrent
         async with counter_lock:
             concurrent_now += 1
@@ -463,7 +463,7 @@ async def test_concurrency_limit_unset_is_unbounded(monkeypatch):
     max_concurrent = 0
     counter_lock = _asyncio.Lock()
 
-    async def slow_score(client, query, file_path, content):
+    async def slow_score(client, query, file_path, content, extra_clauses=""):
         nonlocal concurrent_now, max_concurrent
         async with counter_lock:
             concurrent_now += 1
@@ -496,7 +496,7 @@ async def test_concurrency_limit_invalid_value_falls_back_to_unbounded(monkeypat
         for i in range(3)
     ]
 
-    async def fast_score(client, query, file_path, content):
+    async def fast_score(client, query, file_path, content, extra_clauses=""):
         return 8
 
     monkeypatch.setattr("search.sonnet_reranker._score_one", fast_score)
@@ -519,7 +519,7 @@ async def test_concurrency_limit_zero_is_treated_as_unbounded(monkeypatch):
         for i in range(3)
     ]
 
-    async def fast_score(client, query, file_path, content):
+    async def fast_score(client, query, file_path, content, extra_clauses=""):
         return 8
 
     monkeypatch.setattr("search.sonnet_reranker._score_one", fast_score)
@@ -919,7 +919,7 @@ async def test_pool_size_truncates_scoring_to_pool(monkeypatch):
 
     scored_chunk_ids = []
 
-    async def track_score(client, query, file_path, content):
+    async def track_score(client, query, file_path, content, extra_clauses=""):
         # Extract chunk index from file_path "fN.py"
         idx = int(file_path.split("f")[1].split(".")[0])
         scored_chunk_ids.append(f"c{idx}")
@@ -951,7 +951,7 @@ async def test_pool_size_zero_scores_all_candidates(monkeypatch):
 
     score_calls = 0
 
-    async def count_score(client, query, file_path, content):
+    async def count_score(client, query, file_path, content, extra_clauses=""):
         nonlocal score_calls
         score_calls += 1
         return 8
@@ -978,7 +978,7 @@ async def test_pool_size_larger_than_candidates_scores_all(monkeypatch):
 
     score_calls = 0
 
-    async def count_score(client, query, file_path, content):
+    async def count_score(client, query, file_path, content, extra_clauses=""):
         nonlocal score_calls
         score_calls += 1
         return 8
@@ -1007,7 +1007,7 @@ async def test_pool_size_preserves_tail_hybrid_order(monkeypatch):
     # puts them in c2, c1, c0 order. Tail [c3, c4, c5] stays as-is.
     pool_scores = {"c0": 2, "c1": 5, "c2": 10}
 
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         idx = int(file_path.split("f")[1].split(".")[0])
         chunk_id = f"c{idx}"
         return pool_scores.get(chunk_id, 0)
@@ -1032,7 +1032,7 @@ async def test_pool_size_with_top_k_smaller_than_pool(monkeypatch):
         for i in range(10)
     ]
 
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         return 8  # all uniformly high; preserves input order via stable sort
 
     monkeypatch.setattr("search.sonnet_reranker._score_one", fake_score)
@@ -1058,7 +1058,7 @@ async def test_pool_size_with_top_k_larger_than_pool(monkeypatch):
     # Pool [c0..c4] gets scored; rerank inverts their order
     pool_scores = {"c0": 2, "c1": 4, "c2": 6, "c3": 8, "c4": 10}
 
-    async def fake_score(client, query, file_path, content):
+    async def fake_score(client, query, file_path, content, extra_clauses=""):
         idx = int(file_path.split("f")[1].split(".")[0])
         chunk_id = f"c{idx}"
         return pool_scores.get(chunk_id, 0)
@@ -1084,7 +1084,7 @@ async def test_pool_size_hybrid_prior_fallback_returns_full_candidates(monkeypat
         for i in range(8)
     ]
 
-    async def low_score(client, query, file_path, content):
+    async def low_score(client, query, file_path, content, extra_clauses=""):
         return 3  # uniformly below threshold=7
 
     monkeypatch.setattr("search.sonnet_reranker._score_one", low_score)
@@ -1104,5 +1104,161 @@ def test_pool_size_env_var_end_to_end(monkeypatch, sample_candidates):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("SONNET_RERANKER_POOL_SIZE", "2")
     # No API key → API_KEY_MISSING path; pool_size doesn't matter
+    result = rerank_with_sonnet("auth", sample_candidates, top_k=3)
+    assert result == sample_candidates[:3]
+
+
+# ─── Per-cohort clause-override tests (Phase 2, 2026-05-24) ───
+
+def test_parse_clause_overrides_unset_returns_empty():
+    from search.sonnet_reranker import _parse_clause_overrides
+    assert _parse_clause_overrides(None) == {}
+    assert _parse_clause_overrides("") == {}
+
+
+def test_parse_clause_overrides_valid_json():
+    from search.sonnet_reranker import _parse_clause_overrides
+    raw = '{"mithrandir/": "- TS clause", "assetman/": "- Rust clause"}'
+    out = _parse_clause_overrides(raw)
+    assert out == {"mithrandir/": "- TS clause", "assetman/": "- Rust clause"}
+
+
+def test_parse_clause_overrides_malformed_json_returns_empty():
+    """Malformed JSON logs warning and returns empty dict (never raises)."""
+    from search.sonnet_reranker import _parse_clause_overrides
+    assert _parse_clause_overrides("{not valid json") == {}
+    assert _parse_clause_overrides("[1, 2, 3]") == {}  # array, not object
+
+
+def test_parse_clause_overrides_non_string_values_skipped():
+    """Entries with non-string values are skipped (warn-not-raise)."""
+    from search.sonnet_reranker import _parse_clause_overrides
+    raw = '{"mithrandir/": "- TS clause", "bad/": 42}'
+    out = _parse_clause_overrides(raw)
+    assert out == {"mithrandir/": "- TS clause"}
+
+
+def test_parse_clause_overrides_backslash_normalized():
+    """Backslash path separators normalized to forward-slash (Windows compat)."""
+    from search.sonnet_reranker import _parse_clause_overrides
+    raw = r'{"src\\routes\\": "- route clause"}'
+    out = _parse_clause_overrides(raw)
+    assert "src/routes/" in out
+    assert "src\\routes\\" not in out
+
+
+def test_matching_clauses_no_overrides_returns_empty():
+    from search.sonnet_reranker import _matching_clauses
+    assert _matching_clauses("mithrandir/app.tsx", {}) == []
+    assert _matching_clauses("", {"mithrandir/": "- TS"}) == []
+
+
+def test_matching_clauses_single_prefix_match():
+    from search.sonnet_reranker import _matching_clauses
+    overrides = {"mithrandir/": "- TS clause", "assetman/": "- Rust clause"}
+    # TS candidate gets ONLY the TS clause
+    assert _matching_clauses("mithrandir/app.tsx", overrides) == ["- TS clause"]
+    # Rust candidate gets ONLY the Rust clause
+    assert _matching_clauses("assetman/src/main.rs", overrides) == ["- Rust clause"]
+    # Nix candidate gets nothing (cross-cohort isolation)
+    assert _matching_clauses("nix/modules/foo.nix", overrides) == []
+
+
+def test_matching_clauses_deterministic_alphabetical_order():
+    """Multiple matching prefixes → clauses ordered alphabetically by prefix."""
+    from search.sonnet_reranker import _matching_clauses
+    # Two prefixes both match the same path
+    overrides = {
+        "src/": "- generic src clause",
+        "src/auth/": "- specific auth clause",
+    }
+    out = _matching_clauses("src/auth/login.py", overrides)
+    # Alphabetical-by-prefix: "src/" < "src/auth/"
+    assert out == ["- generic src clause", "- specific auth clause"]
+
+
+def test_matching_clauses_windows_path_normalized():
+    """Windows-style file_path (backslashes) matches forward-slash prefix."""
+    from search.sonnet_reranker import _matching_clauses
+    overrides = {"mithrandir/": "- TS clause"}
+    assert _matching_clauses(r"mithrandir\app.tsx", overrides) == ["- TS clause"]
+
+
+@pytest.mark.asyncio
+async def test_clause_override_cross_cohort_isolation(monkeypatch):
+    """LOAD-BEARING: a clause keyed on 'mithrandir/' must NOT appear in the
+    prompt scoring a 'libnet/' candidate. This is the structural guarantee
+    that per-cohort dispatch eliminates cross-cohort interference.
+    """
+    from search.sonnet_reranker import _rerank_async
+
+    # Mixed cohort: 1 TypeScript + 1 Rust candidate.
+    candidates = [
+        {"chunk_id": "ts1", "file_path": "mithrandir/app.tsx", "full_content": "TS code"},
+        {"chunk_id": "rust1", "file_path": "libnet/src/tailscale.rs", "full_content": "Rust code"},
+    ]
+
+    # Capture extra_clauses passed to _score_one per candidate.
+    captured = []
+    async def capture_score(client, query, file_path, content, extra_clauses=""):
+        captured.append((file_path, extra_clauses))
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", capture_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    overrides = {"mithrandir/": "- TS-only clause; must not leak to Rust scoring"}
+    await _rerank_async(
+        "q", candidates, top_k=2, timeout=8.0, hybrid_prior_threshold=7,
+        clause_overrides=overrides,
+    )
+
+    # TS candidate's prompt contains the TS-only clause.
+    ts_extra = next(extra for fp, extra in captured if fp == "mithrandir/app.tsx")
+    assert "TS-only clause" in ts_extra
+
+    # Rust candidate's prompt has NO TS-only clause. Cross-cohort isolation.
+    rust_extra = next(extra for fp, extra in captured if fp == "libnet/src/tailscale.rs")
+    assert "TS-only clause" not in rust_extra
+    assert rust_extra == ""  # No overrides match libnet/, so empty extra_clauses
+
+
+@pytest.mark.asyncio
+async def test_clause_override_empty_when_no_overrides(monkeypatch):
+    """When clause_overrides is None/empty, extra_clauses is always "".
+
+    This is the A/A invariant: env-unset → prompt byte-identical to baseline.
+    """
+    from search.sonnet_reranker import _rerank_async
+
+    candidates = [
+        {"chunk_id": "c1", "file_path": "mithrandir/app.tsx", "full_content": "x"},
+    ]
+    captured = []
+    async def capture_score(client, query, file_path, content, extra_clauses=""):
+        captured.append(extra_clauses)
+        return 8
+
+    monkeypatch.setattr("search.sonnet_reranker._score_one", capture_score)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    await _rerank_async(
+        "q", candidates, top_k=1, timeout=8.0, hybrid_prior_threshold=7,
+        clause_overrides=None,
+    )
+    assert captured == [""]
+
+
+def test_clause_overrides_env_var_unset_no_change(monkeypatch, sample_candidates):
+    """A/A end-to-end: env var unset → no extra clauses, behavior preserved.
+
+    Validates the Phase 2 ship gate guarantee: with the env var unset, the
+    rerank result must be byte-identical to the pre-Phase-2 behavior.
+    """
+    monkeypatch.delenv("SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # No API key → API_KEY_MISSING short-circuit, returns input order.
+    # If the env var unset path is broken, the call could raise; this asserts
+    # the unset path is wired correctly all the way through rerank_with_sonnet.
     result = rerank_with_sonnet("auth", sample_candidates, top_k=3)
     assert result == sample_candidates[:3]
