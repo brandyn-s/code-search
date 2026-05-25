@@ -33,10 +33,21 @@ def _body_content(content: bytes) -> bytes:
             return text[end + 4:].encode()
     return content
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
+
+_merkle_logger = logging.getLogger(__name__)
+
+
+def _is_within(child: Path, root: Path) -> bool:
+    try:
+        child.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 class IndexingCancelled(InterruptedError):
@@ -202,20 +213,28 @@ class MerkleDAG:
     
     def build_node(self, path: Path, base_path: Optional[Path] = None) -> Optional[MerkleNode]:
         """Recursively build a Merkle node for a path.
-        
+
         Args:
             path: Path to build node for
             base_path: Base path for relative path calculation
-            
+
         Returns:
             MerkleNode or None if path should be ignored
         """
         if self.should_ignore(path):
             return None
-            
+
+        if path.is_symlink():
+            try:
+                resolved = path.resolve()
+                if not _is_within(resolved, self.root_path):
+                    return None
+            except (OSError, ValueError):
+                return None
+
         if base_path is None:
             base_path = self.root_path
-            
+
         # Calculate relative path
         if path == self.root_path:
             relative_path = "."
