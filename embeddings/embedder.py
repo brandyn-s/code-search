@@ -589,6 +589,23 @@ class CodeEmbedder:
                 grouped_texts, input_type="document"
             )
 
+            # voyage-context API can return fewer embeddings than input chunks
+            # when individual chunks are rejected (oversized, malformed, etc.).
+            # Bare zip() would silently truncate, dropping the surviving chunks
+            # at the tail without any error signal. Raise so the indexer's
+            # batch-failure handler (search/incremental_indexer.py) sees the
+            # mismatch as an exception instead of producing a silent partial
+            # index. (Knowledge-base 2026-05-26: voyage-context dropped 5,886
+            # of 7,886 chunks via this silent truncation path.)
+            if len(batch_embeddings) != len(batch_chunks):
+                raise ValueError(
+                    f"voyage-context returned {len(batch_embeddings)} "
+                    f"embeddings for {len(batch_chunks)} input chunks "
+                    f"(batch starting at file index {batch_start}); the API "
+                    "likely rejected one or more chunks. Surface as error "
+                    "instead of silently truncating."
+                )
+
             # Create results — R12 dedup
             for chunk, embedding in zip(batch_chunks, batch_embeddings):
                 results.append(_make_embedding_result(chunk, embedding))

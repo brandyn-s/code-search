@@ -264,3 +264,101 @@ class TestSchemaConsistencyAcrossPaths:
                 f"{name} must route through _make_embedding_result to "
                 f"keep the chunk_id + metadata schema in sync"
             )
+
+
+# ---------------------------------------------------------------------------
+# embed_chunks_grouped length-mismatch guard
+# ---------------------------------------------------------------------------
+
+class TestEmbedChunksGroupedLengthGuard:
+    """Regression: 2026-05-26 knowledge-base index lost 5,886 of 7,886 chunks
+    via silent zip() truncation. When voyage-context's
+    /v1/contextualizedembeddings API rejects individual chunks (oversized,
+    malformed, etc.), it returns fewer embeddings than input chunks. The
+    bare zip() at the result-construction site would silently drop the
+    surviving chunks at the tail; the outer incremental_indexer's
+    batch-failure handler would never see the mismatch and the indexer
+    would report success with a partial index.
+
+    Fix: raise ValueError on length mismatch so the indexer surfaces the
+    drop as an error instead of producing a silent partial index.
+    """
+
+    def _build_embedder_with_stub_model(self, embeddings_to_return):
+        """Construct a real CodeEmbedder with the inner _model replaced by a
+        stub whose encode_grouped returns the caller-supplied array.
+
+        Uses __new__ to bypass CodeEmbedder.__init__'s provider-registry
+        lookup, then sets the minimal attribute surface that
+        embed_chunks_grouped touches.
+        """
+        from embeddings.embedder import CodeEmbedder
+        import logging
+
+        class _StubInnerModel:
+            def __init__(self, returns):
+                self._returns = returns
+
+            def encode_grouped(self, grouped_texts, input_type="document"):
+                return self._returns
+
+        embedder = CodeEmbedder.__new__(CodeEmbedder)
+        embedder._model = _StubInnerModel(embeddings_to_return)
+        embedder._logger = logging.getLogger("test_embedder")
+        embedder._provider = "voyage-context"
+        embedder._sibling_context = {}
+        return embedder
+
+    def test_raises_when_fewer_embeddings_than_chunks(self):
+        """Mock voyage-context returning 2 embeddings for 4 input chunks
+        must raise ValueError (not silently drop the trailing 2 chunks)."""
+        embedder = self._build_embedder_with_stub_model(
+            embeddings_to_return=np.zeros((2, 8), dtype=np.float32),
+        )
+        chunks = [
+            _make_test_chunk(
+                start_line=i, end_line=i + 1,
+                relative_path=f"src/f{i}.py", file_path=f"/proj/src/f{i}.py",
+            )
+            for i in range(4)
+        ]
+
+        with pytest.raises(ValueError, match="voyage-context returned 2"):
+            embedder.embed_chunks_grouped(chunks, batch_size=32)
+
+    def test_raises_when_more_embeddings_than_chunks(self):
+        """Symmetric guard: more embeddings than chunks is also a bug (would
+        leak embeddings into the next batch's space). Must raise."""
+        embedder = self._build_embedder_with_stub_model(
+            embeddings_to_return=np.zeros((5, 8), dtype=np.float32),
+        )
+        chunks = [
+            _make_test_chunk(
+                start_line=i, end_line=i + 1,
+                relative_path=f"src/f{i}.py", file_path=f"/proj/src/f{i}.py",
+            )
+            for i in range(3)
+        ]
+
+        with pytest.raises(ValueError, match="voyage-context returned 5"):
+            embedder.embed_chunks_grouped(chunks, batch_size=32)
+
+    def test_passes_when_lengths_match(self):
+        """Sanity: lengths matching is the normal case — must produce one
+        EmbeddingResult per chunk, no error."""
+        embedder = self._build_embedder_with_stub_model(
+            embeddings_to_return=np.zeros((3, 8), dtype=np.float32),
+        )
+        chunks = [
+            _make_test_chunk(
+                start_line=i, end_line=i + 1,
+                relative_path=f"src/f{i}.py", file_path=f"/proj/src/f{i}.py",
+            )
+            for i in range(3)
+        ]
+
+        results = embedder.embed_chunks_grouped(chunks, batch_size=32)
+        assert len(results) == 3
+        # All results are EmbeddingResult instances routed through the helper.
+        for r in results:
+            assert isinstance(r, EmbeddingResult)
