@@ -1,0 +1,85 @@
+name: external-benchmarks
+
+# Manually dispatched. Evaluates code-search on a public code-retrieval
+# benchmark (CoIR, BEIR format) so the embedding-provider choice has a
+# DEFENSIBLE EXTERNAL number, not just the internal golden MRR — which may be
+# label-biased (docs/findings/2026-05-24-r9-extension-session-synthesis.md) and
+# is not comparable to any leaderboard (docs/EXTERNAL_BENCHMARKS.md). Runs
+# voyage-4-large vs voyage-code-3 head-to-head.
+#
+# Needs the VOYAGE_API_KEY repo secret. Without it the eval cleanly skips (the
+# keyless adapter half still runs, proving the pipeline end-to-end). CoIR data
+# is pulled from the HF datasets-server (no key).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: 'CoIR HF dataset id'
+        required: false
+        default: 'CoIR-Retrieval/cosqa'
+      max_queries:
+        description: 'Max queries to evaluate'
+        required: false
+        default: '200'
+
+permissions:
+  contents: read
+
+jobs:
+  external-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Adapt CoIR task (no key needed)
+        run: |
+          python bench/research/coir_adapter.py \
+            --dataset "${{ github.event.inputs.dataset }}" \
+            --split test \
+            --max-queries "${{ github.event.inputs.max_queries }}" \
+            --out "$RUNNER_TEMP/coir_task"
+
+      - name: Check VOYAGE_API_KEY
+        run: |
+          if [ -z "$VOYAGE_API_KEY" ]; then
+            echo "VOYAGE_API_KEY not set — skipping the embedding eval (adapter ran above)."
+            echo "VOYAGE_SKIP=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Eval voyage-4-large vs voyage-code-3 (rerank off)
+        if: env.VOYAGE_SKIP != '1'
+        run: |
+          CORPUS="$RUNNER_TEMP/coir_task/corpus"
+          GOLDEN="$RUNNER_TEMP/coir_task/golden.json"
+          for M in voyage-4-large voyage-code-3; do
+            echo "=== $M ==="
+            CFG="{\"name\":\"$M\",\"provider\":\"voyage\",\"model\":\"$M\",\"use_input_type\":true,\"use_reranker\":false,\"needs_reindex\":true}"
+            EMBEDDING_PROVIDER=voyage EMBEDDING_MODEL="$M" VOYAGE_INPUT_TYPE=on RERANKER=off \
+              python benchmarks/_eval_worker.py "$CFG" "$CORPUS" "$GOLDEN" "$RUNNER_TEMP/idx_$M" \
+              | tee "$RUNNER_TEMP/metrics_$M.txt"
+          done
+          echo ""
+          echo "NOTE: _eval_worker emits MRR/HR@5. For the leaderboard metric"
+          echo "(CoIR nDCG@10), feed per-query ranked lists + $RUNNER_TEMP/coir_task/qrels_graded.json"
+          echo "to bench/research/ndcg.py (ranked-list emission is the one remaining worker enhancement)."
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coir-metrics
+          path: ${{ runner.temp }}/metrics_*.txt
+          if-no-files-found: warn

@@ -533,3 +533,165 @@ class TestDispatch:
             "no-changes path must skip the chunking loop entirely"
         )
         _close_manager(indexer)
+
+
+# ---------------------------------------------------------------------------
+# Crash- and failure-safety of the write path (2026-05 data-loss fix)
+# ---------------------------------------------------------------------------
+
+class TestWritePathSafety:
+    """Pins the two write-path invariants:
+
+    1. Embed-before-remove: a transient embedding failure on a modified file
+       must NOT delete the file's existing chunks, and must NOT advance the
+       snapshot (so the file is re-indexed on the next run).
+    2. save_index() before save_snapshot(): the snapshot (which records "this
+       content is indexed") is only advanced AFTER the index is durably and
+       consistently saved. A save failure must leave the prior snapshot intact.
+    """
+
+    def _build(self, project_dir, indexer_components):
+        indexer, embedder, chunker, snapshot_manager = indexer_components
+        chunker.root_path = str(project_dir)
+        ii = IncrementalIndexer(
+            indexer=indexer, embedder=embedder, chunker=chunker,
+            snapshot_manager=snapshot_manager,
+        )
+        return ii, indexer, embedder, snapshot_manager
+
+    def test_embed_failure_on_modify_preserves_data_and_snapshot(
+        self, project_dir, indexer_components
+    ):
+        ii, indexer, embedder, _ = self._build(project_dir, indexer_components)
+
+        first = ii.incremental_index(str(project_dir), project_name="proj")
+        assert first.success
+        size_before = indexer.get_index_size()
+        assert size_before > 0
+
+        # Modify a file so the next run has work to do.
+        (project_dir / "alpha.py").write_text("def alpha_v2():\n    return 99\n")
+
+        # Simulate a transient embedding failure (e.g. API 503).
+        orig_embed = embedder.embed_chunks_grouped
+
+        def boom(*_a, **_k):
+            raise RuntimeError("simulated transient embedding 503")
+
+        embedder.embed_chunks_grouped = boom
+        try:
+            failed = ii.incremental_index(str(project_dir), project_name="proj")
+        finally:
+            embedder.embed_chunks_grouped = orig_embed
+
+        assert not failed.success
+        assert failed.error and "503" in failed.error
+        # No data lost: embed raised BEFORE _remove_old_chunks, so the old
+        # alpha chunks are still in the index.
+        assert indexer.get_index_size() == size_before, (
+            "modified file's old chunks must survive a failed embed"
+        )
+
+        # Snapshot was NOT advanced: a re-run with a working embedder must
+        # still see alpha as modified and re-index it.
+        recovered = ii.incremental_index(str(project_dir), project_name="proj")
+        assert recovered.success
+        assert recovered.files_modified == 1, (
+            "snapshot must not have advanced past the failed run"
+        )
+        assert recovered.chunks_added >= 1
+        _close_manager(indexer)
+
+    def test_incremental_saves_index_before_snapshot(
+        self, project_dir, indexer_components, monkeypatch
+    ):
+        ii, indexer, _, snapshot_manager = self._build(project_dir, indexer_components)
+
+        # First run snapshots the project (full-index path).
+        ii.incremental_index(str(project_dir), project_name="proj")
+        (project_dir / "alpha.py").write_text("def alpha_v2():\n    return 99\n")
+
+        calls: list[str] = []
+        orig_si = indexer.save_index
+        orig_ss = snapshot_manager.save_snapshot
+
+        def spy_si(*a, **k):
+            calls.append("index")
+            return orig_si(*a, **k)
+
+        def spy_ss(*a, **k):
+            calls.append("snapshot")
+            return orig_ss(*a, **k)
+
+        monkeypatch.setattr(indexer, "save_index", spy_si)
+        monkeypatch.setattr(snapshot_manager, "save_snapshot", spy_ss)
+
+        result = ii.incremental_index(str(project_dir), project_name="proj")
+        assert result.success
+        assert "index" in calls and "snapshot" in calls
+        assert calls.index("index") < calls.index("snapshot"), (
+            f"save_index() must precede save_snapshot(), got {calls}"
+        )
+        _close_manager(indexer)
+
+    def test_save_index_failure_does_not_advance_snapshot(
+        self, project_dir, indexer_components, monkeypatch
+    ):
+        ii, indexer, _, snapshot_manager = self._build(project_dir, indexer_components)
+
+        ii.incremental_index(str(project_dir), project_name="proj")
+        (project_dir / "alpha.py").write_text("def alpha_v2():\n    return 99\n")
+
+        snapshot_saved: list[int] = []
+        orig_ss = snapshot_manager.save_snapshot
+
+        def spy_ss(*a, **k):
+            snapshot_saved.append(1)
+            return orig_ss(*a, **k)
+
+        def fail_save(*_a, **_k):
+            raise RuntimeError("simulated disk-full on save_index")
+
+        monkeypatch.setattr(snapshot_manager, "save_snapshot", spy_ss)
+        monkeypatch.setattr(indexer, "save_index", fail_save)
+
+        result = ii.incremental_index(str(project_dir), project_name="proj")
+        assert not result.success
+        assert not snapshot_saved, (
+            "save_snapshot() must not run when save_index() fails"
+        )
+
+        # Restore and confirm the modification is still pending.
+        monkeypatch.undo()
+        recovered = ii.incremental_index(str(project_dir), project_name="proj")
+        assert recovered.success
+        assert recovered.files_modified == 1
+        _close_manager(indexer)
+
+    def test_full_index_saves_index_before_snapshot(
+        self, project_dir, indexer_components, monkeypatch
+    ):
+        ii, indexer, _, snapshot_manager = self._build(project_dir, indexer_components)
+
+        calls: list[str] = []
+        orig_si = indexer.save_index
+        orig_ss = snapshot_manager.save_snapshot
+
+        def spy_si(*a, **k):
+            calls.append("index")
+            return orig_si(*a, **k)
+
+        def spy_ss(*a, **k):
+            calls.append("snapshot")
+            return orig_ss(*a, **k)
+
+        monkeypatch.setattr(indexer, "save_index", spy_si)
+        monkeypatch.setattr(snapshot_manager, "save_snapshot", spy_ss)
+
+        # No snapshot yet → full-index path.
+        result = ii.incremental_index(str(project_dir), project_name="proj")
+        assert result.success
+        assert calls.index("index") < calls.index("snapshot"), (
+            f"_full_index must save_index() before save_snapshot(), got {calls}"
+        )
+        _close_manager(indexer)

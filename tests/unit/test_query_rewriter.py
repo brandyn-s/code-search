@@ -69,7 +69,7 @@ def test_rewrite_returns_original_on_404_and_logs_warning(monkeypatch, caplog):
     fake_resp.text = '{"error": {"type": "not_found_error"}}'
 
     with caplog.at_level(logging.WARNING, logger="search.query_rewriter"):
-        with patch("httpx.post", return_value=fake_resp):
+        with patch("search.query_rewriter._ipv4_post", return_value=fake_resp):
             out = rewrite_query_for_bm25("button component UI element")
 
     # Original returned (graceful fallback contract preserved)
@@ -91,7 +91,7 @@ def test_warning_only_logs_once_per_session(monkeypatch, caplog):
     fake_resp.text = "{}"
 
     with caplog.at_level(logging.WARNING, logger="search.query_rewriter"):
-        with patch("httpx.post", return_value=fake_resp):
+        with patch("search.query_rewriter._ipv4_post", return_value=fake_resp):
             rewrite_query_for_bm25("query one")
             rewrite_query_for_bm25("query two")
             rewrite_query_for_bm25("query three")
@@ -113,7 +113,7 @@ def test_empty_response_text_logs_warning(monkeypatch, caplog):
     fake_resp.json.return_value = {"content": [{"text": ""}]}
 
     with caplog.at_level(logging.WARNING, logger="search.query_rewriter"):
-        with patch("httpx.post", return_value=fake_resp):
+        with patch("search.query_rewriter._ipv4_post", return_value=fake_resp):
             out = rewrite_query_for_bm25("query that produces empty rewrite")
 
     assert out == "query that produces empty rewrite"
@@ -132,7 +132,7 @@ def test_excessively_long_response_is_rejected(monkeypatch, caplog):
     fake_resp.json.return_value = {"content": [{"text": "x" * 600}]}  # > 500
 
     with caplog.at_level(logging.WARNING, logger="search.query_rewriter"):
-        with patch("httpx.post", return_value=fake_resp):
+        with patch("search.query_rewriter._ipv4_post", return_value=fake_resp):
             out = rewrite_query_for_bm25("query producing absurdly long rewrite")
 
     assert out == "query producing absurdly long rewrite"
@@ -150,7 +150,7 @@ def test_default_model_used_when_env_unset(monkeypatch):
     fake_resp.status_code = 200
     fake_resp.json.return_value = {"content": [{"text": "rewritten"}]}
 
-    with patch("httpx.post", return_value=fake_resp) as mock_post:
+    with patch("search.query_rewriter._ipv4_post", return_value=fake_resp) as mock_post:
         rewrite_query_for_bm25("test query unique 1")
 
     # The model field of the JSON body should match DEFAULT_HAIKU_MODEL
@@ -169,8 +169,80 @@ def test_env_override_takes_precedence(monkeypatch):
     fake_resp.status_code = 200
     fake_resp.json.return_value = {"content": [{"text": "rewritten"}]}
 
-    with patch("httpx.post", return_value=fake_resp) as mock_post:
+    with patch("search.query_rewriter._ipv4_post", return_value=fake_resp) as mock_post:
         rewrite_query_for_bm25("test query unique 2")
 
     call_args = mock_post.call_args
     assert call_args.kwargs["json"]["model"] == "claude-opus-4-7"
+
+
+def test_rewrite_does_not_mutate_global_socket_getaddrinfo(monkeypatch):
+    """Regression (2026-05): the rewrite path must NOT install a process-global
+    socket.getaddrinfo override.
+
+    The old code monkeypatched socket.getaddrinfo (and urllib3 HAS_IPV6=False)
+    to force IPv4 and never restored it, leaking IPv4-only DNS onto every other
+    network call in the MCP server (Voyage, the Anthropic reranker SDK). IPv4 is
+    now forced per-request via an httpx transport, so the global must be intact.
+    """
+    import socket
+
+    _reset_warned_flag()
+    monkeypatch.setenv("BM25_REWRITE", "on")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-key-for-test")
+
+    before = socket.getaddrinfo
+
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.json.return_value = {"content": [{"text": "fetch_data loadItems"}]}
+
+    with patch("search.query_rewriter._ipv4_post", return_value=fake_resp):
+        out = rewrite_query_for_bm25("where is the data loading logic")
+
+    assert out == "fetch_data loadItems"
+    assert socket.getaddrinfo is before, (
+        "rewrite path must not replace the global socket.getaddrinfo"
+    )
+
+
+def test_ipv4_post_forces_ipv4_via_transport_no_global_mutation(monkeypatch):
+    """_ipv4_post pins IPv4 by binding the client's local socket to the IPv4
+    wildcard (httpx HTTPTransport local_address='0.0.0.0') — not by mutating
+    any process-global state."""
+    import socket
+    import httpx
+
+    before = socket.getaddrinfo
+    captured: dict = {}
+
+    class _FakeClient:
+        def __init__(self, *, transport=None, timeout=None):
+            captured["transport"] = transport
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            return "RESP"
+
+    def _fake_transport(*, local_address=None):
+        captured["local_address"] = local_address
+        return ("fake-transport", local_address)
+
+    monkeypatch.setattr(httpx, "Client", _FakeClient)
+    monkeypatch.setattr(httpx, "HTTPTransport", _fake_transport)
+
+    resp = query_rewriter._ipv4_post(
+        "https://example.test/x", headers={}, json={}, timeout=3.0
+    )
+
+    assert resp == "RESP"
+    assert captured["local_address"] == "0.0.0.0"
+    assert captured["timeout"] == 3.0
+    assert socket.getaddrinfo is before

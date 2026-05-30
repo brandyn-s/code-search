@@ -244,7 +244,31 @@ class IncrementalIndexer:
                     success=True,
                 )
 
-            # Process changes
+            # CHUNK + EMBED FIRST. Embedding can fail transiently (API 5xx,
+            # timeout). _chunk_and_embed_changes raises on embed failure rather
+            # than swallowing it, so the `except` below returns success=False
+            # WITHOUT having removed the modified files' old chunks or advanced
+            # the snapshot. Sequencing embed-before-remove is what prevents a
+            # transient embed error from permanently dropping a modified file
+            # from the index (the pre-2026-05 order removed old chunks first,
+            # then swallowed the embed error and saved the snapshot — so the
+            # file was lost AND marked up-to-date, never to be re-indexed).
+            t_embed = time.time()
+            logger.warning(
+                "[REINDEX_PROGRESS] _chunk_and_embed_changes: starting "
+                "files_to_index=%d project=%s",
+                len(changes.added) + len(changes.modified), project_name,
+            )
+            embedding_results = self._chunk_and_embed_changes(
+                changes, project_path, project_name
+            )
+            logger.warning(
+                "[REINDEX_PROGRESS] _chunk_and_embed_changes: done in %.1fs embedded=%d",
+                time.time() - t_embed, len(embedding_results),
+            )
+
+            # Only after embedding SUCCEEDS do we mutate the index: drop the
+            # stale chunks, then add the freshly-embedded ones.
             t_remove = time.time()
             logger.warning(
                 "[REINDEX_PROGRESS] _remove_old_chunks: starting "
@@ -257,19 +281,21 @@ class IncrementalIndexer:
                 time.time() - t_remove, chunks_removed,
             )
 
-            t_add = time.time()
-            logger.warning(
-                "[REINDEX_PROGRESS] _add_new_chunks: starting "
-                "files_to_index=%d project=%s",
-                len(changes.added) + len(changes.modified), project_name,
-            )
-            chunks_added = self._add_new_chunks(changes, project_path, project_name)
-            logger.warning(
-                "[REINDEX_PROGRESS] _add_new_chunks: done in %.1fs added=%d",
-                time.time() - t_add, chunks_added,
-            )
+            if embedding_results:
+                self._progress_fn("saving", 0, 0)
+                self.indexer.add_embeddings(embedding_results)
+            chunks_added = len(embedding_results)
 
-            # Update snapshot
+            # Persist and VERIFY the index BEFORE advancing the snapshot.
+            # save_index() runs the manifest consistency check (chunk_ids row
+            # count vs FAISS ntotal) and raises on divergence or disk error.
+            # Doing it before save_snapshot() guarantees a failed/inconsistent
+            # save never gets recorded as "current" — otherwise detect_changes
+            # would treat the stale or partial index as up-to-date forever.
+            self.indexer.save_index()
+
+            # Snapshot LAST: only once the index is durably and consistently
+            # saved do we record the new content hashes.
             self.snapshot_manager.save_snapshot(
                 current_dag,
                 {
@@ -280,9 +306,6 @@ class IncrementalIndexer:
                     "files_modified": len(changes.modified),
                 },
             )
-
-            # Update index
-            self.indexer.save_index()
             logger.warning(
                 "[REINDEX_PROGRESS] incremental_index: done in %.1fs "
                 "project=%s chunks_added=%d chunks_removed=%d",
@@ -466,19 +489,11 @@ class IncrementalIndexer:
 
             chunks_added = len(all_embedding_results)
 
-            # Save snapshot
-            self.snapshot_manager.save_snapshot(
-                dag,
-                {
-                    "project_name": project_name,
-                    "full_index": True,
-                    "total_files": len(all_files),
-                    "supported_files": len(supported_files),
-                    "chunks_indexed": chunks_added,
-                },
-            )
-
-            # Save index
+            # Save and VERIFY the index BEFORE advancing the snapshot (same
+            # ordering invariant as the incremental path): save_index() runs
+            # the manifest consistency check and raises on a bad save, so a
+            # failed full reindex is never recorded as a current snapshot that
+            # detect_changes would then treat as up-to-date.
             self.indexer.save_index()
 
             # Post-indexing smoke test: verify vector search returns non-zero
@@ -505,6 +520,20 @@ class IncrementalIndexer:
                             logger.info(f"Smoke test passed: top similarity={top_sim:.4f}")
                 except Exception as e:
                     logger.warning(f"Smoke test skipped: {e}")
+
+            # Snapshot LAST — only after the index is durably saved and
+            # smoke-tested. Snapshot-last is the invariant that lets a failed
+            # save leave the prior snapshot in place so the next run retries.
+            self.snapshot_manager.save_snapshot(
+                dag,
+                {
+                    "project_name": project_name,
+                    "full_index": True,
+                    "total_files": len(all_files),
+                    "supported_files": len(supported_files),
+                    "chunks_indexed": chunks_added,
+                },
+            )
 
             return IncrementalIndexResult(
                 files_added=len(supported_files),
@@ -554,10 +583,22 @@ class IncrementalIndexer:
 
         return chunks_removed
 
-    def _add_new_chunks(
+    def _chunk_and_embed_changes(
         self, changes: FileChanges, project_path: str, project_name: str
-    ) -> int:
-        """Add chunks for new and modified files.
+    ) -> list:
+        """Chunk and embed new/modified files; return the embedding results.
+
+        This is the data-loss-safe half of the old `_add_new_chunks`: it does
+        NOT touch the index. `incremental_index` calls it BEFORE removing the
+        stale chunks, so a failure here aborts the run while the old chunks are
+        still intact.
+
+        Per-file chunking failures stay graceful (a parse error on one file is
+        counted as a zero-chunk file, not fatal). But an embedding failure
+        deliberately PROPAGATES — the previous code swallowed it and returned
+        0, which, after `_remove_old_chunks` had already deleted the modified
+        file's chunks and the snapshot was saved, dropped the file from the
+        index permanently. Raising lets the caller abort before any of that.
 
         Args:
             changes: File changes
@@ -565,7 +606,8 @@ class IncrementalIndexer:
             project_name: Project name
 
         Returns:
-            Number of chunks added
+            List of EmbeddingResult (metadata stamped with project_name +
+            content), ready to hand to indexer.add_embeddings.
         """
         files_to_index = self.change_detector.get_files_to_reindex(changes)
 
@@ -598,28 +640,23 @@ class IncrementalIndexer:
         all_embedding_results = []
         if chunks_to_embed:
             self._progress_fn("embedding", 0, len(chunks_to_embed))
-            try:
-                all_embedding_results = self.embedder.embed_chunks_grouped(
-                    chunks_to_embed
-                )
-                # Update metadata
-                for chunk, embedding_result in zip(
-                    chunks_to_embed, all_embedding_results
-                ):
-                    embedding_result.metadata["project_name"] = project_name
-                    embedding_result.metadata["content"] = chunk.content
-                self._progress_fn(
-                    "embedding", len(chunks_to_embed), len(chunks_to_embed)
-                )
-            except Exception as e:
-                logger.warning(f"Embedding failed: {e}")
+            # NOT wrapped in try/except: a transient embed failure must
+            # propagate so incremental_index aborts BEFORE removing old chunks
+            # or advancing the snapshot. (Data-loss fix, 2026-05.)
+            all_embedding_results = self.embedder.embed_chunks_grouped(
+                chunks_to_embed
+            )
+            # Update metadata
+            for chunk, embedding_result in zip(
+                chunks_to_embed, all_embedding_results
+            ):
+                embedding_result.metadata["project_name"] = project_name
+                embedding_result.metadata["content"] = chunk.content
+            self._progress_fn(
+                "embedding", len(chunks_to_embed), len(chunks_to_embed)
+            )
 
-        # Add all embeddings to index at once
-        if all_embedding_results:
-            self._progress_fn("saving", 0, 0)
-            self.indexer.add_embeddings(all_embedding_results)
-
-        return len(all_embedding_results)
+        return all_embedding_results
 
     def get_indexing_stats(self, project_path: str) -> Optional[Dict]:
         """Get indexing statistics for a project.

@@ -208,28 +208,35 @@ DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _warned_fallback = False
 
 
+def _ipv4_post(url: str, *, headers: dict, json: dict, timeout: float):
+    """POST over an httpx client pinned to IPv4, with NO global side effects.
+
+    Tailscale split-DNS can make IPv6 resolution hang, so these Anthropic
+    calls must use IPv4. We force IPv4 by binding the client's local socket to
+    the IPv4 wildcard (``local_address="0.0.0.0"``) for this request only —
+    NOT by monkeypatching ``socket.getaddrinfo`` process-wide.
+
+    The previous implementation replaced ``socket.getaddrinfo`` (and set
+    ``urllib3 HAS_IPV6=False``) globally and never restored it, so the first
+    BM25/short-query rewrite forced IPv4-only DNS onto every other network
+    call in the MCP server (Voyage embeddings, the Anthropic reranker SDK)
+    for the life of the process.
+    """
+    import httpx
+
+    transport = httpx.HTTPTransport(local_address="0.0.0.0")
+    with httpx.Client(transport=transport, timeout=timeout) as client:
+        return client.post(url, headers=headers, json=json)
+
+
 def _call_haiku(query: str) -> Optional[str]:
     """Call Haiku to rewrite query. Returns None on failure."""
     api_key = _get_api_key()
     if not api_key:
         return None
 
-    import httpx
-
-    # Force IPv4 (Tailscale split DNS causes IPv6 hangs)
-    import socket
-    _orig = socket.getaddrinfo
-    socket.getaddrinfo = lambda host, port, family=0, type=0, proto=0, flags=0: _orig(
-        host, port, socket.AF_INET, type, proto, flags
-    )
-    try:
-        import urllib3.util.connection
-        urllib3.util.connection.HAS_IPV6 = False
-    except ImportError:
-        pass  # urllib3 not installed, socket patch is sufficient
-
     model = os.environ.get("BM25_REWRITE_MODEL", DEFAULT_HAIKU_MODEL)
-    resp = httpx.post(
+    resp = _ipv4_post(
         "https://api.anthropic.com/v1/messages",
         headers={
             "x-api-key": api_key,
@@ -297,20 +304,6 @@ def _call_haiku_short_query(query: str, n_alternatives: int) -> List[str]:
     if not api_key:
         return []
 
-    import httpx
-
-    # Reuse the IPv4 patch from _call_haiku above. Module-level state.
-    import socket
-    _orig = socket.getaddrinfo
-    socket.getaddrinfo = lambda host, port, family=0, type=0, proto=0, flags=0: _orig(
-        host, port, socket.AF_INET, type, proto, flags
-    )
-    try:
-        import urllib3.util.connection
-        urllib3.util.connection.HAS_IPV6 = False
-    except ImportError:
-        pass
-
     model = os.environ.get("BM25_REWRITE_MODEL", DEFAULT_HAIKU_MODEL)
     prompt = (
         f"Given a {len(query.split())}-word natural-language query "
@@ -324,7 +317,7 @@ def _call_haiku_short_query(query: str, n_alternatives: int) -> List[str]:
         f"Query: {query}"
     )
 
-    resp = httpx.post(
+    resp = _ipv4_post(
         "https://api.anthropic.com/v1/messages",
         headers={
             "x-api-key": api_key,
