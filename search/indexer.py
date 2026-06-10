@@ -192,8 +192,12 @@ class CodeIndexManager:
         and joins with OR so any keyword match counts.
         """
         import re
-        # Remove characters that are FTS5 operators or cause syntax errors
-        cleaned = re.sub(r'[?"*/\\(){}^~:+\-]', ' ', query)
+        # Remove characters that are FTS5 operators or cause syntax errors.
+        # C0 control chars (esp. NUL) are included: a NUL inside a quoted
+        # token terminates the SQL string early and raises "unterminated
+        # string", which silently emptied the BM25 leg for that query
+        # (found by fuzzing, 2026-06-10).
+        cleaned = re.sub(r'[?"*/\\(){}^~:+\-\x00-\x1f]', ' ', query)
         tokens = [t for t in cleaned.split() if t and len(t) > 1]
         if not tokens:
             return ""

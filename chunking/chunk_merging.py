@@ -106,7 +106,14 @@ def merge_file_chunks(
             is_gap=False,
             original_chunk=chunk,
         ))
-        last_end_line = chunk_end_0
+        # Coverage must be MONOTONIC. Chunkers emit nested/overlapping ranges
+        # (a class chunk plus its method chunks — multi-granularity by
+        # design); a bare assignment here let a nested chunk REWIND coverage
+        # below its parent's end, and the gap logic then re-emitted
+        # already-covered parent lines as phantom `module_level` gap chunks
+        # (duplicate content in FAISS + BM25). Repro: class with trailing
+        # attrs after its methods — the trailing attr was indexed twice.
+        last_end_line = max(last_end_line, chunk_end_0)
 
     # Trailing gap
     if last_end_line < total_lines:
@@ -126,20 +133,42 @@ def merge_file_chunks(
         # File has no parseable content — return original chunks
         return chunks
 
-    # Greedy packing: merge adjacent segments up to max_nws
+    # Greedy packing: merge adjacent segments up to max_nws.
+    #
+    # Hole rule: merged-group content is rebuilt below as ONE contiguous
+    # source span, so every line between the group's first and last segment
+    # gets included — even lines belonging to no segment in the group. With
+    # non-overlapping emissions that's always correct (contentful gaps became
+    # gap segments; remaining holes are whitespace-only). With OVERLAPPING
+    # emissions (a class chunk plus its nested method chunks — produced by
+    # the production chunkers), a group of method segments can have a hole
+    # that is the parent's exclusive region (e.g., a trailing class attr
+    # after the last method): spanning it duplicates that line into a second
+    # chunk. So: never pack a segment into the current group across a hole
+    # containing non-whitespace content.
     groups = []
     current_group = [segments[0]]
     current_nws = segments[0].nws
+    group_max_end = segments[0].end_line
 
     for seg in segments[1:]:
+        hole_has_content = False
+        if seg.start_line > group_max_end + 1:
+            hole_text = '\n'.join(
+                source_lines[group_max_end:seg.start_line - 1]
+            )
+            hole_has_content = bool(hole_text.strip())
+
         combined = current_nws + seg.nws
-        if combined <= max_nws:
+        if combined <= max_nws and not hole_has_content:
             current_group.append(seg)
             current_nws = combined
         else:
             groups.append(current_group)
             current_group = [seg]
             current_nws = seg.nws
+            group_max_end = 0
+        group_max_end = max(group_max_end, seg.end_line)
     groups.append(current_group)
 
     # Convert groups back to CodeChunks
@@ -150,9 +179,12 @@ def merge_file_chunks(
             result.append(group[0].original_chunk)
             continue
 
-        # Merged group: use source lines for clean, gap-inclusive content
+        # Merged group: use source lines for clean, gap-inclusive content.
+        # End is the MAX across the group, not the last segment's — with
+        # overlapping emissions a nested segment can sort after its parent
+        # while ending before it.
         start_line = group[0].start_line
-        end_line = group[-1].end_line
+        end_line = max(seg.end_line for seg in group)
         content = '\n'.join(source_lines[start_line - 1:end_line])
 
         # Collect metadata from constituent chunks

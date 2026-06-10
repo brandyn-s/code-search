@@ -13,11 +13,17 @@ Corpus: code-search's own `search/ embeddings/ chunking/ mcp_server/ merkle/
 scripts/` (61 Python files). Pure tree-sitter chunking + merge at three
 budgets; NWS = non-whitespace chars per chunk.
 
-| budget | chunks | mean | median | p90 | max | <400 NWS | cross-merged |
-|---|---|---|---|---|---|---|---|
-| 1500 (current) | 329 | 2127 | 1269 | 3978 | 66331 | 43 (13%) | 104 (31%) |
-| 2000 | 282 (−14%) | 2471 | 1637 | 4085 | 66331 | 28 (9%) | 106 (37%) |
-| 2500 | 248 (−25%) | 2783 | 2002 | 4519 | 66331 | 22 (8%) | 110 (44%) |
+| budget | chunks | mean | median | p90 | <400 NWS | cross-merged |
+|---|---|---|---|---|---|---|
+| 1500 (current) | 328 | 2155 | 1284 | 3978 | 40 (12%) | 104 (31%) |
+| 2000 | 282 (−14%) | 2497 | 1657 | 4085 | 26 (9%) | 107 (37%) |
+| 2500 | 246 (−25%) | 2841 | 2026 | 4519 | 19 (7%) | 111 (45%) |
+
+*(Table refreshed after the same-day overlap-duplication fix in
+`chunk_merging.py` — see
+`2026-06-10-vv-session-merge-duplication-and-sanitizer-finding.md`. Deltas
+vs the pre-fix sweep were ≤1 chunk per budget on this corpus; class-heavy
+corpora shift more.)*
 
 ## What this does and does not say
 
