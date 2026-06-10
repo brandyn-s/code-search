@@ -226,7 +226,14 @@ class CodeIndexManager:
                 (fts_query, fetch_k),
             )
             results = []
+            seen = set()
             for chunk_id, rank in cursor.fetchall():
+                # Dedupe: legacy indexes built before FTS rows were cleaned
+                # on remove/re-add can hold the same chunk_id several times.
+                # Rows arrive best-rank-first, so keep the first occurrence.
+                if chunk_id in seen:
+                    continue
+                seen.add(chunk_id)
                 metadata_entry = self.metadata_db.get(chunk_id)
                 if not metadata_entry:
                     continue
@@ -458,6 +465,19 @@ class CodeIndexManager:
 
         # Train quantized/IVF index if needed
         if hasattr(self._index, 'is_trained') and not self._index.is_trained:
+            # The quantizer trains ONCE, on whatever the first batch is.
+            # Full reindexes pass all chunks in one add_embeddings call, so
+            # training data is representative. An index born from a small
+            # incremental batch learns its value range from few vectors —
+            # later additions outside that range clip. Warn so operators
+            # know a full reindex would improve int8 fidelity.
+            if len(embeddings) < 256:
+                self._logger.warning(
+                    "Training quantizer on only %d vectors; value ranges may "
+                    "be unrepresentative. A full reindex (force=true) trains "
+                    "on the complete corpus.",
+                    len(embeddings),
+                )
             self._logger.info("Training index...")
             self._index.train(embeddings)
 
@@ -494,6 +514,21 @@ class CodeIndexManager:
         # Add to FTS5 index (re-init if connection was lost)
         if not hasattr(self, "_fts_conn") or self._fts_conn is None:
             self._init_fts5()
+        # Idempotency: drop any existing FTS rows for the incoming chunk_ids
+        # first. chunk_fts has no uniqueness constraint, so re-adding a
+        # chunk_id (modified file whose chunk boundaries didn't move) would
+        # otherwise duplicate it in BM25 results.
+        incoming_ids = [r.chunk_id for r in embedding_results]
+        try:
+            for i in range(0, len(incoming_ids), 500):
+                batch = incoming_ids[i:i + 500]
+                placeholders = ",".join("?" * len(batch))
+                self._fts_conn.execute(
+                    f"DELETE FROM chunk_fts WHERE chunk_id IN ({placeholders})",
+                    batch,
+                )
+        except Exception as e:
+            self._logger.warning(f"FTS5 pre-insert cleanup failed: {e}")
         for result in embedding_results:
             content = result.metadata.get("full_content", result.metadata.get("content_preview", ""))
             file_path = result.metadata.get("relative_path", result.metadata.get("file_path", ""))
@@ -606,27 +641,45 @@ class CodeIndexManager:
             similarities, indices = index.search(query_embedding, search_k)
         
         results = []
+        seen = set()
         for i, (similarity, index_id) in enumerate(zip(similarities[0], indices[0])):
             if index_id == -1:  # No more results
                 break
-            
+
+            # Defensive bounds check: a truncated chunk_ids list (pre-repair)
+            # must degrade to fewer results, not IndexError.
+            if index_id >= len(self._chunk_ids):
+                continue
+
             chunk_id = self._chunk_ids[index_id]
+            if chunk_id is None:
+                continue
+            # Dedupe: after a modify→re-add cycle the same chunk_id exists at
+            # two FAISS positions (the stale vector is never removed). FAISS
+            # returns results sorted by similarity, so the first occurrence
+            # is the best-scoring one; later duplicates would otherwise
+            # occupy extra result slots AND get double-counted by RRF, which
+            # sums contributions per appearance.
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+
             metadata_entry = self.metadata_db.get(chunk_id)
-            
+
             if metadata_entry is None:
                 continue
-            
+
             metadata = metadata_entry['metadata']
-            
+
             # Apply filters
             if filters and not self._matches_filters(metadata, filters):
                 continue
-            
+
             results.append((chunk_id, float(similarity), metadata))
-            
+
             if len(results) >= k:
                 break
-        
+
         return results
     
     def _matches_filters(self, metadata: Dict[str, Any], filters: Dict[str, Any]) -> bool:
@@ -699,6 +752,26 @@ class CodeIndexManager:
         """Retrieve chunk metadata by ID."""
         metadata_entry = self.metadata_db.get(chunk_id)
         return metadata_entry['metadata'] if metadata_entry else None
+
+    def count_chunks_in_file(self, relative_path: str) -> int:
+        """Count the live chunks indexed for a specific file.
+
+        Uses the FTS5 table's file_path column (plain equality scan, no
+        MATCH). FTS rows are now deleted on remove_file_chunks, so this
+        reflects live chunks only.
+        """
+        if not relative_path:
+            return 0
+        if not hasattr(self, "_fts_conn") or self._fts_conn is None:
+            return 0
+        try:
+            cursor = self._fts_conn.execute(
+                "SELECT COUNT(*) FROM chunk_fts WHERE file_path = ?",
+                (relative_path,),
+            )
+            return int(cursor.fetchone()[0])
+        except Exception:
+            return 0
     
     def get_similar_chunks(self, chunk_id: str, k: int = 5) -> List[Tuple[str, float, Dict[str, Any]]]:
         """Find chunks similar to a given chunk."""
@@ -709,18 +782,78 @@ class CodeIndexManager:
         index_id = metadata_entry['index_id']
         if self._index is None or index_id >= self._index.ntotal:
             return []
-        
-        # Get the embedding for this chunk
-        embedding = self._index.reconstruct(index_id)
-        
+
+        # Get the embedding for this chunk. Binary indexes reconstruct to
+        # packed uint8 codes, not floats — pull the original vector from the
+        # float store instead so the downstream float search path works.
+        if getattr(self, '_is_binary', False) and hasattr(self, '_float_store'):
+            if index_id >= len(self._float_store):
+                return []
+            embedding = self._float_store[index_id].copy()
+        else:
+            embedding = self._index.reconstruct(index_id)
+
         # Search for similar chunks (excluding the original)
         results = self.search(embedding, k + 1)
         
         # Filter out the original chunk
         return [(cid, sim, meta) for cid, sim, meta in results if cid != chunk_id][:k]
     
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normalize a path for comparison: forward slashes, no trailing slash."""
+        return str(path).replace("\\", "/").rstrip("/")
+
+    @staticmethod
+    def _is_absolute_norm(path: str) -> bool:
+        """Absolute-path check on a _normalize_path'd string (POSIX or drive)."""
+        return path.startswith("/") or (
+            len(path) >= 3 and path[1] == ":" and path[2] == "/"
+        )
+
+    @classmethod
+    def _paths_refer_to_same_file(cls, target: str, chunk_rel: str, chunk_abs: str) -> bool:
+        """True if `target` (relative or absolute) identifies the chunk's file.
+
+        Matching rules (the previous implementation used bare substring
+        containment — `file_path in chunk_file or chunk_file in file_path` —
+        which made removing `test.py` also delete `conftest.py`'s chunks;
+        the un-modified file then silently vanished from the index until
+        its next edit or a full reindex):
+
+        - exact equality against the stored relative or absolute path;
+        - an ABSOLUTE target matches a stored relative path when it ends
+          with "/<relative path>" (path-segment boundary);
+        - a RELATIVE target matches only the stored relative path exactly.
+          It is NOT suffix-matched against the absolute path unless no
+          relative path is stored — otherwise removing a root-level
+          `util.py` would also match `src/util.py` (the absolute path ends
+          with "/util.py").
+        """
+        target = cls._normalize_path(target)
+        chunk_rel = cls._normalize_path(chunk_rel) if chunk_rel else ""
+        chunk_abs = cls._normalize_path(chunk_abs) if chunk_abs else ""
+        if not target:
+            return False
+        if target in (chunk_rel, chunk_abs):
+            return True
+        if cls._is_absolute_norm(target):
+            # Absolute target vs relative metadata.
+            return bool(chunk_rel) and target.endswith("/" + chunk_rel)
+        # Relative target: only fall back to an absolute-suffix match when
+        # the chunk stored no relative path at all.
+        if not chunk_rel and chunk_abs:
+            return chunk_abs.endswith("/" + target)
+        return False
+
     def remove_file_chunks(self, file_path: str, project_name: Optional[str] = None) -> int:
         """Remove all chunks from a specific file.
+
+        Removes the metadata rows AND the FTS5 rows. Pre-fix only metadata
+        was deleted, so every modified file left its old FTS5 rows behind:
+        re-adding the same chunk_id duplicated it in BM25 results (and RRF
+        sums per-appearance, inflating fused scores), while shifted
+        chunk_ids left dead rows that consumed the BM25 LIMIT quota.
 
         Args:
             file_path: Path to the file (relative or absolute)
@@ -738,36 +871,63 @@ class CodeIndexManager:
             self._load_index()
 
         chunks_to_remove = []
+        seen = set()
 
-        # Find chunks to remove
+        # Find chunks to remove. _chunk_ids can contain the same chunk_id at
+        # multiple FAISS positions after a modify→re-add cycle; dedupe so the
+        # metadata delete below doesn't KeyError on the second occurrence.
         for chunk_id in self._chunk_ids:
+            if chunk_id is None or chunk_id in seen:
+                continue
+            seen.add(chunk_id)
             metadata_entry = self.metadata_db.get(chunk_id)
             if not metadata_entry:
                 continue
-            
+
             metadata = metadata_entry['metadata']
-            
-            # Check if this chunk belongs to the file
-            chunk_file = metadata.get('file_path') or metadata.get('relative_path')
-            if not chunk_file:
+
+            chunk_rel = metadata.get('relative_path') or ''
+            chunk_abs = metadata.get('file_path') or ''
+            if not (chunk_rel or chunk_abs):
                 continue
-            
-            # Check if paths match (handle both relative and absolute)
-            if file_path in chunk_file or chunk_file in file_path:
+
+            if self._paths_refer_to_same_file(file_path, chunk_rel, chunk_abs):
                 # Check project name if provided
                 if project_name and metadata.get('project_name') != project_name:
                     continue
                 chunks_to_remove.append(chunk_id)
-        
+
         # Remove chunks from metadata
         for chunk_id in chunks_to_remove:
-            del self.metadata_db[chunk_id]
-        
+            try:
+                del self.metadata_db[chunk_id]
+            except KeyError:
+                pass
+
+        # Remove the corresponding FTS5 rows (batched under SQLite's
+        # parameter limit).
+        if chunks_to_remove:
+            if not hasattr(self, "_fts_conn") or self._fts_conn is None:
+                self._init_fts5()
+            try:
+                for i in range(0, len(chunks_to_remove), 500):
+                    batch = chunks_to_remove[i:i + 500]
+                    placeholders = ",".join("?" * len(batch))
+                    self._fts_conn.execute(
+                        f"DELETE FROM chunk_fts WHERE chunk_id IN ({placeholders})",
+                        batch,
+                    )
+                self._fts_conn.commit()
+            except Exception as e:
+                self._logger.warning(
+                    f"FTS5 cleanup failed for {file_path}: {e}"
+                )
+
         # Note: We don't remove from FAISS index directly as it's complex
         # Instead, we'll rebuild the index periodically or on demand
-        
+
         self._logger.info(f"Removed {len(chunks_to_remove)} chunks from {file_path}")
-        
+
         # Commit removals in batch
         try:
             self.metadata_db.commit()
@@ -1088,12 +1248,26 @@ class CodeIndexManager:
             quant = "float32"
             idx_dim = self._index.d if self._index else 0
 
+        # Live vs stale accounting: FAISS rows are never removed in place
+        # (removal is "rebuild on demand"), so after modify/delete churn
+        # ntotal exceeds the live metadata row count. stale_vectors is the
+        # operator signal for "a full reindex would compact this index".
+        ntotal = self._index.ntotal if self._index else 0
+        try:
+            live_chunks = len(self.metadata_db)
+        except Exception:
+            live_chunks = None
+
         stats = {
             'total_chunks': len(self._chunk_ids),
-            'index_size': self._index.ntotal if self._index else 0,
+            'index_size': ntotal,
             'embedding_dimension': idx_dim,
             'index_type': type(self._index).__name__ if self._index else 'None',
             'quantization': quant,
+            'live_chunks': live_chunks,
+            'stale_vectors': (
+                max(0, ntotal - live_chunks) if live_chunks is not None else None
+            ),
         }
         
         # Add file and folder statistics

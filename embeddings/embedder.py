@@ -259,6 +259,14 @@ class CodeEmbedder:
         resolved_model_name = getattr(self._model, "model_name", None) or getattr(
             self._model, "_model_name", None,
         ) or model_name or "(unknown)"
+        # Resolved (provider, model) pair namespaces the query-embedding
+        # caches. The server constructs one CodeEmbedder per project and
+        # projects can use different providers/models ("dual-model
+        # workflows"); a cache keyed on query text alone returned another
+        # model's vector after a project switch — a loud dim-mismatch when
+        # dimensions differ, silently wrong similarities when they match
+        # (voyage-4-large and voyage-code-3 are both 1024-d).
+        self._resolved_model_name = resolved_model_name
         self._logger.info(
             f"Embedding provider: {provider}, model: {resolved_model_name}"
         )
@@ -621,12 +629,37 @@ class CodeEmbedder:
     # LRU query embedding cache (in-memory) + optional SQLite persistent cache.
     # In-memory cache: fast, dies with process. SQLite: survives restarts,
     # eliminates cold-start latency for Jina on CPU (~5s per query → instant).
+    #
+    # The in-memory cache is deliberately class-level so it survives the
+    # per-project CodeEmbedder reconstruction the MCP server does on every
+    # switch_project. Sharing is safe ONLY because keys are namespaced by
+    # the instance's resolved (provider, model) — see _cache_namespace.
+    # Pre-fix, the key was the bare query text, so switching between
+    # projects with different providers returned the previous model's
+    # embedding (cross-provider cache poisoning).
     _query_cache: OrderedDict = OrderedDict()
     _QUERY_CACHE_MAX: int = 256
     _disk_cache_db = None
 
+    def _cache_namespace(self) -> str:
+        """Provider+model namespace for query-embedding cache keys.
+
+        Uses the instance's resolved identity, NOT os.environ at call time:
+        the server's env-var override during construction is restored before
+        the first query, so the env no longer reflects this instance.
+        """
+        return f"{self._provider}::{self._resolved_model_name}"
+
     def _get_disk_cache(self):
-        """Lazy-init SQLite persistent query cache."""
+        """Lazy-init SQLite persistent query cache.
+
+        Schema note: query_embeddings_v2 keys on (query_key, provider,
+        model). The v1 table keyed on query_key alone, so two projects
+        using different providers overwrote each other's rows and — worse —
+        the same-dimension case returned the wrong model's vector. The v1
+        table is dropped on first open; it's a cache, so the only cost is
+        re-warming.
+        """
         if self._disk_cache_db is not None:
             return self._disk_cache_db
         try:
@@ -635,14 +668,17 @@ class CodeEmbedder:
             db = sqlite3.connect(str(cache_path), check_same_thread=False)
             db.execute("PRAGMA journal_mode = WAL")
             db.execute("""
-                CREATE TABLE IF NOT EXISTS query_embeddings (
-                    query_key TEXT PRIMARY KEY,
-                    embedding BLOB,
+                CREATE TABLE IF NOT EXISTS query_embeddings_v2 (
+                    query_key TEXT,
                     provider TEXT,
+                    model TEXT,
+                    embedding BLOB,
                     dim INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (query_key, provider, model)
                 )
             """)
+            db.execute("DROP TABLE IF EXISTS query_embeddings")
             db.commit()
             self._disk_cache_db = db
             return db
@@ -658,13 +694,18 @@ class CodeEmbedder:
         2. SQLite on disk (survives restarts, eliminates Jina cold-start)
         3. Model encode (slowest, only on cache miss)
 
+        Both cache layers are keyed by (provider, model, normalized query)
+        so per-project provider switches never cross-contaminate.
+
         Args:
             query: Search query text
 
         Returns:
             Embedding vector
         """
-        cache_key = query.strip().lower()
+        query_key = query.strip().lower()
+        namespace = self._cache_namespace()
+        cache_key = (namespace, query_key)
 
         # Layer 1: in-memory LRU
         if cache_key in self._query_cache:
@@ -672,13 +713,13 @@ class CodeEmbedder:
             return self._query_cache[cache_key]
 
         # Layer 2: SQLite persistent cache
-        provider = os.environ.get("EMBEDDING_PROVIDER", "")
         db = self._get_disk_cache()
         if db is not None:
             try:
                 row = db.execute(
-                    "SELECT embedding, dim FROM query_embeddings WHERE query_key = ? AND provider = ?",
-                    (cache_key, provider),
+                    "SELECT embedding, dim FROM query_embeddings_v2 "
+                    "WHERE query_key = ? AND provider = ? AND model = ?",
+                    (query_key, self._provider, self._resolved_model_name),
                 ).fetchone()
                 if row:
                     embedding = np.frombuffer(row[0], dtype=np.float32).copy()
@@ -708,8 +749,10 @@ class CodeEmbedder:
         if db is not None:
             try:
                 db.execute(
-                    "INSERT OR REPLACE INTO query_embeddings (query_key, embedding, provider, dim) VALUES (?, ?, ?, ?)",
-                    (cache_key, embedding.tobytes(), provider, embedding.shape[0]),
+                    "INSERT OR REPLACE INTO query_embeddings_v2 "
+                    "(query_key, provider, model, embedding, dim) VALUES (?, ?, ?, ?, ?)",
+                    (query_key, self._provider, self._resolved_model_name,
+                     embedding.tobytes(), embedding.shape[0]),
                 )
                 db.commit()
             except Exception:
@@ -723,7 +766,7 @@ class CodeEmbedder:
         db = self._get_disk_cache()
         if db is not None:
             try:
-                db.execute("DELETE FROM query_embeddings")
+                db.execute("DELETE FROM query_embeddings_v2")
                 db.commit()
             except Exception:
                 pass

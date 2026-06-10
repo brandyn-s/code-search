@@ -422,11 +422,17 @@ class IncrementalIndexer:
                 and self.embedder._model._model_name.startswith("voyage-")
             )
 
+            embed_batch_failures = 0
             if use_batch and all_chunks:
                 logger.info(f"Using Voyage Batch API for {len(all_chunks)} chunks (33% cheaper)")
                 try:
                     from embeddings.voyage_batch_embedder import VoyageBatchEmbedder
-                    from embeddings.embedder import EmbeddingResult as ER
+                    # Route through the same chunk_id/metadata builder as
+                    # every other embed path. The previous inline metadata
+                    # block omitted `full_content`, so Batch-API-built
+                    # indexes silently fed only the 200-char preview to the
+                    # FTS5/BM25 side (add_embeddings reads `full_content`).
+                    from embeddings.embedder import _make_embedding_result
 
                     all_contents = [self.embedder.create_embedding_content(c) for c in all_chunks]
                     batch_emb = VoyageBatchEmbedder(model=self.embedder._model._model_name)
@@ -434,22 +440,10 @@ class IncrementalIndexer:
                     batch_emb.close()
 
                     if embeddings_array is not None and len(embeddings_array) == len(all_chunks):
-                        for i, (chunk, emb_vec) in enumerate(zip(all_chunks, embeddings_array)):
-                            chunk_id = f"{chunk.relative_path}:{chunk.start_line}-{chunk.end_line}:{chunk.chunk_type}"
-                            if chunk.name:
-                                chunk_id += f":{chunk.name}"
-                            metadata = {
-                                "file_path": chunk.file_path, "relative_path": chunk.relative_path,
-                                "folder_structure": chunk.folder_structure, "chunk_type": chunk.chunk_type,
-                                "start_line": chunk.start_line, "end_line": chunk.end_line,
-                                "name": chunk.name, "parent_name": chunk.parent_name,
-                                "docstring": chunk.docstring, "decorators": chunk.decorators,
-                                "imports": chunk.imports, "complexity_score": chunk.complexity_score,
-                                "tags": chunk.tags, "project_name": project_name,
-                                "content": chunk.content,
-                                "content_preview": chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content,
-                            }
-                            all_embedding_results.append(ER(embedding=emb_vec, chunk_id=chunk_id, metadata=metadata))
+                        for chunk, emb_vec in zip(all_chunks, embeddings_array):
+                            embedding_result = _make_embedding_result(chunk, emb_vec)
+                            embedding_result.metadata["project_name"] = project_name
+                            all_embedding_results.append(embedding_result)
                         self._progress_fn("embedding", len(all_chunks), len(all_chunks))
                         logger.info(f"Batch API: embedded {len(all_embedding_results)} chunks")
                     else:
@@ -468,7 +462,6 @@ class IncrementalIndexer:
                         )
                         for chunk, embedding_result in zip(batch, batch_results):
                             embedding_result.metadata["project_name"] = project_name
-                            embedding_result.metadata["content"] = chunk.content
                         all_embedding_results.extend(batch_results)
                         self._progress_fn(
                             "embedding", len(all_embedding_results), len(all_chunks)
@@ -480,7 +473,10 @@ class IncrementalIndexer:
                         logger.warning(
                             f"Embedding batch {batch_start}-{batch_start + len(batch)} failed: {e}"
                         )
-                        # Continue with next batch instead of losing everything
+                        # Continue with next batch instead of losing everything,
+                        # but record the failure: a partial index must NOT be
+                        # recorded as a current snapshot (see below).
+                        embed_batch_failures += 1
 
             # Add all embeddings to index at once
             self._progress_fn("saving", 0, 0)
@@ -520,6 +516,33 @@ class IncrementalIndexer:
                             logger.info(f"Smoke test passed: top similarity={top_sim:.4f}")
                 except Exception as e:
                     logger.warning(f"Smoke test skipped: {e}")
+
+            # Partial-failure guard: if any embedding batch failed, the index
+            # on disk is missing those chunks. Saving the snapshot anyway
+            # would record the affected files as indexed — they'd never be
+            # retried, the same silent data-loss shape the incremental path's
+            # embed-before-remove fix closed. Persist what we have (the
+            # partial index is still searchable) but do NOT advance the
+            # snapshot; the absent snapshot forces a fresh full index on the
+            # next run.
+            if embed_batch_failures > 0:
+                error_msg = (
+                    f"{embed_batch_failures} embedding batch(es) failed; "
+                    f"indexed {chunks_added}/{len(all_chunks)} chunks. "
+                    "Snapshot NOT advanced — the next indexing run will retry."
+                )
+                logger.error(f"[REINDEX_PROGRESS] _full_index: {error_msg}")
+                return IncrementalIndexResult(
+                    files_added=len(supported_files),
+                    files_removed=0,
+                    files_modified=0,
+                    chunks_added=chunks_added,
+                    chunks_removed=0,
+                    time_taken=time.time() - start_time,
+                    success=False,
+                    error=error_msg,
+                    chunking_diagnostics=self._last_chunking_diag,
+                )
 
             # Snapshot LAST — only after the index is durably saved and
             # smoke-tested. Snapshot-last is the invariant that lets a failed
@@ -646,12 +669,14 @@ class IncrementalIndexer:
             all_embedding_results = self.embedder.embed_chunks_grouped(
                 chunks_to_embed
             )
-            # Update metadata
+            # Update metadata. (project_name only — the chunk text already
+            # lives in metadata as `full_content`; the old `content` stamp
+            # duplicated the full chunk body in every metadata row, doubling
+            # metadata.db size for no consumer benefit.)
             for chunk, embedding_result in zip(
                 chunks_to_embed, all_embedding_results
             ):
                 embedding_result.metadata["project_name"] = project_name
-                embedding_result.metadata["content"] = chunk.content
             self._progress_fn(
                 "embedding", len(chunks_to_embed), len(chunks_to_embed)
             )

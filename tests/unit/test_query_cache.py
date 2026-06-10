@@ -80,3 +80,24 @@ def test_cache_is_case_insensitive():
     searcher.search(query="find auth handler", k=5)
 
     assert mock_embedder.embed_query.call_count == 1
+
+
+def test_cache_is_lru_bounded():
+    """The per-searcher cache must evict oldest entries past the cap — it
+    was unbounded, a slow leak in a long-lived MCP server process."""
+    mock_index = MagicMock()
+    mock_embedder = MagicMock()
+    fake_embedding = np.random.rand(8).astype(np.float32)
+    mock_embedder.embed_query.return_value = fake_embedding
+
+    searcher = IntelligentSearcher(mock_index, mock_embedder)
+    cap = searcher._QUERY_CACHE_MAX
+
+    for i in range(cap + 50):
+        searcher._get_query_embedding(f"query number {i}")
+
+    assert len(searcher._query_embedding_cache) <= cap
+
+    # Oldest entry evicted; newest retained.
+    assert "query number 0" not in searcher._query_embedding_cache
+    assert f"query number {cap + 49}" in searcher._query_embedding_cache

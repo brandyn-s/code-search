@@ -3,7 +3,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import numpy as np
-import torch
 
 
 class EmbeddingModel(ABC):
@@ -49,8 +48,20 @@ class EmbeddingModel(ABC):
             pass
 
     def _resolve_device(self, requested: Optional[str]) -> str:
-        """Resolve device string."""
+        """Resolve device string.
+
+        torch is imported lazily: API-only providers (OpenAI, Voyage) set
+        their device directly and never call this, so a deployment that
+        only uses API embeddings must not require torch to be installed.
+        Before this, the module-level `import torch` made every embedder —
+        including the pure-httpx ones — transitively depend on a ~2GB
+        package they never use.
+        """
         req = (requested or "auto").lower()
+        try:
+            import torch
+        except ImportError:
+            return "cpu"
         if req in ("auto", "none", ""):
             if torch.cuda.is_available():
                 return "cuda"

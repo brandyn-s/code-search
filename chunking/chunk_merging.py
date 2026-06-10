@@ -18,14 +18,14 @@ from typing import List
 
 from chunking.code_chunk import CodeChunk
 
-# Floor: chunks below this are noise for embedding models.
-# Ekimetrics 2026: sub-100-token chunks degrade retrieval by 6-16%.
-# 400 NWS chars ≈ 100 tokens.
-MIN_CHUNK_NWS = 400
-
 # Budget: merge up to this size. Chroma 2025 context rot research:
 # degradation cliff at ~2500 tokens. 1500 NWS ≈ 500-600 tokens,
 # well under the ceiling with room for contextual headers.
+# (Sizing context: sub-100-token chunks degrade retrieval 6-16% per
+# Ekimetrics 2026 — the greedy merge below absorbs most of them by
+# packing adjacent segments toward this budget. A hard minimum-size
+# floor is deliberately NOT enforced: that would change chunk output
+# and is a measured chunking change, not a refactor.)
 MAX_CHUNK_NWS = 1500
 
 

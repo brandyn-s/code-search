@@ -4,6 +4,7 @@ import json
 import os
 import re
 import logging
+from collections import OrderedDict
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
@@ -175,14 +176,56 @@ def _query_stem(token: str) -> str:
     return token
 
 
+# Per-deployment synonym overlay (CODE_SYNONYMS_PATH). The built-in map
+# above bakes Corsair-specific daemon names into engine source — on any
+# other corpus, queries containing "power", "camera", "safety", … get
+# expanded with boat-daemon tokens. The env var lets a deployment extend
+# or disable entries without a code change: a JSON object whose values are
+# either a list of synonyms (extends/overrides the key) or null (removes
+# the built-in key). Default behavior (env unset) is byte-identical to the
+# built-in map — changing the defaults is a retrieval-behavior change and
+# stays BLOCKED ON MEASUREMENT per ship-discipline rule 10.
+_SYNONYMS_OVERLAY_CACHE: Optional[Tuple[str, Dict[str, List[str]]]] = None
+
+
+def _active_synonyms() -> Dict[str, List[str]]:
+    """Return the synonym map, applying the CODE_SYNONYMS_PATH overlay."""
+    global _SYNONYMS_OVERLAY_CACHE
+    path = os.environ.get("CODE_SYNONYMS_PATH", "")
+    if not path:
+        return CODE_SYNONYMS
+    if _SYNONYMS_OVERLAY_CACHE is not None and _SYNONYMS_OVERLAY_CACHE[0] == path:
+        return _SYNONYMS_OVERLAY_CACHE[1]
+    merged: Dict[str, List[str]] = dict(CODE_SYNONYMS)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for key, value in data.items():
+                norm_key = str(key).lower()
+                if value is None:
+                    merged.pop(norm_key, None)
+                elif isinstance(value, list):
+                    merged[norm_key] = [str(s) for s in value]
+    except (OSError, ValueError) as e:
+        logging.getLogger(__name__).warning(
+            "CODE_SYNONYMS_PATH=%s load failed (%s); using built-in synonyms",
+            path, e,
+        )
+        merged = CODE_SYNONYMS
+    _SYNONYMS_OVERLAY_CACHE = (path, merged)
+    return merged
+
+
 def expand_code_query(query: str) -> str:
     """Expand a query with code-domain synonyms for better BM25 recall."""
     tokens = query.lower().split()
     expanded_tokens = list(tokens)
 
+    synonyms_map = _active_synonyms()
     for token in tokens:
         stem = _query_stem(token)
-        for key, synonyms in CODE_SYNONYMS.items():
+        for key, synonyms in synonyms_map.items():
             if token == key or stem == key or token in synonyms:
                 for syn in synonyms:
                     if syn.lower() not in [t.lower() for t in expanded_tokens]:
@@ -218,11 +261,17 @@ class SearchResult:
 class IntelligentSearcher:
     """Intelligent code search with query optimization and context awareness."""
 
+    # Cap for the per-searcher query-embedding cache. The embedder's own
+    # LRU is capped at 256; this one was unbounded — a slow leak in a
+    # long-lived MCP server process.
+    _QUERY_CACHE_MAX = 256
+
     def __init__(self, index_manager: CodeIndexManager, embedder: CodeEmbedder):
         self.index_manager = index_manager
         self.embedder = embedder
         self._logger = logging.getLogger(__name__)
-        self._query_embedding_cache: Dict[str, Any] = {}  # normalized_query -> embedding
+        # normalized_query -> embedding, LRU-bounded at _QUERY_CACHE_MAX
+        self._query_embedding_cache: "OrderedDict[str, Any]" = OrderedDict()
         # PR Plan-2 A1 (2026-05-05): structured reranker metadata from the
         # most recent search() call. MCP layer reads this and emits
         # `_metadata.reranker = {applied, reason, latency_ms}` so LLM agents
@@ -309,13 +358,17 @@ class IntelligentSearcher:
         }
 
     def _get_query_embedding(self, query: str):
-        """Get embedding for a query, using cache for repeated queries."""
+        """Get embedding for a query, using a bounded LRU cache."""
         cache_key = query.strip().lower()
-        if cache_key in self._query_embedding_cache:
+        cache = self._query_embedding_cache
+        if cache_key in cache:
             self._logger.debug(f"Query embedding cache hit for: '{cache_key}'")
-            return self._query_embedding_cache[cache_key]
+            cache.move_to_end(cache_key)
+            return cache[cache_key]
         embedding = self.embedder.embed_query(query)
-        self._query_embedding_cache[cache_key] = embedding
+        cache[cache_key] = embedding
+        if len(cache) > self._QUERY_CACHE_MAX:
+            cache.popitem(last=False)
         return embedding
 
     def clear_cache(self):
@@ -897,13 +950,20 @@ class IntelligentSearcher:
         )
 
     def _count_chunks_in_file(self, relative_path: str) -> int:
-        """Count total chunks in a specific file."""
-        count = 0
-        stats = self.index_manager.get_stats()
+        """Count total chunks in a specific file.
 
-        # This is a simplified implementation
-        # In a real scenario, you might want to maintain this as a separate index
-        return stats.get("files_indexed", 0)
+        Delegates to the index manager's FTS5-backed count. The previous
+        implementation returned `files_indexed` (the project-wide file
+        count), which made `context_info.file_context.total_chunks_in_file`
+        wrong for every result.
+        """
+        counter = getattr(self.index_manager, "count_chunks_in_file", None)
+        if counter is None:
+            return 0
+        try:
+            return int(counter(relative_path))
+        except Exception:
+            return 0
 
     def _rank_results(
         self, results: List[SearchResult], original_query: str, intent_tags: List[str]

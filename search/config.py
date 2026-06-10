@@ -245,17 +245,6 @@ class SearchConfig:
     default_search_mode: str
     """Used by ``search()`` when the caller doesn't pass ``search_mode``.
     Pre-R11 this read ``SEARCH_MODE`` env directly with no allowlist."""
-    sonnet_skip_threshold: Optional[float]
-    """When set, skip Sonnet rerank if top-1 hybrid score >= threshold.
-    None disables the gate (Phase B'''(b) opt-in).
-
-    NOTE on PPR knobs: ``CODE_SEARCH_PPR_ENABLED`` and
-    ``CODE_SEARCH_PPR_ALPHA`` are intentionally NOT carried by SearchConfig
-    in phase 1 — ``search.ppr_scorer.get_env_config()`` is their existing
-    operational source and is consumed directly by the PPR block in
-    ``_hybrid_search``. A phase 2 consolidation can fold PPR into
-    SearchConfig once we settle whether the PPR scorer should depend on
-    the search-level config or stay self-contained."""
 
 
 @lru_cache(maxsize=1)
