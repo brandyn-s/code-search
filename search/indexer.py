@@ -166,23 +166,63 @@ class CodeIndexManager:
         self._init_fts5()
         
     def _init_fts5(self):
-        """Initialize FTS5 full-text search table."""
+        """Initialize FTS5 full-text search table.
+
+        Corruption-hardened (2026-06-10 torn-write fuzz): a truncated or
+        garbage fts5.db raised sqlite3.DatabaseError HERE — in the
+        constructor — making the manager unconstructable until manual
+        cleanup. FTS5 is derived data (rebuilt by reindex), so corruption
+        quarantines the bad file and recreates an empty table: BM25 leg
+        degrades until the next reindex, search keeps working.
+        """
         import sqlite3
         self._fts_db_path = self.storage_dir / "fts5.db"
-        self._fts_conn = sqlite3.connect(
-            str(self._fts_db_path),
-            check_same_thread=False,
-        )
-        self._fts_conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
-                chunk_id,
-                content,
-                file_path,
-                name,
-                tokenize='porter unicode61'
-            )
-        """)
-        self._fts_conn.commit()
+        for attempt in (1, 2):
+            try:
+                self._fts_conn = sqlite3.connect(
+                    str(self._fts_db_path),
+                    check_same_thread=False,
+                )
+                self._fts_conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+                        chunk_id,
+                        content,
+                        file_path,
+                        name,
+                        tokenize='porter unicode61'
+                    )
+                """)
+                self._fts_conn.commit()
+                return
+            except sqlite3.DatabaseError as e:
+                try:
+                    self._fts_conn.close()
+                except Exception:
+                    pass
+                self._fts_conn = None
+                if attempt == 2:
+                    self._logger.error(
+                        "fts5.db unusable after quarantine (%s); BM25 leg "
+                        "disabled until reindex", e,
+                    )
+                    return
+                import time
+                quarantine = self._fts_db_path.with_suffix(
+                    f".db.corrupt.{time.strftime('%Y%m%dT%H%M%S')}"
+                )
+                try:
+                    self._fts_db_path.rename(quarantine)
+                except OSError:
+                    try:
+                        self._fts_db_path.unlink()
+                    except OSError:
+                        return
+                self._logger.error(
+                    "fts5.db is corrupt (%s) — quarantined to %s and "
+                    "recreated empty. BM25 results degrade until a full "
+                    "reindex (index_directory(incremental=false)).",
+                    e, quarantine.name,
+                )
 
     @staticmethod
     def _sanitize_fts5_query(query: str) -> str:
@@ -270,13 +310,27 @@ class CodeIndexManager:
     
     @property
     def metadata_db(self):
-        """Lazy loading of metadata database."""
+        """Lazy loading of metadata database.
+
+        Metadata is NOT recoverable from the other artifacts, so a corrupt
+        metadata.db raises an ACTIONABLE error instead of a raw sqlitedict
+        traceback (2026-06-10 torn-write fuzz).
+        """
         if self._metadata_db is None:
-            self._metadata_db = SqliteDict(
-                str(self.metadata_path), 
-                autocommit=False,
-                journal_mode="WAL"
-            )
+            try:
+                self._metadata_db = SqliteDict(
+                    str(self.metadata_path),
+                    autocommit=False,
+                    journal_mode="WAL"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"metadata.db at {self.metadata_path} is corrupt or "
+                    f"unreadable ({type(e).__name__}: {e}). Metadata cannot "
+                    "be rebuilt from other artifacts — run "
+                    "index_directory(incremental=false) to reindex this "
+                    "project."
+                ) from e
         return self._metadata_db
     
     def _load_index(self):
@@ -299,22 +353,52 @@ class CodeIndexManager:
         )
 
         if self.index_path.exists():
-            # Detect binary mode: float_store.npy exists alongside the index
-            if float_store_path.exists():
-                self._logger.info(f"Loading binary index from {self.index_path}")
-                self._index = faiss.read_index_binary(str(self.index_path))
-                self._float_store = np.load(str(float_store_path))
-                self._is_binary = True
-            else:
-                self._logger.info(f"Loading index from {self.index_path}")
-                self._index = faiss.read_index(str(self.index_path))
-                if not self._is_binary:
-                    self._maybe_move_index_to_gpu()
+            # Corruption-hardened (2026-06-10 torn-write fuzz): a truncated/
+            # garbage code.index raised a raw faiss RuntimeError from every
+            # search. The FAISS index is rebuilt by reindex, so corruption
+            # degrades to vector-leg-disabled (BM25 keeps working) with a
+            # loud actionable log instead of crashing the read path.
+            try:
+                # Detect binary mode: float_store.npy exists alongside the index
+                if float_store_path.exists():
+                    self._logger.info(f"Loading binary index from {self.index_path}")
+                    self._index = faiss.read_index_binary(str(self.index_path))
+                    self._float_store = np.load(str(float_store_path))
+                    self._is_binary = True
+                else:
+                    self._logger.info(f"Loading index from {self.index_path}")
+                    self._index = faiss.read_index(str(self.index_path))
+                    if not self._is_binary:
+                        self._maybe_move_index_to_gpu()
+            except Exception as e:
+                self._logger.error(
+                    "FAISS index at %s is corrupt or unreadable (%s: %s). "
+                    "Vector search disabled (BM25 still serves) until a "
+                    "full reindex (index_directory(incremental=false)).",
+                    self.index_path, type(e).__name__, str(e)[:200],
+                )
+                self._index = None
+                self._chunk_ids = []
+                self._is_binary = False
+                return
 
-            # Load chunk IDs
+            # Load chunk IDs. A corrupt pickle is recoverable: fall through
+            # with an empty list and let _maybe_rebuild_chunk_ids reconstruct
+            # the FAISS-position mapping losslessly from metadata.db
+            # (pre-fix this raised UnpicklingError from every search even
+            # though the rebuild machinery existed one call away).
             if self.chunk_id_path.exists():
-                with open(self.chunk_id_path, 'rb') as f:
-                    self._chunk_ids = pickle.load(f)
+                try:
+                    with open(self.chunk_id_path, 'rb') as f:
+                        loaded = pickle.load(f)
+                    self._chunk_ids = loaded if isinstance(loaded, list) else []
+                except Exception as e:
+                    self._logger.error(
+                        "chunk_ids.pkl is corrupt (%s: %s) — attempting "
+                        "rebuild from metadata.db",
+                        type(e).__name__, str(e)[:120],
+                    )
+                    self._chunk_ids = []
 
             # CHUNK_ID DIAGNOSTIC: log the state right after load.
             self._logger.warning(
@@ -1324,17 +1408,27 @@ class CodeIndexManager:
             json.dump(stats, f, indent=2)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get index statistics."""
+        """Get index statistics.
+
+        stats.json is derived (rewritten on every save); corruption returns
+        the empty defaults with a warning instead of raising
+        JSONDecodeError from the read path (2026-06-10 torn-write fuzz).
+        """
         if self.stats_path.exists():
-            with open(self.stats_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        else:
-            return {
-                'total_chunks': 0,
-                'index_size': 0,
-                'embedding_dimension': 0,
-                'files_indexed': 0
-            }
+            try:
+                with open(self.stats_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except (OSError, ValueError, UnicodeDecodeError) as e:
+                self._logger.warning(
+                    "stats.json is corrupt (%s) — returning defaults; it is "
+                    "regenerated on the next index save", e,
+                )
+        return {
+            'total_chunks': 0,
+            'index_size': 0,
+            'embedding_dimension': 0,
+            'files_indexed': 0
+        }
     
     def get_index_size(self) -> int:
         """Get the number of chunks in the index."""
