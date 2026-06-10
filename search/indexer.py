@@ -127,7 +127,16 @@ _install_search_file_handler()
 
 class CodeIndexManager:
     """Manages FAISS vector index and metadata storage for code chunks."""
-    
+
+    # P5 (2026-06-10 roadmap): stale-vector compaction thresholds. FAISS rows
+    # are never removed in place (removal is "rebuild on demand"), so
+    # modify/delete churn accumulates stale vectors. ADVISORY surfaces in
+    # search `_metadata` and verify_index_integrity; COMPACTION escalates an
+    # incremental index run to a full reindex (which clears the index and
+    # resets the ratio to 0 — self-limiting). Hard-coded, not env knobs.
+    STALE_ADVISORY_RATIO = 0.25
+    STALE_COMPACTION_RATIO = 0.5
+
     def __init__(self, storage_dir: str):
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -1326,6 +1335,27 @@ class CodeIndexManager:
     def get_index_size(self) -> int:
         """Get the number of chunks in the index."""
         return len(self._chunk_ids)
+
+    def stale_ratio(self) -> Optional[float]:
+        """stale_vectors / live_chunks for the current on-disk index.
+
+        Returns None when unknown (no index, empty index, or metadata
+        unreadable). A ratio above STALE_COMPACTION_RATIO means the FAISS
+        index holds more dead rows than live chunks and a full reindex is
+        strictly better. Computed from live state (FAISS ntotal vs
+        metadata.db row count), not stats.json, so it reflects churn that
+        happened since the last save.
+        """
+        if self._index is None and self.index_path.exists():
+            self._load_index()
+        ntotal = int(self._index.ntotal) if self._index is not None else 0
+        if ntotal == 0:
+            return None
+        try:
+            live = len(self.metadata_db)
+        except Exception:
+            return None
+        return max(0, ntotal - live) / max(live, 1)
     
     def clear_index(self):
         """Clear the entire index and metadata."""

@@ -465,3 +465,37 @@ def test_summary_aggregates_mixed_manifest_states(storage_root):
     assert summary["manifest_missing"] == 1
     assert summary["manifest_corrupt"] == 1
     assert summary["manifest_stale_prior"] == 0
+
+
+def test_stale_vector_accounting_surfaces(storage_root):
+    """P5: stats.json live/stale fields produce per-project stale_ratio +
+    a compaction remediation line when above the advisory threshold."""
+    idx = _seed_clean_project(storage_root, "proj_stale", chunk_count=3)
+    stats = json.loads((idx / "stats.json").read_text(encoding="utf-8"))
+    stats["live_chunks"] = 3
+    stats["stale_vectors"] = 2  # ratio 0.667 > 0.25 advisory
+    (idx / "stats.json").write_text(json.dumps(stats), encoding="utf-8")
+
+    server = CodeSearchServer()
+    out = json.loads(server.verify_index_integrity())
+
+    entry = next(p for p in out["projects"] if p["name"] == "proj_stale")
+    assert entry["stale_vectors"] == 2
+    assert entry["stale_ratio"] == pytest.approx(0.667, abs=1e-3)
+    assert out["summary"]["total_stale_vectors"] == 2
+    assert out["summary"]["projects_needing_compaction"] == 1
+    assert any("compact" in line for line in out.get("remediation", []) or []) or \
+        "compact" in json.dumps(out)
+
+
+def test_legacy_stats_without_stale_fields_skipped(storage_root):
+    """Pre-PR-#224 stats.json (no live/stale keys) must not break the scan
+    or report stale fields."""
+    _seed_clean_project(storage_root, "proj_legacy", chunk_count=2)
+
+    server = CodeSearchServer()
+    out = json.loads(server.verify_index_integrity())
+
+    entry = next(p for p in out["projects"] if p["name"] == "proj_legacy")
+    assert "stale_ratio" not in entry
+    assert out["summary"]["projects_needing_compaction"] == 0

@@ -490,6 +490,148 @@ class CodeEmbedder:
 
         return "\n".join(content_parts)
 
+    # P4 (2026-06-10 roadmap): document-embedding cache controls. Row cap is
+    # hard-coded (no env knob); at 1024-dim float32 ≈ 4KB/row, 200K rows ≈
+    # 800MB ceiling, evicted oldest-first.
+    _DOC_CACHE_MAX_ROWS: int = 200_000
+
+    def _doc_encode_kwargs(self) -> Dict[str, Any]:
+        """Shared encode kwargs for the document side (single + batch paths).
+
+        Pre-P4 the single-chunk path skipped `input_type` while the batch
+        path honored VOYAGE_INPUT_TYPE — the same content could embed
+        differently depending on which path indexed it. Unified here.
+        """
+        encode_kwargs: Dict[str, Any] = {
+            "prompt_name": "Retrieval-document",
+            "show_progress_bar": False,
+        }
+        if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on":
+            encode_kwargs["input_type"] = "document"
+        return encode_kwargs
+
+    def _doc_cache_input_mode(self) -> str:
+        """Cache-key component mirroring _doc_encode_kwargs' input_type."""
+        return (
+            "document+it"
+            if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on"
+            else "document"
+        )
+
+    def _maybe_evict_doc_cache(self, db) -> None:
+        """Oldest-first eviction once the row cap is exceeded."""
+        try:
+            (count,) = db.execute(
+                "SELECT COUNT(*) FROM doc_embedding_cache"
+            ).fetchone()
+            if count > self._DOC_CACHE_MAX_ROWS:
+                db.execute(
+                    "DELETE FROM doc_embedding_cache WHERE rowid IN ("
+                    "SELECT rowid FROM doc_embedding_cache "
+                    "ORDER BY created_at ASC LIMIT ?)",
+                    (count - self._DOC_CACHE_MAX_ROWS,),
+                )
+                db.commit()
+        except Exception:
+            pass
+
+    def _embed_documents_cached(self, contents: List[str]) -> List[np.ndarray]:
+        """Encode document texts with a content-hash cache in front of the model.
+
+        Key = (sha256(content), provider, model, input_mode) — the
+        provider/model keying discipline from the PR #224 query-cache fix.
+        Grouped/contextualized providers (voyage-context) never reach this
+        path: embed_chunks_grouped short-circuits to encode_grouped first,
+        and those vectors are document-context-dependent so caching them by
+        content alone would be wrong. Both document paths use the same
+        prompt_name constant, so it is not part of the key.
+
+        Cache failures degrade to a plain encode; encode failures propagate
+        (same contract as before).
+        """
+        import hashlib
+
+        encode_kwargs = self._doc_encode_kwargs()
+        db = self._get_disk_cache()
+        if db is None:
+            return list(self._model.encode(contents, **encode_kwargs))
+
+        mode = self._doc_cache_input_mode()
+        shas = [hashlib.sha256(c.encode("utf-8")).hexdigest() for c in contents]
+        by_sha: Dict[str, np.ndarray] = {}
+
+        try:
+            unique = list(dict.fromkeys(shas))
+            for j in range(0, len(unique), 500):
+                keys = unique[j:j + 500]
+                placeholders = ",".join("?" * len(keys))
+                rows = db.execute(
+                    "SELECT content_sha, embedding, dim FROM doc_embedding_cache "
+                    "WHERE provider = ? AND model = ? AND input_mode = ? "
+                    f"AND content_sha IN ({placeholders})",
+                    (self._provider, self._resolved_model_name, mode, *keys),
+                ).fetchall()
+                for sha, blob, dim in rows:
+                    vec = np.frombuffer(blob, dtype=np.float32).copy()
+                    if vec.shape[0] == dim:
+                        by_sha[sha] = vec
+        except Exception:
+            by_sha = {}
+
+        # Encode only the misses, deduped within the batch (identical content
+        # at two positions encodes once).
+        miss_shas: List[str] = []
+        miss_contents: List[str] = []
+        seen_miss = set()
+        for sha, content in zip(shas, contents):
+            if sha not in by_sha and sha not in seen_miss:
+                seen_miss.add(sha)
+                miss_shas.append(sha)
+                miss_contents.append(content)
+
+        if miss_contents:
+            fresh = self._model.encode(miss_contents, **encode_kwargs)
+            for sha, vec in zip(miss_shas, fresh):
+                by_sha[sha] = np.asarray(vec, dtype=np.float32)
+            try:
+                db.executemany(
+                    "INSERT OR REPLACE INTO doc_embedding_cache "
+                    "(content_sha, provider, model, input_mode, embedding, dim) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (sha, self._provider, self._resolved_model_name, mode,
+                         by_sha[sha].tobytes(), int(by_sha[sha].shape[0]))
+                        for sha in miss_shas
+                    ],
+                )
+                db.commit()
+                self._maybe_evict_doc_cache(db)
+            except Exception:
+                pass
+
+        hits = len(contents) - len(miss_contents)
+        if hits:
+            self._logger.info(
+                "doc-embedding cache: %d/%d texts served from cache",
+                hits, len(contents),
+            )
+        return [by_sha[sha] for sha in shas]
+
+    def clear_document_cache(self):
+        """Clear the persistent document-embedding cache.
+
+        Not wired to clear_index: the cache is content-addressed and shared
+        across projects by design (same content, same vector), so clearing
+        one project's index must not evict other projects' entries.
+        """
+        db = self._get_disk_cache()
+        if db is not None:
+            try:
+                db.execute("DELETE FROM doc_embedding_cache")
+                db.commit()
+            except Exception:
+                pass
+
     def embed_chunk(self, chunk: CodeChunk) -> EmbeddingResult:
         """Generate embedding for a single code chunk.
 
@@ -501,10 +643,8 @@ class CodeEmbedder:
         """
         content = self.create_embedding_content(chunk)
 
-        # Encode using model with proper prompt
-        embedding = self._model.encode(
-            [content], prompt_name="Retrieval-document", show_progress_bar=False
-        )[0]
+        # P4: cached document encode (shared with the batch path).
+        embedding = self._embed_documents_cached([content])[0]
         # R12: route through _make_embedding_result for consistent
         # chunk_id format + metadata shape across all three embed paths.
         return _make_embedding_result(chunk, embedding)
@@ -533,18 +673,8 @@ class CodeEmbedder:
             batch = chunks[i : i + batch_size]
             batch_contents = [self.create_embedding_content(chunk) for chunk in batch]
 
-            # Generate embeddings for batch
-            encode_kwargs = {
-                "prompt_name": "Retrieval-document",
-                "show_progress_bar": False,
-            }
-            # Voyage input_type optimization: "document" for indexing
-            if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on":
-                encode_kwargs["input_type"] = "document"
-            batch_embeddings = self._model.encode(
-                batch_contents,
-                **encode_kwargs,
-            )
+            # P4: cached document encode — only cache misses hit the model/API.
+            batch_embeddings = self._embed_documents_cached(batch_contents)
 
             # Create results — R12 dedup
             for chunk, embedding in zip(batch, batch_embeddings):
@@ -676,6 +806,25 @@ class CodeEmbedder:
                     dim INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (query_key, provider, model)
+                )
+            """)
+            # P4 (2026-06-10 roadmap): content-hash-keyed DOCUMENT embedding
+            # cache. Re-indexes and branch switches re-embed mostly-unchanged
+            # content; identical (content, provider, model, input_mode) must
+            # not hit the API twice. input_mode captures VOYAGE_INPUT_TYPE
+            # ("document" vs "document+it") because the same text embeds
+            # differently with input_type set. Cross-provider keying follows
+            # the query-cache discipline (PR #224).
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS doc_embedding_cache (
+                    content_sha TEXT,
+                    provider TEXT,
+                    model TEXT,
+                    input_mode TEXT,
+                    embedding BLOB,
+                    dim INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (content_sha, provider, model, input_mode)
                 )
             """)
             db.execute("DROP TABLE IF EXISTS query_embeddings")

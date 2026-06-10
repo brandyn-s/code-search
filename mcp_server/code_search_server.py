@@ -941,6 +941,32 @@ class CodeSearchServer:
                 # Manifest probe failures must never break a search.
                 logger.debug(f"manifest metadata propagation failed: {e}")
 
+            # P5 (2026-06-10 roadmap): stale-vector advisory. Surfaced as a
+            # separate additive object rather than a new `freshness` string —
+            # `freshness` tracks index-vs-source-tree state through the
+            # auto-reindex flow and overloading its vocabulary would clobber
+            # that signal. Absent entirely below the advisory threshold.
+            try:
+                idx_mgr = searcher.index_manager
+                ratio = idx_mgr.stale_ratio()
+                if ratio is not None and ratio > idx_mgr.STALE_ADVISORY_RATIO:
+                    stats = idx_mgr.get_stats()
+                    response_metadata["stale_index"] = {
+                        "stale_ratio": round(ratio, 3),
+                        "live_chunks": stats.get("live_chunks"),
+                        "stale_vectors": stats.get("stale_vectors"),
+                        "recommendation": (
+                            "index holds substantial stale vectors from "
+                            "modify/delete churn; run "
+                            "index_directory(incremental=false) to compact "
+                            "(auto-compaction triggers at ratio > "
+                            f"{idx_mgr.STALE_COMPACTION_RATIO})"
+                        ),
+                    }
+            except Exception as e:
+                # Advisory probe failures must never break a search.
+                logger.debug(f"stale-index metadata propagation failed: {e}")
+
             response["_metadata"] = response_metadata
 
             # Staleness warning
@@ -1535,6 +1561,8 @@ class CodeSearchServer:
                         "manifest_missing": 0,
                         "manifest_corrupt": 0,
                         "total_stale_candidates": 0,
+                        "total_stale_vectors": 0,
+                        "projects_needing_compaction": 0,
                     },
                     "message": "No indexed projects found.",
                 })
@@ -1559,6 +1587,8 @@ class CodeSearchServer:
                 "manifest_missing": 0,
                 "manifest_corrupt": 0,
                 "total_stale_candidates": 0,
+                "total_stale_vectors": 0,
+                "projects_needing_compaction": 0,
             }
 
             for proj in project_dirs:
@@ -1618,6 +1648,26 @@ class CodeSearchServer:
                     "manifest_epoch_id": manifest_epoch_id,
                     "manifest_stale_candidate": stale_candidate,
                 }
+
+                # P5 (2026-06-10 roadmap): stale-vector accounting from
+                # stats.json (written by save_index; PR #224 added the
+                # fields). Legacy stats files without the keys are skipped.
+                try:
+                    stats_file = idx_dir / "stats.json"
+                    if stats_file.exists():
+                        with open(stats_file, "r", encoding="utf-8") as f:
+                            proj_stats = json.load(f)
+                        live = proj_stats.get("live_chunks")
+                        stale = proj_stats.get("stale_vectors")
+                        if isinstance(live, int) and isinstance(stale, int):
+                            s_ratio = stale / max(live, 1)
+                            entry["stale_vectors"] = stale
+                            entry["stale_ratio"] = round(s_ratio, 3)
+                            if s_ratio > CodeIndexManager.STALE_ADVISORY_RATIO:
+                                totals["projects_needing_compaction"] += 1
+                            totals["total_stale_vectors"] += stale
+                except Exception:
+                    pass  # stale accounting is advisory; never fail the scan
                 # Surface samples only when inconsistent — gives the operator
                 # something concrete to grep without bloating the output.
                 if anything_off:
@@ -1670,6 +1720,15 @@ class CodeSearchServer:
                     "Stale `manifest/candidate.json` files present from a crashed "
                     "prior write; safe to remove via "
                     "`search.epoch_manifest.cleanup_stale_candidate(idx_dir)`."
+                )
+            if totals["projects_needing_compaction"]:
+                remediation_lines.append(
+                    f"{totals['projects_needing_compaction']} project(s) exceed "
+                    f"the stale-vector advisory ratio "
+                    f"({CodeIndexManager.STALE_ADVISORY_RATIO}); run "
+                    "`index_directory(incremental=false)` on them to compact "
+                    "(incremental runs auto-escalate to full reindex above "
+                    f"ratio {CodeIndexManager.STALE_COMPACTION_RATIO})."
                 )
 
             return json.dumps({

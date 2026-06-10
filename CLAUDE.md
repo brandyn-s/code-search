@@ -123,6 +123,14 @@ manifest state):
 absent entirely if the probe itself raised — search responses must never break
 on observability-path failures.
 
+- **`stale_index`** (P5, 2026-06-10) — advisory object present only when the
+  stale-vector ratio (dead FAISS rows from modify/delete churn ÷ live chunks)
+  exceeds 0.25: `{stale_ratio, live_chunks, stale_vectors, recommendation}`.
+  Incremental index runs auto-escalate to a full reindex above ratio 0.5
+  (self-limiting — compaction resets the ratio to 0). Deliberately a separate
+  field, not a `freshness` string: `freshness` tracks index-vs-source-tree
+  state and its vocabulary stays unchanged.
+
 ## Embeddings
 
 `voyage-4-large` (MoE, standard `/v1/embeddings`) is the default — +0.053

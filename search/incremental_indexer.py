@@ -212,6 +212,24 @@ class IncrementalIndexer:
                 )
                 return self._full_index(project_path, project_name, start_time)
 
+            # P5 (2026-06-10 roadmap): stale-vector auto-compaction. FAISS
+            # rows are never removed in place, so modify/delete churn
+            # accumulates dead vectors that waste search-quota and memory.
+            # When the index holds more garbage than live data, escalate to
+            # a full reindex (clears + rebuilds; ratio resets to 0, so this
+            # is self-limiting). Ratio None (empty/unknown) never escalates.
+            try:
+                ratio = self.indexer.stale_ratio()
+            except Exception:
+                ratio = None
+            if ratio is not None and ratio > self.indexer.STALE_COMPACTION_RATIO:
+                logger.warning(
+                    "[REINDEX_PROGRESS] compaction: stale_ratio=%.2f exceeds "
+                    "%.2f — escalating to full reindex project=%s",
+                    ratio, self.indexer.STALE_COMPACTION_RATIO, project_name,
+                )
+                return self._full_index(project_path, project_name, start_time)
+
             # Detect changes — Merkle-hashing every file in the tree;
             # this is the slowest single step on large projects.
             t_detect = time.time()
