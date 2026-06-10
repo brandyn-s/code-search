@@ -70,12 +70,94 @@ def merge_file_chunks(
     source_lines = source_code.split('\n')
     total_lines = len(source_lines)
 
-    # Sort by start line
-    chunks = sorted(chunks, key=lambda c: c.start_line)
+    # Tree-sitter chunkers intentionally emit BOTH a class chunk and its
+    # nested method chunks (dual retrieval granularity), so the input is a
+    # containment forest, not a flat disjoint list. The previous flat merge
+    # mishandled that: the gap tracker regressed to a nested chunk's end and
+    # fabricated overlapping "module_level" gap chunks from class-interior
+    # lines, and greedy packing stitched a trailing method to code AFTER its
+    # class (cross-boundary chunks). Measured on a 12-method class: 58 of 71
+    # lines double-indexed plus a method+module-code chunk.
+    #
+    # The merge is now containment-aware: siblings merge among themselves
+    # within their level's region (top level = whole file; children = the
+    # container's range), so groups never cross a container boundary and gap
+    # segments only cover lines no chunk at that level covers.
+    chunks = sorted(chunks, key=lambda c: (c.start_line, -c.end_line))
+
+    roots: List[_Node] = []
+    stack: List[_Node] = []
+    for chunk in chunks:
+        node = _Node(chunk)
+        while stack and not _contains(stack[-1].chunk, chunk):
+            stack.pop()
+        if stack:
+            stack[-1].children.append(node)
+        else:
+            roots.append(node)
+        stack.append(node)
+
+    result: List[CodeChunk] = []
+
+    def emit_level(nodes: 'List[_Node]', lo: int, hi: int) -> None:
+        result.extend(_merge_siblings(
+            [n.chunk for n in nodes], source_lines, lo, hi,
+            file_path, relative_path, folder_structure, max_nws,
+        ))
+        for n in nodes:
+            if n.children:
+                # The children's level merges within their own envelope, not
+                # the container's full range — the container's header/footer
+                # lines belong to the container chunk alone, so child-level
+                # gap segments only cover lines BETWEEN siblings (e.g. class
+                # attributes between methods).
+                lo_c = min(c.chunk.start_line for c in n.children)
+                hi_c = max(c.chunk.end_line for c in n.children)
+                emit_level(n.children, lo_c, hi_c)
+
+    emit_level(roots, 1, total_lines)
+    result.sort(key=lambda c: (c.start_line, c.end_line))
+    return result
+
+
+class _Node:
+    """Containment-forest node for the merge algorithm."""
+    __slots__ = ('chunk', 'children')
+
+    def __init__(self, chunk: CodeChunk):
+        self.chunk = chunk
+        self.children: List[_Node] = []
+
+
+def _contains(parent: CodeChunk, child: CodeChunk) -> bool:
+    """True when child's line range is strictly inside parent's."""
+    return (
+        parent.start_line <= child.start_line
+        and child.end_line <= parent.end_line
+        and (parent.start_line < child.start_line or child.end_line < parent.end_line)
+    )
+
+
+def _merge_siblings(
+    chunks: List[CodeChunk],
+    source_lines: List[str],
+    region_start: int,
+    region_end: int,
+    file_path: str,
+    relative_path: str,
+    folder_structure: List[str],
+    max_nws: int,
+) -> List[CodeChunk]:
+    """Merge DISJOINT sibling chunks within [region_start, region_end].
+
+    This is the original greedy gap+pack algorithm, bounded to a region so
+    it can run per containment level.
+    """
+    total_lines = region_end
 
     # Build segment list: alternating gaps and chunks
     segments = []
-    last_end_line = 0  # 0-based exclusive (line after last covered line)
+    last_end_line = region_start - 1  # 0-based exclusive (line after last covered line)
 
     for chunk in chunks:
         chunk_start_0 = chunk.start_line - 1  # convert to 0-based
@@ -106,13 +188,12 @@ def merge_file_chunks(
             is_gap=False,
             original_chunk=chunk,
         ))
-        # Coverage must be MONOTONIC. Chunkers emit nested/overlapping ranges
-        # (a class chunk plus its method chunks — multi-granularity by
-        # design); a bare assignment here let a nested chunk REWIND coverage
-        # below its parent's end, and the gap logic then re-emitted
-        # already-covered parent lines as phantom `module_level` gap chunks
-        # (duplicate content in FAISS + BM25). Repro: class with trailing
-        # attrs after its methods — the trailing attr was indexed twice.
+        # Coverage must be MONOTONIC. Sibling chunks at one level are
+        # disjoint for tree-sitter input (nesting is handled by the
+        # containment forest in merge_file_chunks), but non-tree chunkers
+        # could still emit partial overlaps; a bare assignment would let a
+        # chunk REWIND coverage and re-emit already-covered lines as
+        # phantom gap chunks.
         last_end_line = max(last_end_line, chunk_end_0)
 
     # Trailing gap
