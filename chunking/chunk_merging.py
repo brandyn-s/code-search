@@ -99,23 +99,32 @@ def merge_file_chunks(
 
     result: List[CodeChunk] = []
 
-    def emit_level(nodes: 'List[_Node]', lo: int, hi: int) -> None:
+    def emit_level(nodes: 'List[_Node]', lo: int, hi: int, capture_gaps: bool) -> None:
         result.extend(_merge_siblings(
             [n.chunk for n in nodes], source_lines, lo, hi,
             file_path, relative_path, folder_structure, max_nws,
+            capture_gaps=capture_gaps,
         ))
         for n in nodes:
             if n.children:
                 # The children's level merges within their own envelope, not
-                # the container's full range — the container's header/footer
-                # lines belong to the container chunk alone, so child-level
-                # gap segments only cover lines BETWEEN siblings (e.g. class
-                # attributes between methods).
+                # the container's full range. capture_gaps=False: EVERY line
+                # inside the container — header, footer, and lines between
+                # siblings (class attributes between methods) — belongs to
+                # the container chunk alone. Fabricating child-level gap
+                # segments for between-sibling lines duplicated them into a
+                # second chunk (container + phantom module_level), the same
+                # double-indexing class PR #229 fixed for the rewind case.
+                # Between-sibling contentful lines are instead HOLES, which
+                # the hole rule below already refuses to pack across.
                 lo_c = min(c.chunk.start_line for c in n.children)
                 hi_c = max(c.chunk.end_line for c in n.children)
-                emit_level(n.children, lo_c, hi_c)
+                emit_level(n.children, lo_c, hi_c, capture_gaps=False)
 
-    emit_level(roots, 1, total_lines)
+    # Only the root level captures gaps: a line outside every root chunk is
+    # covered by nothing, so a module_level gap chunk is the only way it
+    # gets indexed. At child levels the container already covers everything.
+    emit_level(roots, 1, total_lines, capture_gaps=True)
     result.sort(key=lambda c: (c.start_line, c.end_line))
     return result
 
@@ -147,11 +156,14 @@ def _merge_siblings(
     relative_path: str,
     folder_structure: List[str],
     max_nws: int,
+    capture_gaps: bool = True,
 ) -> List[CodeChunk]:
     """Merge DISJOINT sibling chunks within [region_start, region_end].
 
     This is the original greedy gap+pack algorithm, bounded to a region so
-    it can run per containment level.
+    it can run per containment level. capture_gaps=False (child levels)
+    skips gap-segment fabrication entirely — the enclosing container chunk
+    already carries every uncovered line in the region.
     """
     total_lines = region_end
 
@@ -164,7 +176,7 @@ def _merge_siblings(
         chunk_end_0 = chunk.end_line  # exclusive (0-based)
 
         # Gap before this chunk
-        if last_end_line < chunk_start_0:
+        if capture_gaps and last_end_line < chunk_start_0:
             gap_text = '\n'.join(source_lines[last_end_line:chunk_start_0])
             if gap_text.strip():
                 segments.append(_Segment(
@@ -197,7 +209,7 @@ def _merge_siblings(
         last_end_line = max(last_end_line, chunk_end_0)
 
     # Trailing gap
-    if last_end_line < total_lines:
+    if capture_gaps and last_end_line < total_lines:
         gap_text = '\n'.join(source_lines[last_end_line:])
         if gap_text.strip():
             segments.append(_Segment(

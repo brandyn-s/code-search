@@ -84,14 +84,30 @@ def test_group_does_not_span_contentful_hole():
 
 
 def test_group_end_uses_max_not_last():
-    """A nested segment sorting after its parent must not shrink the group."""
+    """A nested chunk sorting after its parent must not shrink the parent.
+
+    Written against the pre-#229 flat merge, where class + nested method
+    packed into ONE group and the regression was the group end regressing
+    to the nested segment's end (dropping the trailing class attribute).
+    The containment-aware merge (#229) deliberately preserves dual
+    granularity — class chunk and method chunk both survive — so the same
+    invariant is now asserted on the class chunk directly: full span, the
+    trailing attribute intact, the method un-flattened, and no phantom
+    gap chunk fabricated from container-interior lines.
+    """
     source = "class C:\n    a = 1\n    def m(self):\n        return 1\n    b = 2"
     chunks = [_mk(source, "C", "class", 1, 5), _mk(source, "m", "method", 3, 4)]
-    # Big budget: everything merges into one group; end must be 5, not 4.
     merged = merge_file_chunks(chunks, source, "/t.py", "t.py", [], max_nws=10_000)
-    assert len(merged) == 1
-    assert merged[0].end_line == 5
-    assert "b = 2" in merged[0].content
+
+    by_type = {c.chunk_type: c for c in merged}
+    assert set(by_type) == {"class", "method"}, (
+        f"expected dual granularity, got "
+        f"{[(c.chunk_type, c.start_line, c.end_line) for c in merged]}"
+    )
+    klass = by_type["class"]
+    assert (klass.start_line, klass.end_line) == (1, 5)
+    assert "b = 2" in klass.content  # trailing attr stays in the container
+    assert by_type["method"].content == "    def m(self):\n        return 1"
 
 
 def test_real_chunker_no_duplication_on_trailing_class_attr():
