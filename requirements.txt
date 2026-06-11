@@ -8,7 +8,6 @@ mcp>=1.13.1
 numpy
 rich>=14.1.0
 sentence-transformers>=5.1.0
-sqlitedict>=2.1.0
 tree-sitter>=0.20.0
 tree-sitter-c>=0.24.1
 tree-sitter-c-sharp>=0.23.1

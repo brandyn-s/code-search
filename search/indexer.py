@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import faiss
-from sqlitedict import SqliteDict
+from search.metadata_store import JsonSqliteKV, LegacyMetadataFormatError
 from embeddings.embedder import EmbeddingResult
 
 
@@ -313,16 +313,15 @@ class CodeIndexManager:
         """Lazy loading of metadata database.
 
         Metadata is NOT recoverable from the other artifacts, so a corrupt
-        metadata.db raises an ACTIONABLE error instead of a raw sqlitedict
+        metadata.db raises an ACTIONABLE error instead of a raw storage-layer
         traceback (2026-06-10 torn-write fuzz).
         """
         if self._metadata_db is None:
             try:
-                self._metadata_db = SqliteDict(
-                    str(self.metadata_path),
-                    autocommit=False,
-                    journal_mode="WAL"
-                )
+                self._metadata_db = JsonSqliteKV(str(self.metadata_path))
+            except LegacyMetadataFormatError:
+                # Pre-2026-06-11 sqlitedict format: actionable on its own.
+                raise
             except Exception as e:
                 raise RuntimeError(
                     f"metadata.db at {self.metadata_path} is corrupt or "
