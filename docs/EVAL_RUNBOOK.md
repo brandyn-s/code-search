@@ -15,6 +15,7 @@ History (verdict already shipped, kept here as worked examples — see
 |---|---|---|
 | Nix-aware pointwise rubric (R9, PR #193) | SHIP | `2026-05-23-r9-nix-aware-pointwise-eval-finding.md` |
 | `multi_chunk_merge` deboost knob (R10, PR #195) | RETIRE | `2026-05-23-r10-multi-chunk-merge-deboost-eval-finding.md` |
+| Containment-aware chunk merge (PR #227 + #229) | SHIP (neutral; correctness-motivated) | `2026-06-11-chunk-merge-containment-eval-finding.md` |
 
 R10 is the worked retire example: shipped with `1.0 = no-op default`
 ("eval first, set value later") which is exactly the opt-in canary
@@ -103,6 +104,18 @@ Per `~/.claude/rules/eval-shipping-discipline.md` (binary-decision rule,
 | Aggregate CI includes zero AND mean delta is **favorable** on the primary metric | **SHIP DEFAULT-ON** (sub-clean CI on n=99-100 is a sample-size limit, not signal absence; document the CI explicitly in the PR) |
 | Aggregate CI includes zero AND mean delta is **unfavorable** on the primary metric | **RETIRE** the knob entirely; do not ship as opt-in |
 | Aggregate or per-subproject CI excludes zero in **unfavorable** direction | **REVERT** or refine before re-eval |
+
+**Correctness fixes are exempt from the metric gate.** Per
+`~/.claude/rules/eval-shipping-discipline.md` ("WHAT DOES NOT REQUIRE THIS
+CHECK: security or correctness fixes — policy threshold isn't the bar at
+all"), a change that removes objectively wrong index content (phantom
+chunks, duplicated text, wrong-granularity stitches) stays on main on
+correctness grounds even when its measured retrieval delta is neutral or
+mildly unfavorable-mean. For these changes the eval's role is the REVERT
+guard only: revert/refine if any CI strictly excludes zero in the
+unfavorable direction. Worked example:
+`2026-06-11-chunk-merge-containment-eval-finding.md` (golden mean −0.009,
+CI includes zero → fix retained, claim recorded as measured-neutral).
 
 **`HOLD` is not a verdict.** Earlier versions of this runbook had a
 "CI includes zero → HOLD" cell; that bucket was removed when the rule
