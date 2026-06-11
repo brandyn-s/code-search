@@ -7,8 +7,27 @@ due to how SWIG generates type information. See:
 https://github.com/tree-sitter/py-tree-sitter/issues/
 """
 
-import pytest
+import os
 import sys
+
+if sys.platform == "darwin":
+    # faiss-cpu and torch each bundle their own libomp on macOS. When a test
+    # process imports faiss first (the indexer does, in almost every test
+    # module) and then anything pulls in torch (the local sentence-transformers
+    # embedder path), torch's OpenMP runtime aborts the process at
+    # __kmp_register_library_startup — pytest dies with SIGABRT (exit 134)
+    # partway through collection-ordered execution and the remaining tests
+    # never run (observed 2026-06-11; Linux CI is unaffected because torch
+    # there links the system runtime). KMP_DUPLICATE_LIB_OK is the standard
+    # faiss+torch coexistence setting; it must be in the environment BEFORE
+    # the first OpenMP runtime loads, which is why it lives at the very top
+    # of the root conftest rather than in a fixture. setdefault so an
+    # explicit operator value always wins. Scoped to the test suite on
+    # purpose: the production server only hits the pairing when the
+    # non-default local embedding provider is selected.
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import pytest
 import tempfile
 import shutil
 from pathlib import Path
