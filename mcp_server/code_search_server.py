@@ -180,6 +180,50 @@ class CodeSearchServer:
         # Query logging (ported from memory-search)
         self._query_log_db = self._init_query_log()
 
+        # Startup preflight: announce silent reranker degradation once,
+        # loudly, instead of only in per-query _metadata (PR #229 finding:
+        # a clean install without the anthropic SDK ran with the
+        # production-default RERANKER=sonnet permanently degraded to
+        # hybrid order, and nothing said so until a query's metadata was
+        # inspected). Never fails startup.
+        self._warn_if_reranker_degraded()
+
+    def _warn_if_reranker_degraded(self) -> None:
+        """Warn at startup when the configured reranker cannot run.
+
+        Two silent-degradation causes share this preflight: the anthropic
+        SDK not being importable (reason=package_not_installed at query
+        time) and ANTHROPIC_API_KEY missing from the process environment
+        (reason=api_key_missing). Both are stable for the process
+        lifetime, so one startup warning covers every future query.
+        """
+        try:
+            mode = os.environ.get("RERANKER", "sonnet").strip().lower()
+            if mode in ("off", "cross-encoder"):
+                return
+            problems = []
+            try:
+                import anthropic  # noqa: F401
+            except ImportError:
+                problems.append(
+                    "the 'anthropic' package is not importable "
+                    "(pip install -r requirements.txt)"
+                )
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                problems.append("ANTHROPIC_API_KEY is not set")
+            if problems:
+                logger.warning(
+                    "RERANKER=%s is configured but %s — every search will "
+                    "silently fall back to hybrid order (per-query "
+                    "_metadata.reranker.applied will be false). Fix the "
+                    "cause or set RERANKER=off to make the degradation "
+                    "explicit.",
+                    mode,
+                    " and ".join(problems),
+                )
+        except Exception:  # pragma: no cover — preflight must never break startup
+            logger.debug("reranker startup preflight failed", exc_info=True)
+
     def _init_query_log(self) -> Optional[sqlite3.Connection]:
         """Initialize query log database."""
         try:
