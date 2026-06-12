@@ -26,7 +26,12 @@ from chunking.code_chunk import CodeChunk
 # packing adjacent segments toward this budget. A hard minimum-size
 # floor is deliberately NOT enforced: that would change chunk output
 # and is a measured chunking change, not a refactor.)
-MAX_CHUNK_NWS = 1500
+# 2500 hard-set by the P1 three-arm sweep (2026-06-12): golden MRR +0.0431,
+# 95% CI [+0.0022, +0.0839] vs 1500; assetman +0.20*/libnet +0.07*;
+# harvested −0.0395 (caveat) and ~+58% median result size — tradeoffs and
+# gate application in docs/findings/2026-06-12-p1-chunk-budget-eval-finding.md.
+# Production indexes realize this only after a one-time full reindex.
+MAX_CHUNK_NWS = 2500
 
 
 def nws_count(text: str) -> int:
