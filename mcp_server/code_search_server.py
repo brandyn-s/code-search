@@ -121,6 +121,20 @@ def _format_staleness_warning(age_seconds: float) -> str | None:
     return f"Index is {int(days)} day{'s' if int(days) != 1 else ''} old. Run index_directory to refresh."
 
 
+def _job_terminal_state(success: bool) -> tuple[str, str]:
+    """Map an IncrementalIndexResult outcome to the job's (status, phase).
+
+    A run that ends with success=False (e.g. failed embedding batches left a
+    PARTIAL index and the snapshot was held back) must surface as "failed":
+    pollers key on the status string, and "completed" over a half-index sent
+    a downstream eval measuring a phantom collapse (2026-06-12 P1 arm-2 —
+    network outage dropped 11 batches, job still read completed; see
+    docs/findings/2026-06-12-p1-chunk-budget-eval-finding.md). The result
+    payload carries the detailed error either way.
+    """
+    return ("completed", "done") if success else ("failed", "error")
+
+
 # Phase A (2026-05-07): refuse-as-project-root reasons. When auto-index
 # would otherwise pick a path that isn't a real project — most commonly
 # `$HOME` because the MCP server was spawned with cwd at the user's home —
@@ -1308,8 +1322,9 @@ class CodeSearchServer:
                     except Exception as ve:
                         logger.warning(f"Failed to store pipeline version: {ve}")
 
-                self._indexing_job["status"] = "completed"
-                self._indexing_job["phase"] = "done"
+                job_status, job_phase = _job_terminal_state(result.success)
+                self._indexing_job["status"] = job_status
+                self._indexing_job["phase"] = job_phase
                 self._indexing_job["result"] = {
                     "success": result.success,
                     "directory": str(directory_path_obj),
@@ -1323,9 +1338,14 @@ class CodeSearchServer:
                     "index_stats": stats,
                     "error": result.error,
                 }
-                logger.info(
-                    f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s"
-                )
+                if result.success:
+                    logger.info(
+                        f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s"
+                    )
+                else:
+                    logger.error(
+                        f"Indexing finished UNSUCCESSFULLY (job status=failed): {result.error}"
+                    )
                 # Clear query embedding cache after reindex
                 if self._searcher:
                     self._searcher.clear_cache()
