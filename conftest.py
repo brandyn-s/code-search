@@ -26,6 +26,16 @@ if sys.platform == "darwin":
     # purpose: the production server only hits the pairing when the
     # non-default local embedding provider is selected.
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    # KMP_DUPLICATE_LIB_OK only downgrades the duplicate-registration abort —
+    # the two coexisting runtimes still race in threaded parallel regions.
+    # The e2e battery (torch-before-faiss import order, real model encode +
+    # QT_8bit train) died SIGSEGV (exit 139) inside
+    # test_known_item_hits_and_quantization_parity until OpenMP was pinned to
+    # one thread; the unit suite's faiss-before-torch order happens not to
+    # hit the racing region (observed 2026-06-12, Python 3.14 arm64).
+    # Test corpora are small enough that single-threaded OpenMP costs
+    # nothing measurable here. Same setdefault contract as above.
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import pytest
 import tempfile
