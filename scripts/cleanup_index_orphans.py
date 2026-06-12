@@ -440,11 +440,22 @@ def main() -> int:
         "--project",
         help="Limit to one project (matches the directory name prefix)",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Report inconsistencies without writing. Already the default "
+             "when no --apply-* flag is given (the docstring documents this "
+             "flag, so it must parse); with --apply-* flags present it wins "
+             "and forces report-only.",
+    )
     args = parser.parse_args()
     if args.apply_all:
         args.apply_fts5 = True
         args.apply_metadata = True
         args.apply_stats = True
+    if args.dry_run and any([args.apply_fts5, args.apply_metadata, args.apply_stats]):
+        print("--dry-run given — ignoring --apply-* flags (report only)")
+    if args.dry_run:
+        args.apply_fts5 = args.apply_metadata = args.apply_stats = False
 
     storage = _storage_dir()
     if not storage.is_dir():
