@@ -9,6 +9,7 @@ stale vectors. PR #224 added the live/stale stats; P5 acts on them:
 """
 from __future__ import annotations
 
+import shutil
 import tempfile
 from typing import List
 
@@ -244,3 +245,38 @@ def test_force_full_unaffected_by_ratio(parts):
     assert result.success
     assert result.files_added > 0
     assert indexer.stale_ratio() == 0.0
+
+
+def test_snapshot_without_index_artifacts_dispatches_full(parts, tmp_path):
+    """A merkle snapshot that outlives the index artifacts must escalate to
+    a full reindex, not no-op against the void.
+
+    Observed live 2026-06-12: the storage projects/ dir was deleted while
+    merkle/ survived. With an unchanged source tree, change detection
+    against the stale snapshot reports "no changes" and an incremental
+    call returns success with zero chunks on disk.
+    """
+    proj, indexer, ii = parts
+    r1 = ii.incremental_index(str(proj), project_name="proj")
+    assert r1.success and r1.chunks_added > 0
+
+    # Simulate the incident: index artifacts deleted, snapshot retained.
+    _close(indexer)
+    shutil.rmtree(tmp_path / "index")
+    (tmp_path / "index").mkdir()
+
+    indexer2 = CodeIndexManager(str(tmp_path / "index"))
+    ii2 = IncrementalIndexer(
+        indexer=indexer2,
+        embedder=_WorkingEmbedder(),
+        chunker=ii.chunker,
+        snapshot_manager=ii.snapshot_manager,
+    )
+    r2 = ii2.incremental_index(str(proj), project_name="proj")
+    assert r2.success
+    assert r2.chunks_added > 0, (
+        "snapshot-without-artifacts state took the incremental no-change "
+        "path — expected dispatch to _full_index to rebuild the void index"
+    )
+    assert indexer2._index is not None and indexer2._index.ntotal > 0
+    _close(indexer2)

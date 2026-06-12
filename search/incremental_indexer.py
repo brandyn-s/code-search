@@ -212,6 +212,31 @@ class IncrementalIndexer:
                 )
                 return self._full_index(project_path, project_name, start_time)
 
+            # Snapshot-without-artifacts guard (2026-06-12): a merkle
+            # snapshot can outlive the index artifacts — observed live when
+            # the storage projects/ dir was deleted while merkle/ survived.
+            # With an unchanged source tree, change detection against the
+            # stale snapshot reports "no changes" and the call no-ops
+            # "successfully" against a void index. An existing snapshot only
+            # licenses the incremental path when the index actually holds
+            # chunks. Probe failure (e.g. an indexer double without
+            # get_stats) keeps the legacy behavior — never force a full
+            # reindex on observability errors.
+            try:
+                indexed_chunks = int(
+                    (self.indexer.get_stats() or {}).get("total_chunks", 0)
+                )
+            except Exception:
+                indexed_chunks = -1
+            if indexed_chunks == 0:
+                logger.warning(
+                    "[REINDEX_PROGRESS] incremental_index: snapshot present "
+                    "but index artifacts hold 0 chunks — dispatching to "
+                    "_full_index project=%s",
+                    project_name,
+                )
+                return self._full_index(project_path, project_name, start_time)
+
             # P5 (2026-06-10 roadmap): stale-vector auto-compaction. FAISS
             # rows are never removed in place, so modify/delete churn
             # accumulates dead vectors that waste search-quota and memory.
