@@ -94,9 +94,12 @@ def main():
             logger.info("Clearing existing index...")
             index_manager.clear_index()
         
-        # Chunk the codebase
+        # Chunk the codebase. chunk_directory requires the directory path —
+        # the chunker constructor binds the project root for support checks,
+        # but the walk target is an explicit argument (API change this CLI
+        # missed; caught 2026-06-11 by the SweRank pilot's Arm C smoke).
         logger.info("Parsing and chunking Python files...")
-        chunks = chunker.chunk_directory()
+        chunks = chunker.chunk_directory(str(directory_path))
         
         if not chunks:
             logger.error("No Python files found or no chunks extracted")
