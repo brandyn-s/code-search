@@ -11,9 +11,14 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ (github.event.pull_request.user.login == 'dependabot[bot]') && (github.repository_owner != 'redacted-brandyn') }}
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - name: Fetch Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        uses: step-security/dependabot-fetch-metadata@bf8fb6e0be0a711c669dc236de6e7f7374ba626e # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
