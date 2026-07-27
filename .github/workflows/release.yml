@@ -12,6 +12,9 @@ concurrency:
   group: code-search-release
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   preflight-build:
     runs-on: ubuntu-latest
