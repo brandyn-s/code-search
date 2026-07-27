@@ -23,7 +23,10 @@ import pytest
 
 from chunking.code_chunk import CodeChunk
 from chunking.multi_language_chunker import MultiLanguageChunker
-from embeddings.embedder import EmbeddingResult
+from embeddings.embedder import (
+    EffectiveEmbeddingConfig,
+    EmbeddingResult,
+)
 from merkle.snapshot_manager import SnapshotManager
 from search.epoch_manifest import ManifestConsistencyError
 from search.incremental_indexer import (
@@ -82,6 +85,12 @@ class _FakeEmbedder:
 
     def __init__(self, dim: int = 8):
         self.dim = dim
+        self.configuration = EffectiveEmbeddingConfig(
+            provider="test",
+            model_name="mock-embedder",
+            content_mode="code",
+            output_dimension=dim,
+        )
         self._model = MagicMock()
         self._model.get_embedding_dimension.return_value = dim
         self._model._model_name = "mock-embedder"
@@ -440,6 +449,36 @@ class TestChunkingDiagnosticsLive:
         # Only the modified file is rechunked.
         assert result.chunking_diagnostics.files_attempted == 1
         _close_manager(indexer)
+
+
+# ---------------------------------------------------------------------------
+# Effective embedding dimension
+# ---------------------------------------------------------------------------
+
+def test_full_index_uses_effective_dimension_not_model_private_state(
+    project_dir,
+    indexer_components,
+) -> None:
+    indexer, embedder, chunker, snapshot_manager = indexer_components
+    chunker.root_path = str(project_dir)
+    embedder._model.get_embedding_dimension.side_effect = AssertionError(
+        "private model dimension must not define the index contract"
+    )
+    incremental = IncrementalIndexer(
+        indexer=indexer,
+        embedder=embedder,
+        chunker=chunker,
+        snapshot_manager=snapshot_manager,
+    )
+
+    result = incremental.incremental_index(
+        str(project_dir),
+        project_name="proj",
+    )
+
+    assert result.success, result.error
+    assert indexer.get_stats()["embedding_dimension"] == 8
+    _close_manager(indexer)
 
 
 # ---------------------------------------------------------------------------

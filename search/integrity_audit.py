@@ -130,15 +130,30 @@ def remove_fts5_orphans(fts_db: Path, valid_ids: set[str]) -> int:
 # ──────────────────────── metadata ───────────────────────
 
 
+def _metadata_table(connection: sqlite3.Connection) -> str | None:
+    """Return the supported metadata key table without decoding values."""
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "kv" in tables:
+        return "kv"
+    if "unnamed" in tables:
+        return "unnamed"
+    return None
+
+
 def find_metadata_orphans(meta_db: Path, valid_ids: set[str]) -> tuple[int, list[str]]:
     if not meta_db.exists():
         return 0, []
     con = sqlite3.connect(str(meta_db))
     try:
-        try:
-            cur = con.execute("SELECT key FROM unnamed")
-        except sqlite3.OperationalError:
+        table = _metadata_table(con)
+        if table is None:
             return 0, []
+        cur = con.execute(f"SELECT key FROM {table}")
         orphans = [k for (k,) in cur if k not in valid_ids]
         return len(orphans), orphans[:5]
     finally:
@@ -148,10 +163,12 @@ def find_metadata_orphans(meta_db: Path, valid_ids: set[str]) -> tuple[int, list
 def remove_metadata_orphans(meta_db: Path, valid_ids: set[str]) -> int:
     con = sqlite3.connect(str(meta_db))
     try:
-        try:
-            all_keys = [row[0] for row in con.execute("SELECT key FROM unnamed")]
-        except sqlite3.OperationalError:
+        table = _metadata_table(con)
+        if table is None:
             return 0
+        all_keys = [
+            row[0] for row in con.execute(f"SELECT key FROM {table}")
+        ]
         orphan_keys = [k for k in all_keys if k not in valid_ids]
         if not orphan_keys:
             return 0
@@ -160,7 +177,7 @@ def remove_metadata_orphans(meta_db: Path, valid_ids: set[str]) -> int:
             batch = orphan_keys[i : i + BATCH]
             placeholders = ",".join(["?"] * len(batch))
             con.execute(
-                f"DELETE FROM unnamed WHERE key IN ({placeholders})",
+                f"DELETE FROM {table} WHERE key IN ({placeholders})",
                 batch,
             )
         con.commit()
@@ -220,7 +237,10 @@ def compute_stats_from_truth(
     # FAISS state
     try:
         import faiss
-        idx = faiss.read_index(str(code_index))
+        if (index_dir / "float_store.npy").exists():
+            idx = faiss.read_index_binary(str(code_index))
+        else:
+            idx = faiss.read_index(str(code_index))
         embedding_dim = idx.d
         index_size = idx.ntotal
     except Exception:
@@ -234,14 +254,20 @@ def compute_stats_from_truth(
 
     con = sqlite3.connect(str(meta_db))
     try:
+        table = _metadata_table(con)
+        if table != "kv":
+            # `unnamed` contains retired sqlitedict pickle values. Inspecting
+            # or deleting keys is safe, but deserializing values would
+            # reintroduce CVE-2024-35515's code-execution primitive.
+            return None
         for cid in valid_ids:
             row = con.execute(
-                "SELECT value FROM unnamed WHERE key = ?", (cid,)
+                "SELECT value FROM kv WHERE key = ?", (cid,)
             ).fetchone()
             if not row:
                 continue
             try:
-                outer = pickle.loads(row[0])
+                outer = json.loads(row[0])
                 meta = outer.get("metadata", outer) if isinstance(outer, dict) else {}
             except Exception:
                 continue
@@ -314,102 +340,24 @@ def stats_drift(stats_path: Path, valid_count: int) -> int:
 def commit_post_cleanup_manifest(
     index_dir: Path, valid_chunk_ids: list[str]
 ) -> str | None:
-    """Build + commit a fresh epoch manifest for the post-cleanup artifacts.
+    """Publish a validated immutable generation after offline cleanup."""
+    # Lazy import keeps report-only use lightweight and ensures every
+    # production publisher goes through CodeIndexManager's transaction.
+    from search.indexer import CodeIndexManager
 
-    Called after any --apply-* mode that actually mutated disk. The
-    manifest covers chunk_ids.pkl, code.index, metadata.db, fts5.db, and
-    stats.json — whichever of those exist on disk now. Returns the
-    epoch_id on success, None if no manifest could be committed (e.g.,
-    no artifacts present, consistency check failed).
-
-    Stale `candidate.json` files from a prior interrupted commit are
-    removed before the new commit (cleanup_stale_candidate is idempotent).
-    """
-    # Lazy import: keep the module importable in test contexts that don't
-    # need the manifest layer (and avoid pulling FAISS at import time).
-    from search.epoch_manifest import (
-        ArtifactSpec,
-        ManifestConsistencyError,
-        build_manifest,
-        cleanup_stale_candidate,
-        commit_manifest,
-        count_fts5_db,
-        count_metadata_db,
-    )
-
-    cleanup_stale_candidate(index_dir)
-
-    chunk_count = len(valid_chunk_ids)
-    artifacts: list[ArtifactSpec] = []
-
-    chunk_id_path = index_dir / "chunk_ids.pkl"
-    if chunk_id_path.exists():
-        artifacts.append(ArtifactSpec(
-            name="chunk_ids.pkl", path=chunk_id_path, count=chunk_count,
-        ))
-
-    code_index_path = index_dir / "code.index"
-    if code_index_path.exists():
-        # Read FAISS ntotal directly to confirm consistency at commit time.
-        try:
-            import faiss
-            idx = faiss.read_index(str(code_index_path))
-            ntotal = int(idx.ntotal)
-        except Exception:
-            ntotal = chunk_count  # best-effort
-        artifacts.append(ArtifactSpec(
-            name="code.index", path=code_index_path, count=ntotal,
-        ))
-
-    meta_path = index_dir / "metadata.db"
-    if meta_path.exists():
-        artifacts.append(ArtifactSpec(
-            name="metadata.db", path=meta_path,
-            count=count_metadata_db(meta_path),
-        ))
-
-    fts_path = index_dir / "fts5.db"
-    if fts_path.exists():
-        artifacts.append(ArtifactSpec(
-            name="fts5.db", path=fts_path,
-            count=count_fts5_db(fts_path),
-        ))
-
-    stats_path = index_dir / "stats.json"
-    if stats_path.exists():
-        artifacts.append(ArtifactSpec(
-            name="stats.json", path=stats_path, count=None,
-        ))
-
-    if not artifacts:
-        return None
-
+    manager = None
     try:
-        manifest = build_manifest(index_dir, artifacts)
-    except ManifestConsistencyError as exc:
-        print(
-            f"  !! manifest commit skipped: cross-artifact consistency check "
-            f"failed: {exc}",
-            file=sys.stderr,
-        )
-        return None
+        manager = CodeIndexManager(str(index_dir))
+        return manager.publish_root_generation(valid_chunk_ids)
     except Exception as exc:
         print(
-            f"  !! manifest commit skipped (unexpected error): {exc}",
+            f"  !! immutable generation publication skipped: {exc}",
             file=sys.stderr,
         )
         return None
-
-    try:
-        commit_manifest(index_dir, manifest)
-    except Exception as exc:
-        print(
-            f"  !! manifest commit-rename failed: {exc}",
-            file=sys.stderr,
-        )
-        return None
-
-    return manifest.get("epoch_id")
+    finally:
+        if manager is not None:
+            manager._close_storage_handles()
 
 
 # ───────────────────────── main ─────────────────────────

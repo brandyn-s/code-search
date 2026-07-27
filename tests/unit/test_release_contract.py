@@ -155,10 +155,10 @@ def test_active_project_metadata_has_no_retired_organization_references() -> Non
 def test_readme_installs_the_verified_versioned_release() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert 'TAG="v0.2.0"' in readme
-    assert 'WHEEL="redacted_code_search-0.2.0-py3-none-any.whl"' in readme
+    assert 'TAG="v0.2.1"' in readme
+    assert 'WHEEL="redacted_code_search-0.2.1-py3-none-any.whl"' in readme
     assert (
-        'BUNDLE="redacted_code_search-0.2.0-provenance.jsonl"'
+        'BUNDLE="redacted_code_search-0.2.1-provenance.jsonl"'
         in readme
     )
     assert 'gh release download "$TAG"' in readme

@@ -171,7 +171,17 @@ def test_freshness_fresh_after_reindex_when_blocking_modified_files(server, monk
     )
     with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
          patch.object(server, "get_index_manager"), \
-         patch.object(server, "embedder"):
+         patch.object(server, "embedder"), \
+         patch.object(
+             server,
+             "_bind_effective_embedding_identity",
+             return_value="test-pipeline",
+         ), \
+         patch.object(
+             server,
+             "_completed_index_metadata",
+             return_value={"pipeline_version": "test-pipeline"},
+         ):
         mock_ii_cls.return_value.auto_reindex_if_needed.return_value = fake_result
         raw = server.search_code(query="x", k=5, auto_reindex=True)
     out = json.loads(raw)
@@ -195,11 +205,61 @@ def test_freshness_fresh_when_blocking_no_changes(server, monkeypatch):
     )
     with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
          patch.object(server, "get_index_manager"), \
-         patch.object(server, "embedder"):
+         patch.object(server, "embedder"), \
+         patch.object(
+             server,
+             "_bind_effective_embedding_identity",
+             return_value="test-pipeline",
+         ):
         mock_ii_cls.return_value.auto_reindex_if_needed.return_value = fake_result
         raw = server.search_code(query="x", k=5, auto_reindex=True)
     out = json.loads(raw)
     assert out["_metadata"]["freshness"] == "fresh"
+
+
+def test_freshness_stale_when_blocking_reindex_fails(
+    server,
+    monkeypatch,
+):
+    """A failed refresh serves last-good results but must not claim fresh."""
+    monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
+    monkeypatch.delenv("CODE_SEARCH_NONBLOCKING_SEARCH", raising=False)
+    _stub_searcher_returning_empty(server)
+    server._current_project = "/some/path"
+    server._current_provider = None
+    failed_result = MagicMock(
+        success=False,
+        files_modified=0,
+        files_added=2,
+        files_removed=0,
+        time_taken=0.05,
+        error="embedding failed",
+    )
+
+    with patch("search.incremental_indexer.IncrementalIndexer"), \
+         patch.object(server, "get_index_manager"), \
+         patch.object(server, "embedder"), \
+         patch.object(
+             server,
+             "_bind_effective_embedding_identity",
+             return_value="test-pipeline",
+         ), \
+         patch.object(
+             server,
+             "_auto_reindex_with_identity",
+             return_value=(
+                 failed_result,
+                 False,
+                 {
+                     "index_identity_status": "error",
+                     "index_identity_error": "auto_reindex_failed",
+                 },
+             ),
+         ):
+        raw = server.search_code(query="x", k=5, auto_reindex=True)
+
+    out = json.loads(raw)
+    assert out["_metadata"]["freshness"] == "stale_reindex_failed"
 
 
 def test_freshness_fresh_after_deletion_only_reindex(server, monkeypatch):
@@ -219,7 +279,17 @@ def test_freshness_fresh_after_deletion_only_reindex(server, monkeypatch):
     )
     with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
          patch.object(server, "get_index_manager"), \
-         patch.object(server, "embedder"):
+         patch.object(server, "embedder"), \
+         patch.object(
+             server,
+             "_bind_effective_embedding_identity",
+             return_value="test-pipeline",
+         ), \
+         patch.object(
+             server,
+             "_completed_index_metadata",
+             return_value={"pipeline_version": "test-pipeline"},
+         ):
         mock_ii_cls.return_value.auto_reindex_if_needed.return_value = fake_result
         raw = server.search_code(query="x", k=5, auto_reindex=True)
 
@@ -290,7 +360,17 @@ def test_blocking_reindex_persists_the_new_identity(
 
     with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
          patch.object(server, "get_index_manager"), \
-         patch.object(server, "embedder"):
+         patch.object(server, "embedder"), \
+         patch.object(
+             server,
+             "_bind_effective_embedding_identity",
+             return_value="test-pipeline",
+         ), \
+         patch.object(
+             server,
+             "_completed_index_metadata",
+             return_value={"pipeline_version": "test-pipeline"},
+         ):
         mock_ii_cls.return_value.auto_reindex_if_needed.return_value = fake_result
         raw = server.search_code(query="x", k=5, auto_reindex=True)
 
@@ -308,6 +388,7 @@ def test_freshness_vocabulary_is_stable():
         "fresh",
         "fresh_after_reindex",
         "stale_auto_reindex_disabled",
+        "stale_reindex_failed",
         "stale_reindex_in_progress",
         "unknown",  # initial sentinel before any path runs
     }
@@ -317,6 +398,7 @@ def test_freshness_vocabulary_is_stable():
         "fresh",
         "fresh_after_reindex",
         "stale_auto_reindex_disabled",
+        "stale_reindex_failed",
         "stale_reindex_in_progress",
         "unknown",
     }

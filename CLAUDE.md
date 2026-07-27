@@ -73,6 +73,7 @@ per-cohort prompt/threshold overrides, latency-diag logging, `LLM_CONTEXT_PATH`,
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set) | `voyage` (voyage-4-large, recommended), `voyage-code-3` (TS-optimized, regresses on Nix), `voyage-context` (legacy), `openai`, `jina` (local), `local` |
+| `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; known built-in models derive this automatically |
 | `VOYAGE_API_KEY` | – | Voyage AI API key |
 | `CONTENT_MODE` | `code` | `code` or `docs` — affects search weights and provider auto-select |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend `# From <path>` context headers before embedding |
@@ -117,6 +118,11 @@ manifest state):
   sustained rate-limiting, or prompt-coverage gaps (high `hybrid_prior_fallback`).
   Without this metadata, silent fallback was indistinguishable from successful
   rerank.
+- **`freshness`** reports source-tree refresh state: `fresh`,
+  `fresh_after_reindex`, `stale_auto_reindex_disabled`,
+  `stale_reindex_in_progress`, or `stale_reindex_failed`. The failure state
+  means search is serving the last-good committed index after a blocking
+  refresh failed.
 - **`manifest.status`** (Plan-2 E2-6, PR #122) — same strings
   `verify_index_integrity` reports, sourced from
   `search.epoch_manifest.ReadResult.freshness`:
@@ -138,7 +144,7 @@ on observability-path failures.
   Incremental index runs auto-escalate to a full reindex above ratio 0.5
   (self-limiting — compaction resets the ratio to 0). Deliberately a separate
   field, not a `freshness` string: `freshness` tracks index-vs-source-tree
-  state and its vocabulary stays unchanged.
+  state.
 
 ## Embeddings
 

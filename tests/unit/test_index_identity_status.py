@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 import threading
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 
 import mcp_server.code_search_server as code_search_server_module
 from mcp_server.code_search_server import CodeSearchServer
+from embeddings.embedder import EffectiveEmbeddingConfig
 import pytest
 from search.index_identity import IndexIdentity, derive_index_generation
 from search.index_identity import IdentityCaptureError
@@ -557,11 +559,114 @@ def _configure_deferred_successful_index(
         server,
         "get_index_manager",
         lambda *_args, **_kwargs: SimpleNamespace(
-            get_index_size=lambda: 1
+            get_index_size=lambda: 1,
+            bind_embedding_configuration=lambda *_args, **_kwargs: None,
         ),
     )
-    monkeypatch.setattr(server, "embedder", lambda *_args, **_kwargs: object())
+    configuration = EffectiveEmbeddingConfig(
+        provider="local",
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        content_mode="code",
+        output_dimension=384,
+    )
+    monkeypatch.setattr(
+        server,
+        "embedder",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            configuration=configuration,
+        ),
+    )
     monkeypatch.setattr(server, "_maybe_start_model_preload", lambda: None)
+
+
+def test_background_worker_hashes_constructed_config_without_env_mutation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    project_dir = tmp_path / "stored-project"
+    project_dir.mkdir()
+    (project_dir / "project_info.json").write_text(
+        json.dumps({"project_path": str(source)}),
+        encoding="utf-8",
+    )
+    server = CodeSearchServer.__new__(CodeSearchServer)
+    server._indexing_job = None
+    server._index_manager = None
+    server._searcher = None
+    _configure_deferred_successful_index(server, project_dir, monkeypatch)
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-large")
+    configuration = EffectiveEmbeddingConfig(
+        provider="voyage",
+        model_name="voyage-4-large",
+        content_mode="code",
+        output_dimension=1024,
+    )
+
+    def build_embedder(*_args, **kwargs):
+        assert kwargs["provider"] == "voyage"
+        assert (
+            os.environ["EMBEDDING_PROVIDER"] == "openai"
+        ), "per-call provider must not mutate process-global environment"
+        return SimpleNamespace(configuration=configuration)
+
+    captured: dict[str, object] = {}
+
+    def pipeline_version(effective):
+        captured["configuration"] = effective
+        return "effective-pipeline-version"
+
+    index_manager = SimpleNamespace(
+        get_index_size=lambda: 1,
+        bind_embedding_configuration=lambda effective, pipeline_version: (
+            captured.update(
+                {
+                    "bound_configuration": effective,
+                    "bound_pipeline_version": pipeline_version,
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "get_index_manager",
+        lambda *_args, **_kwargs: index_manager,
+    )
+    monkeypatch.setattr(server, "embedder", build_embedder)
+    monkeypatch.setattr(
+        code_search_server_module,
+        "get_pipeline_version",
+        pipeline_version,
+    )
+    captures = iter((_identity(), _identity()))
+    monkeypatch.setattr(
+        server,
+        "_capture_index_identity",
+        lambda _path: next(captures),
+    )
+
+    server.index_directory(str(source), provider="voyage")
+    server._indexing_thread.target()
+
+    assert captured["configuration"] == configuration
+    assert captured["bound_configuration"] == configuration
+    assert (
+        captured["bound_pipeline_version"]
+        == "effective-pipeline-version"
+    )
+    assert os.environ["EMBEDDING_PROVIDER"] == "openai"
+    persisted = json.loads(
+        (project_dir / "project_info.json").read_text(encoding="utf-8")
+    )
+    assert persisted["embedding_provider"] == configuration.provider
+    assert persisted["embedding_model"] == configuration.model_name
+    assert (
+        persisted["embedding_dimension"]
+        == configuration.output_dimension
+    )
+    assert persisted["content_mode"] == configuration.content_mode
 
 
 def test_background_worker_publishes_ready_identity(
@@ -712,7 +817,7 @@ def test_identity_incoherent_run_preserves_previous_provenance(
     monkeypatch.setattr(
         code_search_server_module,
         "get_pipeline_version",
-        lambda: "pipeline-v2",
+        lambda _configuration=None: "pipeline-v2",
     )
     monkeypatch.setattr(
         code_search_server_module,
@@ -781,7 +886,7 @@ def test_completed_metadata_failure_cannot_publish_ready_identity(
     monkeypatch.setattr(
         code_search_server_module,
         "get_pipeline_version",
-        lambda: "pipeline-v2",
+        lambda _configuration=None: "pipeline-v2",
     )
     captures = iter((_identity(), _identity()))
     monkeypatch.setattr(

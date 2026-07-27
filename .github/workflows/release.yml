@@ -6,7 +6,7 @@ on:
       version:
         description: Project version to release (without the v prefix)
         required: true
-        default: "0.2.0"
+        default: "0.2.1"
 
 concurrency:
   group: code-search-release

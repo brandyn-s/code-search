@@ -6,12 +6,14 @@ import argparse
 import logging
 from pathlib import Path
 
-# Add the parent directory to the path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Allow direct execution from any working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from chunking.multi_language_chunker import MultiLanguageChunker
 from embeddings.embedder import CodeEmbedder
-from search.indexer import CodeIndexManager
+from mcp_server.code_search_server import get_pipeline_version
+from search.epoch_manifest import read_with_fallback
+from search.indexer import CodeIndexManager, IndexPublicationRefused
 
 
 def setup_logging(verbose: bool = False):
@@ -21,6 +23,65 @@ def setup_logging(verbose: bool = False):
         level=level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+
+
+def _publish_embeddings(
+    index_manager,
+    embedder,
+    embedding_results,
+    *,
+    replace: bool,
+) -> None:
+    """Publish with the same identity and transaction contract as the MCP."""
+    configuration = embedder.configuration
+    pipeline_version = get_pipeline_version(configuration)
+    with index_manager.publication_transaction():
+        if not replace:
+            publication = read_with_fallback(index_manager.storage_dir)
+            manifest = publication.manifest
+            if manifest is None:
+                genuinely_empty = (
+                    publication.freshness == "missing"
+                    and not index_manager.has_persisted_index_state()
+                )
+                if not genuinely_empty:
+                    raise IndexPublicationRefused(
+                        "Cannot append embeddings without a verified "
+                        "effective embedding identity or while residual "
+                        "index state exists; rerun with --clear"
+                    )
+            else:
+                if publication.freshness != "fresh":
+                    raise IndexPublicationRefused(
+                        "Cannot append embeddings without a verified current "
+                        "generation; rerun with --clear"
+                    )
+                requested_identity = {
+                    "provider": configuration.provider,
+                    "model": configuration.model_name,
+                    "vector_dim": configuration.output_dimension,
+                    "pipeline_version": pipeline_version,
+                }
+                mismatches = [
+                    field
+                    for field, requested in requested_identity.items()
+                    if type(manifest.get(field)) is not type(requested)
+                    or manifest.get(field) != requested
+                ]
+                if mismatches:
+                    raise IndexPublicationRefused(
+                        "Cannot append embeddings with a different effective "
+                        "embedding identity "
+                        f"({', '.join(mismatches)}); rerun with --clear"
+                    )
+        index_manager.bind_embedding_configuration(
+            configuration,
+            pipeline_version=pipeline_version,
+        )
+        if replace:
+            index_manager.begin_rebuild()
+        index_manager.add_embeddings(embedding_results)
+        index_manager.save_index()
 
 
 def main():
@@ -89,11 +150,6 @@ def main():
         index_dir = storage_dir / "index"
         index_manager = CodeIndexManager(str(index_dir))
         
-        # Clear existing index if requested
-        if args.clear:
-            logger.info("Clearing existing index...")
-            index_manager.clear_index()
-        
         # Chunk the codebase. chunk_directory requires the directory path —
         # the chunker constructor binds the project root for support checks,
         # but the walk target is an explicit argument (API change this CLI
@@ -124,16 +180,24 @@ def main():
         # Generate embeddings
         logger.info("Generating embeddings (this may take a while)...")
         embedding_results = embedder.embed_chunks(chunks, batch_size=args.batch_size)
-        
+        if len(embedding_results) != len(chunks):
+            raise RuntimeError(
+                "Embedding output was incomplete "
+                f"({len(embedding_results)}/{len(chunks)}); existing index "
+                "was not modified"
+            )
         logger.info(f"Generated {len(embedding_results)} embeddings")
-        
-        # Add to index
-        logger.info("Building search index...")
-        index_manager.add_embeddings(embedding_results)
-        
-        # Save index
-        logger.info("Saving index to disk...")
-        index_manager.save_index()
+
+        logger.info(
+            "%s search index...",
+            "Replacing" if args.clear else "Updating",
+        )
+        _publish_embeddings(
+            index_manager,
+            embedder,
+            embedding_results,
+            replace=args.clear,
+        )
         
         # Display final statistics
         stats = index_manager.get_stats()

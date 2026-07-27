@@ -29,6 +29,7 @@ from search.epoch_manifest import (  # noqa: E402
     count_metadata_db,
     read_current,
     read_prior,
+    read_with_fallback,
     verify_manifest,
 )
 
@@ -107,15 +108,13 @@ def test_clean_write_read_roundtrip(tmp_path):
 
 def test_second_commit_promotes_prior(tmp_path):
     proj = tmp_path / "proj"
-    artifacts = _seed_artifacts(proj / "index", chunk_count=3)
+    artifacts = _seed_artifacts(proj / "generation-1", chunk_count=3)
     m1 = build_manifest(proj, artifacts)
     commit_manifest(proj, m1)
 
-    # Re-seed with more chunks (simulates incremental index growth)
-    for f in (proj / "index" / "metadata.db", proj / "index" / "fts5.db",
-              proj / "index" / "chunk_ids.pkl"):
-        f.unlink()
-    artifacts2 = _seed_artifacts(proj / "index", chunk_count=5)
+    # Immutable generation artifacts keep the current epoch verifiable while
+    # the next candidate is prepared.
+    artifacts2 = _seed_artifacts(proj / "generation-2", chunk_count=5)
     m2 = build_manifest(proj, artifacts2)
     commit_manifest(proj, m2)
 
@@ -124,10 +123,7 @@ def test_second_commit_promotes_prior(tmp_path):
     assert current["epoch_id"] == m2["epoch_id"]
     assert prior is not None
     assert prior["epoch_id"] == m1["epoch_id"]
-    # Note: artifacts have been overwritten, so prior's checksums no longer
-    # match the live files. That's exactly why E3's reader fallback exists —
-    # if current is corrupt, prior may also be unverifiable. But the
-    # epoch_id record itself is preserved for diagnostic purposes.
+    assert verify_manifest(proj, prior) is None
 
 
 # ─── consistency check ───
@@ -245,6 +241,46 @@ def test_crash_after_prior_promote_before_current_rename(tmp_path):
     assert not (proj / "manifest" / "candidate.json").exists()
 
 
+def test_failed_commit_does_not_replace_verified_prior_with_corrupt_current(
+    tmp_path,
+):
+    """A corrupt current must not be rotated over the only valid fallback."""
+    proj = tmp_path / "proj"
+    first_artifacts = _seed_artifacts(proj / "generation-1", chunk_count=4)
+    first = build_manifest(proj, first_artifacts)
+    commit_manifest(proj, first)
+
+    second_artifacts = _seed_artifacts(proj / "generation-2", chunk_count=4)
+    second = build_manifest(proj, second_artifacts)
+    commit_manifest(proj, second)
+    (proj / "generation-2" / "chunk_ids.pkl").write_bytes(b"corrupt")
+    fallback = read_with_fallback(proj)
+    assert fallback.freshness == "stale_using_prior_epoch"
+    assert fallback.manifest is not None
+    assert fallback.manifest["epoch_id"] == first["epoch_id"]
+
+    third_artifacts = _seed_artifacts(proj / "generation-3", chunk_count=4)
+    third = build_manifest(proj, third_artifacts)
+    real_replace = __import__("os").replace
+
+    def fail_candidate_promotion(src, dst):
+        if Path(src).name == "candidate.json" and Path(dst).name == "current.json":
+            raise OSError("simulated candidate promotion failure")
+        return real_replace(src, dst)
+
+    with patch(
+        "search.epoch_manifest.os.replace",
+        side_effect=fail_candidate_promotion,
+    ):
+        with pytest.raises(OSError, match="candidate promotion failure"):
+            commit_manifest(proj, third)
+
+    recovered = read_with_fallback(proj)
+    assert recovered.freshness == "stale_using_prior_epoch"
+    assert recovered.manifest is not None
+    assert recovered.manifest["epoch_id"] == first["epoch_id"]
+
+
 # ─── verification ───
 
 def test_verify_detects_artifact_corruption(tmp_path):
@@ -262,6 +298,14 @@ def test_verify_detects_artifact_corruption(tmp_path):
     assert err is not None
     assert "sha256 mismatch" in err
     assert "chunk_ids.pkl" in err
+
+
+def test_verify_rejects_empty_manifest(tmp_path):
+    err = verify_manifest(
+        tmp_path,
+        {"epoch_id": "empty", "artifacts": {}},
+    )
+    assert err == "manifest has no artifacts"
 
 
 def test_verify_detects_missing_artifact(tmp_path):

@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -265,6 +266,7 @@ def test_fts_failure_log_redacts_sanitized_query(
             return None
     query = "sentinel FTS private query"
     manager = CodeIndexManager.__new__(CodeIndexManager)
+    manager._storage_lock = threading.RLock()
     manager._fts_conn = FailingConnection()
     manager._metadata_db = None
     manager._logger = logging.getLogger("search.indexer")

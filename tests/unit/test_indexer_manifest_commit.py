@@ -14,15 +14,24 @@ loudly and the previous epoch's manifest stays current.
 
 import tempfile
 import numpy as np
+import pytest
 
-from search.indexer import CodeIndexManager
+from search.indexer import CodeIndexManager, IndexPublicationRefused
 from search.epoch_manifest import read_current, verify_manifest, ManifestMissing
-from embeddings.embedder import EmbeddingResult
+from embeddings.embedder import (
+    EffectiveEmbeddingConfig,
+    EmbeddingResult,
+)
 
 
-def _make_result(chunk_id: str, content: str, file_path: str = "test.py") -> EmbeddingResult:
+def _make_result(
+    chunk_id: str,
+    content: str,
+    file_path: str = "test.py",
+    dimension: int = 384,
+) -> EmbeddingResult:
     return EmbeddingResult(
-        embedding=np.random.randn(384).astype(np.float32),
+        embedding=np.random.randn(dimension).astype(np.float32),
         chunk_id=chunk_id,
         metadata={
             "file_path": file_path,
@@ -99,6 +108,78 @@ def test_save_index_records_chunk_ids_count_in_manifest():
         assert "code.index" in artifacts
         assert artifacts["code.index"]["count"] == 5
 
+        _close_manager(mgr)
+
+
+def test_save_index_commits_bound_effective_embedding_identity():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mgr = CodeIndexManager(tmpdir)
+        configuration = EffectiveEmbeddingConfig(
+            provider="openai",
+            model_name="text-embedding-custom",
+            content_mode="code",
+            output_dimension=7,
+        )
+        mgr.bind_embedding_configuration(
+            configuration,
+            pipeline_version="effective-pipeline-version",
+        )
+        mgr.add_embeddings(
+            [
+                _make_result(
+                    "a.py:1-10:func:foo",
+                    "def foo(): pass",
+                    dimension=7,
+                )
+            ]
+        )
+        mgr.save_index()
+
+        from pathlib import Path
+
+        manifest = read_current(Path(tmpdir))
+        assert manifest["provider"] == "openai"
+        assert manifest["model"] == "text-embedding-custom"
+        assert manifest["vector_dim"] == 7
+        assert (
+            manifest["pipeline_version"]
+            == "effective-pipeline-version"
+        )
+
+        _close_manager(mgr)
+
+
+def test_save_index_rejects_bound_dimension_that_disagrees_with_faiss():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mgr = CodeIndexManager(tmpdir)
+        mgr.bind_embedding_configuration(
+            EffectiveEmbeddingConfig(
+                provider="openai",
+                model_name="text-embedding-custom",
+                content_mode="code",
+                output_dimension=8,
+            ),
+            pipeline_version="effective-pipeline-version",
+        )
+        mgr.add_embeddings(
+            [
+                _make_result(
+                    "a.py:1-10:func:foo",
+                    "def foo(): pass",
+                    dimension=7,
+                )
+            ]
+        )
+
+        with pytest.raises(
+            IndexPublicationRefused,
+            match="configured embedding dimension 8 does not match",
+        ):
+            mgr.save_index()
+
+        from pathlib import Path
+
+        assert not (Path(tmpdir) / "current.json").exists()
         _close_manager(mgr)
 
 

@@ -20,6 +20,10 @@ from mcp_server.code_search_server import (
     _grammar_fingerprint,
     get_pipeline_version,
 )
+from embeddings.embedder import (
+    EffectiveEmbeddingConfig,
+    resolve_embedding_config,
+)
 
 
 def _clear_grammar_cache():
@@ -129,6 +133,78 @@ def test_pipeline_version_changes_when_env_changes(monkeypatch):
     monkeypatch.setenv("EMBEDDING_MODEL", "voyage-4-lite")
     pv2 = get_pipeline_version()
     assert pv1 != pv2, "model change must change pipeline_version"
+
+
+def test_pipeline_version_includes_effective_output_dimension() -> None:
+    base = EffectiveEmbeddingConfig(
+        provider="openai",
+        model_name="text-embedding-custom",
+        content_mode="code",
+        output_dimension=1024,
+    )
+    different_dimension = EffectiveEmbeddingConfig(
+        provider=base.provider,
+        model_name=base.model_name,
+        content_mode=base.content_mode,
+        output_dimension=2048,
+    )
+
+    assert get_pipeline_version(base) != get_pipeline_version(
+        different_dimension
+    )
+
+
+def test_ambient_pipeline_hash_uses_resolved_local_fallback(
+    monkeypatch,
+) -> None:
+    for name in (
+        "EMBEDDING_DIMENSION",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_PROVIDER",
+        "LOCAL_EMBEDDING_MODEL",
+        "VOYAGE_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    resolved = resolve_embedding_config()
+
+    assert resolved.provider == "local"
+    assert get_pipeline_version() == get_pipeline_version(resolved)
+
+
+def test_voyage_key_auto_selection_changes_pipeline_hash(monkeypatch) -> None:
+    for name in (
+        "EMBEDDING_DIMENSION",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_PROVIDER",
+        "LOCAL_EMBEDDING_MODEL",
+        "VOYAGE_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    local_version = get_pipeline_version()
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    voyage_version = get_pipeline_version()
+
+    assert local_version != voyage_version
+
+
+def test_explicit_effective_pipeline_config_ignores_ambient_env(
+    monkeypatch,
+) -> None:
+    configuration = EffectiveEmbeddingConfig(
+        provider="voyage",
+        model_name="voyage-4-large",
+        content_mode="docs",
+        output_dimension=1024,
+    )
+    expected = get_pipeline_version(configuration)
+
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-large")
+    monkeypatch.setenv("CONTENT_MODE", "code")
+
+    assert get_pipeline_version(configuration) == expected
 
 
 def test_lru_cache_is_active():

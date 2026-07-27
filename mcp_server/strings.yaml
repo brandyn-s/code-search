@@ -1,6 +1,6 @@
 tools:
   search_code: |
-    Perform semantic similarity search across an indexed codebase using natural language queries. Returns ranked JSON with file paths, line ranges, chunk types (function/class/module), similarity scores, and snippets. Supports file_pattern and chunk_type filters. Auto-reindexes stale projects (default 5min). Best for conceptual queries like "where is auth handled". For structural queries (call graphs, blast radius), use codebase-memory-mcp instead.
+    Search indexed code with a natural-language query. Returns ranked JSON with paths, line ranges, chunk types, scores, and snippets. `k` is 1-100; `search_mode` is `auto`, `hybrid`, `keyword`, or `semantic`. `file_pattern` is a glob; `chunk_type` is an exact match. Auto-reindexes stale projects (default 5min). For structural queries such as call graphs or blast radius, use codebase-memory-mcp instead.
 
   index_directory: |
     Start indexing a codebase in the background. Returns job_id, status, and index_ready=false. Parses source into AST chunks, generates embeddings, and stores FAISS/SQLite artifacts. Captures source identity before and after indexing; a mid-run source change fails instead of publishing a ready generation. Poll with get_indexing_progress. Supports incremental Merkle change detection.

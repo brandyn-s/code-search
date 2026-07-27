@@ -235,7 +235,17 @@ class IncrementalIndexer:
                 )
             except Exception:
                 indexed_chunks = -1
-            if indexed_chunks == 0:
+            try:
+                snapshot_metadata = (
+                    self.snapshot_manager.load_metadata(project_path) or {}
+                )
+                snapshot_declares_empty_corpus = (
+                    int(snapshot_metadata.get("supported_files", -1)) == 0
+                    and int(snapshot_metadata.get("chunks_indexed", -1)) == 0
+                )
+            except Exception:
+                snapshot_declares_empty_corpus = False
+            if indexed_chunks == 0 and not snapshot_declares_empty_corpus:
                 logger.warning(
                     "[REINDEX_PROGRESS] incremental_index: snapshot present "
                     "but index artifacts hold 0 chunks — dispatching to "
@@ -317,32 +327,36 @@ class IncrementalIndexer:
                 time.time() - t_embed, len(embedding_results),
             )
 
-            # Only after embedding SUCCEEDS do we mutate the index: drop the
-            # stale chunks, then add the freshly-embedded ones.
-            t_remove = time.time()
-            logger.warning(
-                "[REINDEX_PROGRESS] _remove_old_chunks: starting "
-                "files_to_remove=%d project=%s",
-                len(changes.removed) + len(changes.modified), project_name,
-            )
-            chunks_removed = self._remove_old_chunks(changes, project_name)
-            logger.warning(
-                "[REINDEX_PROGRESS] _remove_old_chunks: done in %.1fs removed=%d",
-                time.time() - t_remove, chunks_removed,
-            )
+            # Hold one storage transaction from the first root-store mutation
+            # through publication. A second manager must not interpret this
+            # live writer's marker as evidence of a crashed publication.
+            with self.indexer.publication_transaction():
+                # Only after embedding SUCCEEDS do we mutate the index: drop
+                # stale chunks, then add the freshly-embedded ones.
+                t_remove = time.time()
+                logger.warning(
+                    "[REINDEX_PROGRESS] _remove_old_chunks: starting "
+                    "files_to_remove=%d project=%s",
+                    len(changes.removed) + len(changes.modified), project_name,
+                )
+                chunks_removed = self._remove_old_chunks(
+                    changes, project_name
+                )
+                logger.warning(
+                    "[REINDEX_PROGRESS] _remove_old_chunks: done in %.1fs "
+                    "removed=%d",
+                    time.time() - t_remove, chunks_removed,
+                )
 
-            if embedding_results:
-                self._progress_fn("saving", 0, 0)
-                self.indexer.add_embeddings(embedding_results)
-            chunks_added = len(embedding_results)
+                if embedding_results:
+                    self._progress_fn("saving", 0, 0)
+                    self.indexer.add_embeddings(embedding_results)
+                chunks_added = len(embedding_results)
 
-            # Persist and VERIFY the index BEFORE advancing the snapshot.
-            # save_index() runs the manifest consistency check (chunk_ids row
-            # count vs FAISS ntotal) and raises on divergence or disk error.
-            # Doing it before save_snapshot() guarantees a failed/inconsistent
-            # save never gets recorded as "current" — otherwise detect_changes
-            # would treat the stale or partial index as up-to-date forever.
-            self.indexer.save_index()
+                # Persist and VERIFY the index BEFORE advancing the snapshot.
+                # save_index() validates chunk IDs against FAISS and raises on
+                # divergence or disk error.
+                self.indexer.save_index()
 
             # Snapshot LAST: only once the index is durably and consistently
             # saved do we record the new content hashes.
@@ -376,6 +390,14 @@ class IncrementalIndexer:
 
         except Exception as e:
             logger.error(f"Incremental indexing failed: {e}")
+            try:
+                self.indexer.rollback_unpublished_changes()
+            except Exception as rollback_error:
+                logger.error(
+                    "Failed to restore the last-good index after incremental "
+                    "indexing aborted: %s",
+                    rollback_error,
+                )
             return IncrementalIndexResult(
                 files_added=0,
                 files_removed=0,
@@ -404,7 +426,12 @@ class IncrementalIndexer:
             # Dimension mismatch guard: detect if the embedding dimension changed
             # between providers (e.g., voyage-code-3 1024 vs local 384). Log a
             # warning since we're about to clear_index() anyway in full reindex.
-            current_dim = self.embedder._model.get_embedding_dimension()
+            configuration = getattr(self.embedder, "configuration", None)
+            current_dim = getattr(configuration, "output_dimension", None)
+            if current_dim is None:
+                # Compatibility for lightweight third-party/test embedders
+                # that predate the effective-configuration contract.
+                current_dim = self.embedder._model.get_embedding_dimension()
             stats = self.indexer.get_stats()
             stored_dim = stats.get("embedding_dimension", 0)
             if stored_dim and stored_dim != current_dim:
@@ -412,9 +439,6 @@ class IncrementalIndexer:
                     f"Embedding dimension changed ({stored_dim} -> {current_dim}), "
                     f"clearing index to prevent mixed embeddings"
                 )
-
-            # Clear existing index
-            self.indexer.clear_index()
 
             # Build DAG for all files. Phase A3 (2026-05-08): pass the
             # cancel_check callable so an in-flight cancel_indexing call
@@ -528,19 +552,91 @@ class IncrementalIndexer:
                         # recorded as a current snapshot (see below).
                         embed_batch_failures += 1
 
-            # Add all embeddings to index at once
+            if embed_batch_failures > 0:
+                error_msg = (
+                    f"{embed_batch_failures} embedding batch(es) failed; "
+                    f"prepared {len(all_embedding_results)}/{len(all_chunks)} "
+                    "chunks. Last-good index preserved and snapshot NOT "
+                    "advanced."
+                )
+                logger.error(
+                    "[REINDEX_PROGRESS] _full_index: %s",
+                    error_msg,
+                )
+                return IncrementalIndexResult(
+                    files_added=len(supported_files),
+                    files_removed=0,
+                    files_modified=0,
+                    chunks_added=0,
+                    chunks_removed=0,
+                    time_taken=time.time() - start_time,
+                    success=False,
+                    error=error_msg,
+                    chunking_diagnostics=self._last_chunking_diag,
+                )
+
+            if not all_chunks and supported_files:
+                error_msg = (
+                    "Full rebuild produced no chunks; last-good index "
+                    "preserved and snapshot NOT advanced."
+                )
+                logger.error(
+                    "[REINDEX_PROGRESS] _full_index: %s",
+                    error_msg,
+                )
+                return IncrementalIndexResult(
+                    files_added=len(supported_files),
+                    files_removed=0,
+                    files_modified=0,
+                    chunks_added=0,
+                    chunks_removed=0,
+                    time_taken=time.time() - start_time,
+                    success=False,
+                    error=error_msg,
+                    chunking_diagnostics=self._last_chunking_diag,
+                )
+
+            if len(all_embedding_results) != len(all_chunks):
+                error_msg = (
+                    "Full rebuild embedding output was incomplete "
+                    f"({len(all_embedding_results)}/{len(all_chunks)}); "
+                    "last-good index preserved and snapshot NOT advanced."
+                )
+                logger.error(
+                    "[REINDEX_PROGRESS] _full_index: %s",
+                    error_msg,
+                )
+                return IncrementalIndexResult(
+                    files_added=len(supported_files),
+                    files_removed=0,
+                    files_modified=0,
+                    chunks_added=0,
+                    chunks_removed=0,
+                    time_taken=time.time() - start_time,
+                    success=False,
+                    error=error_msg,
+                    chunking_diagnostics=self._last_chunking_diag,
+                )
+
+            # All fallible chunking and embedding work completed before
+            # replacing the mutable root mirrors. The committed generation
+            # remains available for rollback until save_index succeeds.
             self._progress_fn("saving", 0, 0)
-            if all_embedding_results:
-                self.indexer.add_embeddings(all_embedding_results)
+            with self.indexer.publication_transaction():
+                self.indexer.begin_rebuild()
+                if all_embedding_results:
+                    self.indexer.add_embeddings(all_embedding_results)
+                else:
+                    # An actually empty corpus is a valid new state. Publish
+                    # an empty FAISS generation so deleted source trees do
+                    # not keep returning stale results forever.
+                    self.indexer.create_index(int(current_dim))
 
-            chunks_added = len(all_embedding_results)
+                chunks_added = len(all_embedding_results)
 
-            # Save and VERIFY the index BEFORE advancing the snapshot (same
-            # ordering invariant as the incremental path): save_index() runs
-            # the manifest consistency check and raises on a bad save, so a
-            # failed full reindex is never recorded as a current snapshot that
-            # detect_changes would then treat as up-to-date.
-            self.indexer.save_index()
+                # Save and VERIFY the index BEFORE advancing the snapshot
+                # (same ordering invariant as the incremental path).
+                self.indexer.save_index(force=True)
 
             # Post-indexing smoke test: verify vector search returns non-zero
             # similarities. Catches silent FAISS quantizer bugs (QT_8bit_direct
@@ -566,33 +662,6 @@ class IncrementalIndexer:
                             logger.info(f"Smoke test passed: top similarity={top_sim:.4f}")
                 except Exception as e:
                     logger.warning(f"Smoke test skipped: {e}")
-
-            # Partial-failure guard: if any embedding batch failed, the index
-            # on disk is missing those chunks. Saving the snapshot anyway
-            # would record the affected files as indexed — they'd never be
-            # retried, the same silent data-loss shape the incremental path's
-            # embed-before-remove fix closed. Persist what we have (the
-            # partial index is still searchable) but do NOT advance the
-            # snapshot; the absent snapshot forces a fresh full index on the
-            # next run.
-            if embed_batch_failures > 0:
-                error_msg = (
-                    f"{embed_batch_failures} embedding batch(es) failed; "
-                    f"indexed {chunks_added}/{len(all_chunks)} chunks. "
-                    "Snapshot NOT advanced — the next indexing run will retry."
-                )
-                logger.error(f"[REINDEX_PROGRESS] _full_index: {error_msg}")
-                return IncrementalIndexResult(
-                    files_added=len(supported_files),
-                    files_removed=0,
-                    files_modified=0,
-                    chunks_added=chunks_added,
-                    chunks_removed=0,
-                    time_taken=time.time() - start_time,
-                    success=False,
-                    error=error_msg,
-                    chunking_diagnostics=self._last_chunking_diag,
-                )
 
             # Snapshot LAST — only after the index is durably saved and
             # smoke-tested. Snapshot-last is the invariant that lets a failed
@@ -621,6 +690,14 @@ class IncrementalIndexer:
 
         except Exception as e:
             logger.error(f"Full indexing failed: {e}")
+            try:
+                self.indexer.rollback_unpublished_changes()
+            except Exception as rollback_error:
+                logger.error(
+                    "Failed to restore the last-good index after full "
+                    "indexing aborted: %s",
+                    rollback_error,
+                )
             return IncrementalIndexResult(
                 files_added=0,
                 files_removed=0,

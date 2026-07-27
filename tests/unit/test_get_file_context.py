@@ -32,6 +32,12 @@ class _StubIndexManager:
             for i, c in enumerate(chunks)
         })
 
+    def get_chunk_entries(self):
+        return [
+            (chunk_id, self.metadata_db.get(chunk_id))
+            for chunk_id in self._chunk_ids
+        ]
+
 
 @pytest.fixture
 def server(tmp_path, monkeypatch):

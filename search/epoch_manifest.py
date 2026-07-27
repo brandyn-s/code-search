@@ -205,9 +205,30 @@ def commit_manifest(project_dir: Path, manifest: Dict[str, Any]) -> Path:
         f.flush()
         os.fsync(f.fileno())
 
-    # Step 2: promote existing current to prior, if present.
+    # Step 2: promote the existing current only when it is still a verified
+    # recovery point. If current is corrupt while prior remains valid,
+    # rotating current over prior would destroy the only usable fallback if
+    # the candidate -> current rename then fails.
     if current.exists():
-        os.replace(current, prior)
+        current_is_verified = False
+        try:
+            current_manifest = read_current(project_dir)
+            current_is_verified = (
+                verify_manifest(project_dir, current_manifest) is None
+            )
+        except Exception as exc:  # noqa: BLE001 - verification must fail closed
+            LOG.warning(
+                "existing current manifest could not be verified before "
+                "rotation: %s",
+                exc,
+            )
+        if current_is_verified:
+            os.replace(current, prior)
+        else:
+            LOG.warning(
+                "existing current manifest is unverified; preserving prior "
+                "during candidate promotion"
+            )
 
     # Step 3: atomic commit of new manifest as current.
     os.replace(candidate, current)
@@ -241,16 +262,28 @@ def verify_manifest(project_dir: Path, manifest: Dict[str, Any]) -> Optional[str
 
     Returns None on success, or a string describing the first mismatch.
     """
-    for name, entry in manifest.get("artifacts", {}).items():
-        rel = entry["path"]
+    if not isinstance(manifest, dict):
+        return "manifest is not an object"
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or not artifacts:
+        return "manifest has no artifacts"
+    for name, entry in artifacts.items():
+        if not isinstance(entry, dict):
+            return f"invalid artifact entry: {name}"
+        rel = entry.get("path")
+        expected_sha = entry.get("sha256")
+        if not isinstance(rel, str) or not rel:
+            return f"invalid artifact path: {name}"
+        if not isinstance(expected_sha, str) or not expected_sha:
+            return f"invalid artifact sha256: {name}"
         path = project_dir / rel
         if not path.exists():
             return f"artifact missing: {rel}"
         actual = _sha256_file(path)
-        if actual != entry["sha256"]:
+        if actual != expected_sha:
             return (
                 f"sha256 mismatch for {rel}: "
-                f"manifest={entry['sha256']} actual={actual}"
+                f"manifest={expected_sha} actual={actual}"
             )
     return None
 
@@ -294,23 +327,63 @@ def read_with_fallback(project_dir: Path) -> ReadResult:
     into `_metadata.freshness` on search responses. Stable vocabulary —
     downstream consumers may pattern-match.
     """
-    # Step 1: load current
+    # Step 1: load current. A malformed JSON file is a failed current, not a
+    # reason to skip an otherwise verified prior recovery point.
+    current_missing = False
+    current_read_error = ""
     try:
         current = read_current(project_dir)
     except ManifestMissing:
-        # No current at all. Try prior as last resort.
-        prior = read_prior(project_dir)
+        current = None
+        current_missing = True
+        current_read_error = "current.json missing"
+    except (
+        json.JSONDecodeError,
+        OSError,
+        UnicodeDecodeError,
+    ) as exc:
+        current = None
+        current_read_error = (
+            f"current.json unreadable: {type(exc).__name__}: {exc}"
+        )
+
+    if current is None:
+        try:
+            prior = read_prior(project_dir)
+        except (
+            json.JSONDecodeError,
+            OSError,
+            UnicodeDecodeError,
+        ) as exc:
+            return ReadResult(
+                None,
+                "corrupt",
+                detail=(
+                    f"{current_read_error}; prior.json unreadable: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            )
         if prior is None:
-            return ReadResult(None, "missing", detail="no current or prior manifest")
+            if current_missing:
+                return ReadResult(
+                    None,
+                    "missing",
+                    detail="no current or prior manifest",
+                )
+            return ReadResult(
+                None,
+                "corrupt",
+                detail=f"{current_read_error}; no prior manifest",
+            )
         prior_err = verify_manifest(project_dir, prior)
         if prior_err is None:
             return ReadResult(
                 prior, "stale_using_prior_epoch",
-                detail="current.json missing; using prior",
+                detail=f"{current_read_error}; using prior",
             )
         return ReadResult(
             None, "corrupt",
-            detail=f"current missing, prior failed: {prior_err}",
+            detail=f"{current_read_error}; prior failed: {prior_err}",
         )
 
     # Step 2: verify current
@@ -320,7 +393,21 @@ def read_with_fallback(project_dir: Path) -> ReadResult:
 
     # Step 3-4: current failed verify, fall back to prior
     LOG.warning("current manifest failed verification: %s; trying prior", err)
-    prior = read_prior(project_dir)
+    try:
+        prior = read_prior(project_dir)
+    except (
+        json.JSONDecodeError,
+        OSError,
+        UnicodeDecodeError,
+    ) as exc:
+        return ReadResult(
+            None,
+            "corrupt",
+            detail=(
+                f"current failed: {err}; prior.json unreadable: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
     if prior is None:
         return ReadResult(None, "corrupt", detail=f"current failed: {err}; no prior")
     prior_err = verify_manifest(project_dir, prior)

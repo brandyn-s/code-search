@@ -23,6 +23,7 @@ from chunking.code_chunk import CodeChunk
 from chunking.multi_language_chunker import MultiLanguageChunker
 from embeddings.embedder import EmbeddingResult
 from merkle.snapshot_manager import SnapshotManager
+from search.epoch_manifest import read_current, read_with_fallback
 from search.incremental_indexer import IncrementalIndexer
 from search.indexer import CodeIndexManager
 
@@ -100,6 +101,57 @@ def _close_manager(mgr: CodeIndexManager) -> None:
         mgr._fts_conn = None
 
 
+def _seed_last_good(
+    mgr: CodeIndexManager,
+    chunk_count: int = 1,
+) -> str:
+    embedding_results = []
+    for position in range(chunk_count):
+        name = "last_good" if position == 0 else f"last_good_{position}"
+        chunk_id = f"old.py:{position + 1}-{position + 2}:function:{name}"
+        embedding_results.append(
+            EmbeddingResult(
+                embedding=np.ones(8, dtype=np.float32),
+                chunk_id=chunk_id,
+                metadata={
+                    "file_path": "old.py",
+                    "relative_path": "old.py",
+                    "content_preview": f"def {name}(): return 'sentinel'",
+                    "full_content": f"def {name}(): return 'sentinel'",
+                    "chunk_type": "function",
+                    "start_line": position + 1,
+                    "end_line": position + 2,
+                    "name": name,
+                    "parent_name": None,
+                    "docstring": None,
+                    "decorators": [],
+                    "imports": [],
+                    "complexity_score": 1,
+                    "tags": [],
+                    "folder_structure": [],
+                },
+            )
+        )
+    mgr.add_embeddings(
+        embedding_results
+    )
+    mgr.save_index()
+    return read_current(mgr.storage_dir)["epoch_id"]
+
+
+def _assert_last_good_restored(
+    mgr: CodeIndexManager,
+    expected_epoch: str,
+) -> None:
+    publication = read_with_fallback(mgr.storage_dir)
+    assert publication.freshness == "fresh"
+    assert publication.manifest["epoch_id"] == expected_epoch
+    assert not mgr._publication_marker.exists()
+    assert mgr.search_bm25("sentinel", k=10)[0][0].endswith(
+        ":last_good"
+    )
+
+
 @pytest.fixture
 def project_dir(tmp_path):
     proj = tmp_path / "proj"
@@ -140,6 +192,182 @@ def test_embed_batch_failure_reports_failure_and_skips_snapshot(
         "snapshot must NOT advance after a partial-failure full index — "
         "the missing chunks would never be retried"
     )
+    _close_manager(indexer)
+
+
+def test_full_reindex_embedding_failure_preserves_last_good(
+    project_dir,
+    parts,
+):
+    indexer, snapshot_manager = parts
+    expected_epoch = _seed_last_good(indexer)
+    ii = IncrementalIndexer(
+        indexer=indexer,
+        embedder=_FailingEmbedder(),
+        chunker=MultiLanguageChunker(root_path=str(project_dir)),
+        snapshot_manager=snapshot_manager,
+    )
+
+    result = ii.incremental_index(
+        str(project_dir),
+        project_name="proj",
+        force_full=True,
+    )
+
+    assert result.success is False
+    _assert_last_good_restored(indexer, expected_epoch)
+    _close_manager(indexer)
+
+
+def test_full_reindex_zero_chunks_preserves_last_good(
+    project_dir,
+    parts,
+    monkeypatch,
+):
+    indexer, snapshot_manager = parts
+    expected_epoch = _seed_last_good(indexer)
+    chunker = MultiLanguageChunker(root_path=str(project_dir))
+    monkeypatch.setattr(chunker, "chunk_file", lambda _path: [])
+    ii = IncrementalIndexer(
+        indexer=indexer,
+        embedder=_WorkingEmbedder(),
+        chunker=chunker,
+        snapshot_manager=snapshot_manager,
+    )
+
+    result = ii.incremental_index(
+        str(project_dir),
+        project_name="proj",
+        force_full=True,
+    )
+
+    assert result.success is False
+    assert result.error and "no chunks" in result.error.lower()
+    _assert_last_good_restored(indexer, expected_epoch)
+    _close_manager(indexer)
+
+
+def test_full_reindex_empty_corpus_publishes_empty_snapshot(
+    tmp_path,
+    parts,
+    monkeypatch,
+):
+    project_dir = tmp_path / "empty-project"
+    project_dir.mkdir()
+    indexer, snapshot_manager = parts
+    previous_epoch = _seed_last_good(indexer, chunk_count=6)
+    ii = IncrementalIndexer(
+        indexer=indexer,
+        embedder=_WorkingEmbedder(),
+        chunker=MultiLanguageChunker(root_path=str(project_dir)),
+        snapshot_manager=snapshot_manager,
+    )
+
+    result = ii.incremental_index(
+        str(project_dir),
+        project_name="empty-project",
+        force_full=True,
+    )
+
+    assert result.success is True
+    assert result.files_added == 0
+    assert result.chunks_added == 0
+    current = read_current(indexer.storage_dir)
+    assert current["epoch_id"] != previous_epoch
+    assert current["consistency"]["expected_count"] == 0
+    assert indexer.search_bm25("sentinel", k=10) == []
+    assert snapshot_manager.load_metadata(str(project_dir))[
+        "chunks_indexed"
+    ] == 0
+
+    monkeypatch.setattr(
+        ii,
+        "_full_index",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unchanged empty corpus retried a full rebuild"
+        ),
+    )
+    retry = ii.incremental_index(
+        str(project_dir),
+        project_name="empty-project",
+    )
+    assert retry.success is True
+    _close_manager(indexer)
+
+
+def test_full_reindex_cancel_preserves_last_good(
+    project_dir,
+    parts,
+):
+    indexer, snapshot_manager = parts
+    expected_epoch = _seed_last_good(indexer)
+
+    def cancel_during_chunking(phase, current, _total):
+        if phase == "chunking" and current == 1:
+            raise InterruptedError("simulated cancellation")
+
+    ii = IncrementalIndexer(
+        indexer=indexer,
+        embedder=_WorkingEmbedder(),
+        chunker=MultiLanguageChunker(root_path=str(project_dir)),
+        snapshot_manager=snapshot_manager,
+        progress_fn=cancel_during_chunking,
+    )
+
+    result = ii.incremental_index(
+        str(project_dir),
+        project_name="proj",
+        force_full=True,
+    )
+
+    assert result.success is False
+    _assert_last_good_restored(indexer, expected_epoch)
+    _close_manager(indexer)
+
+
+def test_incremental_cancel_after_removal_rolls_back_same_process(
+    project_dir,
+    parts,
+):
+    indexer, snapshot_manager = parts
+    chunker = MultiLanguageChunker(root_path=str(project_dir))
+    initial = IncrementalIndexer(
+        indexer=indexer,
+        embedder=_WorkingEmbedder(),
+        chunker=chunker,
+        snapshot_manager=snapshot_manager,
+    )
+    first_result = initial.incremental_index(
+        str(project_dir),
+        project_name="proj",
+    )
+    assert first_result.success
+    expected_epoch = read_current(indexer.storage_dir)["epoch_id"]
+    (project_dir / "alpha.py").unlink()
+
+    def cancel_after_removal(phase, current, _total):
+        if phase == "removing" and current == 1:
+            raise InterruptedError("simulated cancellation after removal")
+
+    interrupted = IncrementalIndexer(
+        indexer=indexer,
+        embedder=_WorkingEmbedder(),
+        chunker=chunker,
+        snapshot_manager=snapshot_manager,
+        progress_fn=cancel_after_removal,
+    )
+
+    result = interrupted.incremental_index(
+        str(project_dir),
+        project_name="proj",
+    )
+
+    assert result.success is False
+    publication = read_with_fallback(indexer.storage_dir)
+    assert publication.freshness == "fresh"
+    assert publication.manifest["epoch_id"] == expected_epoch
+    assert not indexer._publication_marker.exists()
+    assert indexer.search_bm25("alpha", k=10)
     _close_manager(indexer)
 
 

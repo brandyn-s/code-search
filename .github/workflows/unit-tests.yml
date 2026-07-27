@@ -49,3 +49,14 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
         run: python -m pytest tests/unit/ -q
+
+      - name: Run MCP contract acceptance
+        env:
+          CODE_SEARCH_QUERY_HISTORY: "off"
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: >-
+          python -m pytest
+          tests/integration/test_mcp_search_contract.py
+          tests/integration/test_mcp_transport_contract.py
+          -q

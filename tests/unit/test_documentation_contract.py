@@ -115,6 +115,13 @@ def test_process_static_environment_contracts_and_defaults_are_documented() -> N
     )
 
 
+def test_custom_remote_embedding_dimension_contract_is_documented() -> None:
+    for document in (README, CLAUDE, ENV_REFERENCE):
+        assert "| `EMBEDDING_DIMENSION` | `unset` |" in document
+        assert "custom remote embedding models" in document
+        assert "positive output-dimension contract" in document
+
+
 def _heading_anchors(markdown: str) -> set[str]:
     anchors: set[str] = set()
     for heading in re.findall(r"^#{1,6}\s+(.+?)\s*$", markdown, flags=re.MULTILINE):

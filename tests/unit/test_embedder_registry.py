@@ -18,6 +18,7 @@ import pytest
 
 from chunking.code_chunk import CodeChunk
 from embeddings.embedder import (
+    EffectiveEmbeddingConfig,
     EmbeddingResult,
     _PROVIDER_REGISTRY,
     _make_embedding_result,
@@ -306,6 +307,12 @@ class TestEmbedChunksGroupedLengthGuard:
         embedder._model = _StubInnerModel(embeddings_to_return)
         embedder._logger = logging.getLogger("test_embedder")
         embedder._provider = "voyage-context"
+        embedder._configuration = EffectiveEmbeddingConfig(
+            provider="voyage-context",
+            model_name="voyage-context-3",
+            content_mode="code",
+            output_dimension=8,
+        )
         embedder._sibling_context = {}
         return embedder
 

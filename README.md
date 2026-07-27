@@ -270,7 +270,7 @@ This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, c
 
 ## Installation
 
-### 1. Install the verified v0.2.0 release
+### 1. Install the verified v0.2.1 release
 
 The release contains a wheel, its checksum manifest, and a signed GitHub
 artifact-attestation bundle. The commands below download and verify all three
@@ -278,12 +278,12 @@ before installing the wheel:
 
 ```bash
 REPO="redacted-org/code-search"
-TAG="v0.2.0"
-WHEEL="redacted_code_search-0.2.0-py3-none-any.whl"
-BUNDLE="redacted_code_search-0.2.0-provenance.jsonl"
+TAG="v0.2.1"
+WHEEL="redacted_code_search-0.2.1-py3-none-any.whl"
+BUNDLE="redacted_code_search-0.2.1-provenance.jsonl"
 
-mkdir code-search-v0.2.0
-cd code-search-v0.2.0
+mkdir code-search-v0.2.1
+cd code-search-v0.2.1
 gh release download "$TAG" --repo "$REPO"
 
 # Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)
@@ -379,9 +379,10 @@ mcp__code-search__search_code(query="authentication middleware")
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set), else `local` | Embedding provider selection |
+| `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; known built-in models derive this automatically |
 | `VOYAGE_API_KEY` | - | Voyage AI API key ([get one](https://dash.voyageai.com)) |
 | `LOCAL_EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-0.5b` | Model for `jina` provider |
-| `JINA_TRUNCATE_DIM` | - | Matryoshka dimension truncation for Jina (0.5b: 64-896) |
+| `JINA_TRUNCATE_DIM` | - | Jina Matryoshka dimension (0.5b: 64, 128, 256, 512, 896; 1.5b: 128, 256, 512, 1024, 1536) |
 | `CONTENT_MODE` | `code` | `code` (boost functions/methods) or `docs` (boost sections/documents) |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend structural context headers before embedding |
 | `ENRICHED_CONTEXT` | `on` (jina/local), `off` (voyage-context) | Include sibling chunk names in headers (+9.6% MRR on Nix) |

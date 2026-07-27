@@ -3,8 +3,8 @@
 import os
 import logging
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional
-from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Mapping, Optional
+from dataclasses import dataclass, replace
 import numpy as np
 
 from chunking.code_chunk import CodeChunk
@@ -18,6 +18,290 @@ class EmbeddingResult:
     embedding: np.ndarray
     chunk_id: str
     metadata: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class EffectiveEmbeddingConfig:
+    """Provider, model, and content mode used by one embedding pipeline."""
+
+    provider: str
+    model_name: str
+    content_mode: str
+    output_dimension: Optional[int] = None
+
+
+_DEFAULT_EMBEDDING_MODELS = {
+    "openai": "text-embedding-3-small",
+    "voyage": "voyage-4-large",
+    "voyage-code-3": "voyage-code-3",
+    "voyage-context": "voyage-context-3",
+    "jina": "jinaai/jina-code-embeddings-0.5b",
+    "jina-code": "jinaai/jina-code-embeddings-0.5b",
+    "local": "sentence-transformers/all-MiniLM-L6-v2",
+    "gemma": "google/embeddinggemma-300m",
+}
+_LOCAL_MODEL_PROVIDERS = frozenset(("gemma", "jina", "jina-code", "local"))
+_KNOWN_OUTPUT_DIMENSIONS = {
+    "google/embeddinggemma-300m": 768,
+    "jinaai/jina-code-embeddings-0.5b": 896,
+    "jinaai/jina-code-embeddings-1.5b": 1536,
+    "sentence-transformers/all-MiniLM-L6-v2": 384,
+    "text-embedding-3-large": 3072,
+    "text-embedding-3-small": 1536,
+    "text-embedding-ada-002": 1536,
+    "voyage-3-large": 1024,
+    "voyage-3-lite": 512,
+    "voyage-4": 1024,
+    "voyage-4-large": 1024,
+    "voyage-4-lite": 1024,
+    "voyage-code-3": 1024,
+    "voyage-context-3": 1024,
+}
+_JINA_MATRYOSHKA_DIMENSIONS = {
+    "jinaai/jina-code-embeddings-0.5b": frozenset(
+        (64, 128, 256, 512, 896)
+    ),
+    "jinaai/jina-code-embeddings-1.5b": frozenset(
+        (128, 256, 512, 1024, 1536)
+    ),
+}
+_BUILTIN_PROVIDER_MODELS = {
+    "gemma": frozenset(("google/embeddinggemma-300m",)),
+    "jina": frozenset(_JINA_MATRYOSHKA_DIMENSIONS),
+    "jina-code": frozenset(_JINA_MATRYOSHKA_DIMENSIONS),
+    "openai": frozenset(
+        (
+            "text-embedding-3-large",
+            "text-embedding-3-small",
+            "text-embedding-ada-002",
+        )
+    ),
+    "voyage": frozenset(
+        (
+            "voyage-3-large",
+            "voyage-3-lite",
+            "voyage-4",
+            "voyage-4-large",
+            "voyage-4-lite",
+            "voyage-code-3",
+        )
+    ),
+    "voyage-code-3": frozenset(("voyage-code-3",)),
+    "voyage-context": frozenset(("voyage-context-3",)),
+}
+_CUSTOM_REMOTE_MODEL_PROVIDERS = frozenset(
+    ("openai", "voyage", "voyage-code-3", "voyage-context")
+)
+_KNOWN_MODEL_PROVIDERS = {
+    model_name: frozenset(
+        provider
+        for provider, provider_models in _BUILTIN_PROVIDER_MODELS.items()
+        if model_name in provider_models
+    )
+    for model_name in {
+        model
+        for models in _BUILTIN_PROVIDER_MODELS.values()
+        for model in models
+    }
+}
+
+
+def _parse_output_dimension(value: Any, *, source: str) -> Optional[int]:
+    """Parse a positive embedding dimension from config or persisted JSON."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{source} output dimension must be a positive integer")
+    try:
+        dimension = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{source} output dimension must be a positive integer"
+        ) from exc
+    if dimension <= 0 or (
+        isinstance(value, float) and not value.is_integer()
+    ):
+        raise ValueError(f"{source} output dimension must be a positive integer")
+    return dimension
+
+
+def _configured_output_dimension(
+    configuration: EffectiveEmbeddingConfig,
+) -> Optional[int]:
+    if configuration.output_dimension is not None:
+        return _parse_output_dimension(
+            configuration.output_dimension,
+            source="configured",
+        )
+    if configuration.provider in {"jina", "jina-code"}:
+        truncate_dimension = os.environ.get("JINA_TRUNCATE_DIM", "").strip()
+        if truncate_dimension:
+            return _parse_output_dimension(
+                truncate_dimension,
+                source="JINA_TRUNCATE_DIM",
+            )
+    return _KNOWN_OUTPUT_DIMENSIONS.get(configuration.model_name)
+
+
+def resolve_embedding_config(
+    *,
+    provider: Optional[str] = None,
+    model_name: Optional[str] = None,
+    content_mode: Optional[str] = None,
+    output_dimension: Optional[int] = None,
+    stored: Optional[Mapping[str, Any]] = None,
+) -> EffectiveEmbeddingConfig:
+    """Resolve explicit, stored, and ambient configuration by precedence."""
+    stored = stored or {}
+    stored_provider = str(stored.get("embedding_provider") or "").strip().lower()
+    ambient_provider = (
+        os.environ.get("EMBEDDING_PROVIDER", "").strip().lower()
+    )
+    effective_content_mode = (
+        content_mode
+        or stored.get("content_mode")
+        or os.environ.get("CONTENT_MODE")
+        or "code"
+    )
+    effective_content_mode = str(effective_content_mode).strip().lower() or "code"
+
+    explicit_provider = (provider or "").strip().lower()
+    provider_is_explicit = bool(explicit_provider)
+    effective_provider = explicit_provider
+    if not provider_is_explicit:
+        effective_provider = stored_provider
+    if not effective_provider:
+        effective_provider = ambient_provider
+    if not effective_provider:
+        if os.environ.get("VOYAGE_API_KEY"):
+            effective_provider = (
+                "voyage-context"
+                if effective_content_mode == "docs"
+                else "voyage"
+            )
+        else:
+            effective_provider = "local"
+
+    model_environment = (
+        "LOCAL_EMBEDDING_MODEL"
+        if effective_provider in _LOCAL_MODEL_PROVIDERS
+        else "EMBEDDING_MODEL"
+    )
+    stored_model = str(stored.get("embedding_model") or "").strip()
+    explicit_model_name = (model_name or "").strip()
+    model_is_explicit = bool(explicit_model_name)
+    effective_model_name = explicit_model_name
+    if (
+        not model_is_explicit
+        and stored_model
+        and effective_provider == stored_provider
+    ):
+        effective_model_name = stored_model
+    ambient_provider_is_compatible = (
+        not ambient_provider or ambient_provider == effective_provider
+    )
+    ambient_model_name = ""
+    if ambient_provider_is_compatible:
+        ambient_model_name = os.environ.get(model_environment, "").strip()
+    effective_model_name = (
+        effective_model_name
+        or ambient_model_name
+        or _DEFAULT_EMBEDDING_MODELS.get(
+            effective_provider,
+            "(provider-default)",
+        )
+    )
+    ambient_model_is_compatible = (
+        not ambient_model_name or ambient_model_name == effective_model_name
+    )
+    dimension_is_explicit = output_dimension is not None
+    dimension_source = "explicit"
+    dimension_value: Any = output_dimension
+    if not dimension_is_explicit and (
+        effective_provider == stored_provider
+        and effective_model_name == stored_model
+        and "embedding_dimension" in stored
+    ):
+        dimension_source = "stored"
+        dimension_value = stored.get("embedding_dimension")
+    if (
+        dimension_value is None
+        and ambient_provider_is_compatible
+        and ambient_model_is_compatible
+        and os.environ.get("EMBEDDING_DIMENSION", "").strip()
+    ):
+        dimension_source = "EMBEDDING_DIMENSION"
+        dimension_value = os.environ["EMBEDDING_DIMENSION"]
+    requested_dimension = _parse_output_dimension(
+        dimension_value,
+        source=dimension_source,
+    )
+
+    available_providers = sorted(_PROVIDER_REGISTRY)
+    allowed_models = _BUILTIN_PROVIDER_MODELS.get(effective_provider)
+    known_model_providers = _KNOWN_MODEL_PROVIDERS.get(effective_model_name)
+    provider_model_is_invalid = bool(
+        known_model_providers
+        and effective_provider not in known_model_providers
+    )
+    custom_remote_model_without_contract = bool(
+        allowed_models is not None
+        and effective_model_name not in allowed_models
+        and not known_model_providers
+        and (
+            effective_provider not in _CUSTOM_REMOTE_MODEL_PROVIDERS
+            or requested_dimension is None
+        )
+    )
+    if (
+        effective_provider not in _PROVIDER_REGISTRY
+        or provider_model_is_invalid
+        or custom_remote_model_without_contract
+    ):
+        raise ValueError(
+            "Unsupported provider/model configuration: "
+            f"provider={effective_provider!r}, model={effective_model_name!r}. "
+            f"Available providers: {available_providers}"
+        )
+    known_dimension = _KNOWN_OUTPUT_DIMENSIONS.get(effective_model_name)
+    if requested_dimension is not None:
+        matryoshka_dimensions = (
+            _JINA_MATRYOSHKA_DIMENSIONS.get(effective_model_name)
+            if effective_provider in {"jina", "jina-code"}
+            else None
+        )
+        if (
+            matryoshka_dimensions is not None
+            and requested_dimension not in matryoshka_dimensions
+        ):
+            supported = ", ".join(
+                str(value) for value in sorted(matryoshka_dimensions)
+            )
+            raise ValueError(
+                f"Configured output dimension {requested_dimension} is not a "
+                f"supported Matryoshka dimension for "
+                f"{effective_model_name!r}; choose one of: {supported}"
+            )
+        if (
+            matryoshka_dimensions is None
+            and known_dimension is not None
+            and requested_dimension != known_dimension
+        ):
+            raise ValueError(
+                f"Configured output dimension {requested_dimension} "
+                f"conflicts with the known output dimension "
+                f"{known_dimension} for {effective_model_name!r}"
+            )
+    configuration = EffectiveEmbeddingConfig(
+        provider=effective_provider,
+        model_name=effective_model_name,
+        content_mode=effective_content_mode,
+        output_dimension=requested_dimension,
+    )
+    return replace(
+        configuration,
+        output_dimension=_configured_output_dimension(configuration),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +318,7 @@ class EmbeddingResult:
 # A factory takes (model_name, cache_dir, device) and returns the embedding
 # model instance. Each provider's factory owns its own EMBEDDING_MODEL /
 # LOCAL_EMBEDDING_MODEL / API_KEY defaults.
-ProviderFactory = Callable[[str, str, str], Any]
+ProviderFactory = Callable[..., Any]
 _PROVIDER_REGISTRY: Dict[str, ProviderFactory] = {}
 
 
@@ -129,13 +413,21 @@ def _factory_voyage_context(model_name: str, cache_dir: str, device: str) -> Any
 
 
 @register_provider("jina", "jina-code")
-def _factory_jina(model_name: str, cache_dir: str, device: str) -> Any:
+def _factory_jina(
+    model_name: str,
+    cache_dir: str,
+    device: str,
+    *,
+    output_dimension: Optional[int] = None,
+) -> Any:
     from embeddings.jina_code_embedder import JinaCodeEmbedder
     model_name = model_name or os.environ.get(
         "LOCAL_EMBEDDING_MODEL", "jinaai/jina-code-embeddings-0.5b"
     )
-    truncate_dim_str = os.environ.get("JINA_TRUNCATE_DIM", "")
-    truncate_dim = int(truncate_dim_str) if truncate_dim_str else None
+    truncate_dim = output_dimension
+    if truncate_dim is None:
+        truncate_dim_str = os.environ.get("JINA_TRUNCATE_DIM", "")
+        truncate_dim = int(truncate_dim_str) if truncate_dim_str else None
     return JinaCodeEmbedder(
         model_name=model_name,
         cache_dir=cache_dir,
@@ -171,14 +463,7 @@ def _resolve_provider_name() -> str:
     credential-free local provider. OpenAI remains an explicit opt-in because
     an ambient OPENAI_API_KEY must not silently enable source-code egress.
     """
-    provider = os.environ.get("EMBEDDING_PROVIDER", "").strip().lower()
-    if provider:
-        return provider
-    # +0.053 weighted avg MRR over voyage-context-3 across 4 languages
-    # (102 queries, 2026-04-08) — auto-pick voyage when key is present.
-    if os.environ.get("VOYAGE_API_KEY"):
-        return "voyage"
-    return "local"
+    return resolve_embedding_config().provider
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +522,7 @@ class CodeEmbedder:
         model_name: str = "",
         cache_dir: Optional[str] = None,
         device: str = "auto",
+        configuration: Optional[EffectiveEmbeddingConfig] = None,
     ):
         if not cache_dir:
             cache_dir = str(get_storage_dir() / "models")
@@ -245,20 +531,43 @@ class CodeEmbedder:
 
         # R12: provider dispatch via registry instead of 6-branch if/elif.
         # Each factory owns its own model_name + API-key defaults.
-        provider = _resolve_provider_name()
+        effective_config = configuration or resolve_embedding_config(
+            model_name=model_name or None,
+        )
+        provider = effective_config.provider
         factory = _PROVIDER_REGISTRY.get(provider)
         if factory is None:
             raise ValueError(
                 f"Unknown EMBEDDING_PROVIDER: {provider!r}. "
                 f"Available: {list_providers()}"
             )
-        self._model = factory(model_name, cache_dir, device)
+        if provider in {"jina", "jina-code"}:
+            self._model = factory(
+                effective_config.model_name,
+                cache_dir,
+                device,
+                output_dimension=effective_config.output_dimension,
+            )
+        else:
+            self._model = factory(
+                effective_config.model_name,
+                cache_dir,
+                device,
+            )
         # Provider name is recorded for observability; factories own their
         # model_name resolution and the model itself knows its name.
         self._provider = provider
         resolved_model_name = getattr(self._model, "model_name", None) or getattr(
             self._model, "_model_name", None,
-        ) or model_name or "(unknown)"
+        ) or effective_config.model_name or "(unknown)"
+        output_dimension = _configured_output_dimension(effective_config)
+        if output_dimension is None:
+            output_dimension = int(self._model.get_embedding_dimension())
+        self._configuration = replace(
+            effective_config,
+            model_name=resolved_model_name,
+            output_dimension=output_dimension,
+        )
         # Resolved (provider, model) pair namespaces the query-embedding
         # caches. The server constructs one CodeEmbedder per project and
         # projects can use different providers/models ("dual-model
@@ -270,6 +579,11 @@ class CodeEmbedder:
         self._logger.info(
             f"Embedding provider: {provider}, model: {resolved_model_name}"
         )
+
+    @property
+    def configuration(self) -> EffectiveEmbeddingConfig:
+        """Exact provider/model/content-mode/dimension used by this instance."""
+        return self._configuration
 
     @property
     def model(self):
@@ -535,6 +849,33 @@ class CodeEmbedder:
         except Exception:
             pass
 
+    def _validate_output_dimension(
+        self,
+        embeddings: Any,
+        *,
+        operation: str,
+    ) -> None:
+        """Reject provider output that violates the published dimension."""
+        expected = self._configuration.output_dimension
+        if expected is None:
+            raise ValueError(
+                "Embedding output dimension is unresolved; refusing to "
+                f"publish {operation} embeddings"
+            )
+        try:
+            array = np.asarray(embeddings)
+            received = int(array.shape[-1]) if array.ndim else 0
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{operation} embeddings do not have a rectangular output "
+                f"with the expected {expected} dimensions"
+            ) from exc
+        if received != expected:
+            raise ValueError(
+                f"{operation} embeddings expected {expected} dimensions "
+                f"but received {received}"
+            )
+
     def _embed_documents_cached(self, contents: List[str]) -> List[np.ndarray]:
         """Encode document texts with a content-hash cache in front of the model.
 
@@ -554,7 +895,12 @@ class CodeEmbedder:
         encode_kwargs = self._doc_encode_kwargs()
         db = self._get_disk_cache()
         if db is None:
-            return list(self._model.encode(contents, **encode_kwargs))
+            embeddings = self._model.encode(contents, **encode_kwargs)
+            self._validate_output_dimension(
+                embeddings,
+                operation="document",
+            )
+            return list(embeddings)
 
         mode = self._doc_cache_input_mode()
         shas = [hashlib.sha256(c.encode("utf-8")).hexdigest() for c in contents]
@@ -573,7 +919,10 @@ class CodeEmbedder:
                 ).fetchall()
                 for sha, blob, dim in rows:
                     vec = np.frombuffer(blob, dtype=np.float32).copy()
-                    if vec.shape[0] == dim:
+                    if (
+                        vec.shape[0] == dim
+                        and dim == self._configuration.output_dimension
+                    ):
                         by_sha[sha] = vec
         except Exception:
             by_sha = {}
@@ -591,6 +940,10 @@ class CodeEmbedder:
 
         if miss_contents:
             fresh = self._model.encode(miss_contents, **encode_kwargs)
+            self._validate_output_dimension(
+                fresh,
+                operation="document",
+            )
             for sha, vec in zip(miss_shas, fresh):
                 by_sha[sha] = np.asarray(vec, dtype=np.float32)
             try:
@@ -726,6 +1079,10 @@ class CodeEmbedder:
             batch_embeddings = self._model.encode_grouped(
                 grouped_texts, input_type="document"
             )
+            self._validate_output_dimension(
+                batch_embeddings,
+                operation="grouped document",
+            )
 
             # voyage-context API can return fewer embeddings than input chunks
             # when individual chunks are rejected (oversized, malformed, etc.).
@@ -858,8 +1215,14 @@ class CodeEmbedder:
 
         # Layer 1: in-memory LRU
         if cache_key in self._query_cache:
-            self._query_cache.move_to_end(cache_key)
-            return self._query_cache[cache_key]
+            cached_embedding = self._query_cache[cache_key]
+            if (
+                cached_embedding.shape[0]
+                == self._configuration.output_dimension
+            ):
+                self._query_cache.move_to_end(cache_key)
+                return cached_embedding
+            del self._query_cache[cache_key]
 
         # Layer 2: SQLite persistent cache
         db = self._get_disk_cache()
@@ -872,7 +1235,10 @@ class CodeEmbedder:
                 ).fetchone()
                 if row:
                     embedding = np.frombuffer(row[0], dtype=np.float32).copy()
-                    if embedding.shape[0] == row[1]:
+                    if (
+                        embedding.shape[0] == row[1]
+                        and row[1] == self._configuration.output_dimension
+                    ):
                         self._query_cache[cache_key] = embedding
                         return embedding
             except Exception:
@@ -889,6 +1255,10 @@ class CodeEmbedder:
         embedding = self._model.encode(
             [query], **encode_kwargs
         )[0]
+        self._validate_output_dimension(
+            embedding,
+            operation="query",
+        )
 
         # Store in both caches
         self._query_cache[cache_key] = embedding

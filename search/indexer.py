@@ -1,10 +1,18 @@
 """Vector index management with FAISS and metadata storage."""
 
 import fnmatch
+import errno
+import hashlib
 import os
 import json
 import pickle
 import logging
+import functools
+import secrets
+import shutil
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
@@ -14,7 +22,7 @@ from search.logging_privacy import (
     format_query_exception_for_log,
     format_query_for_log,
 )
-from embeddings.embedder import EmbeddingResult
+from embeddings.embedder import EffectiveEmbeddingConfig, EmbeddingResult
 
 
 def _install_search_file_handler() -> None:
@@ -128,6 +136,252 @@ _install_chunk_id_diag_file_handler = _install_search_file_handler
 
 _install_search_file_handler()
 
+class _ProcessAwareRLock:
+    """Re-entrant process-local lock that discards ownership after fork."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._pid = os.getpid()
+        self._context_pids: list[int] = []
+
+    def _reset_after_fork(self) -> None:
+        current_pid = os.getpid()
+        if current_pid == self._pid:
+            return
+        self._lock = threading.RLock()
+        self._pid = current_pid
+
+    def acquire(self) -> None:
+        self._reset_after_fork()
+        self._lock.acquire()
+
+    def release(self, *, acquired_pid: int | None = None) -> None:
+        current_pid = os.getpid()
+        if acquired_pid is not None and acquired_pid != current_pid:
+            if current_pid != self._pid:
+                self._reset_after_fork()
+            return
+        if current_pid != self._pid:
+            # This release belongs to a context inherited across fork, not
+            # to an acquisition made by the child. Discard the copied lock
+            # state without trying to unlock the parent's ownership.
+            self._reset_after_fork()
+            return
+        self._lock.release()
+
+    def __enter__(self) -> "_ProcessAwareRLock":
+        self.acquire()
+        self._context_pids.append(os.getpid())
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        if not self._context_pids:
+            raise RuntimeError("process-aware lock context stack is empty")
+        self.release(acquired_pid=self._context_pids.pop())
+
+
+_STORAGE_LOCKS_GUARD = _ProcessAwareRLock()
+_STORAGE_LOCKS: dict[str, _ProcessAwareRLock] = {}
+_WRITER_LOCKS: dict[str, "_InterProcessWriterLock"] = {}
+
+
+class _InterProcessWriterLock:
+    """Re-entrant process and filesystem lock for one index directory."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._thread_lock = threading.RLock()
+        self._depth = 0
+        self._owner: int | None = None
+        self._handle = None
+        self._pid = os.getpid()
+        self._context_pids: list[int] = []
+
+    def _reset_after_fork(self) -> None:
+        """Discard inherited process-local state without unlocking parent."""
+        current_pid = os.getpid()
+        if current_pid == self._pid:
+            return
+        if self._handle is not None:
+            # Do not issue LOCK_UN: on POSIX the inherited descriptor shares
+            # its open-file description with the parent and could release
+            # the parent's lock. Closing only this duplicate is safe.
+            self._handle.close()
+        self._thread_lock = threading.RLock()
+        self._depth = 0
+        self._owner = None
+        self._handle = None
+        self._pid = current_pid
+
+    def _acquire_filesystem_lock(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                while True:
+                    handle.seek(0)
+                    try:
+                        msvcrt.locking(
+                            handle.fileno(),
+                            msvcrt.LK_NBLCK,
+                            1,
+                        )
+                        break
+                    except OSError as exc:
+                        if exc.errno not in {
+                            errno.EACCES,
+                            errno.EAGAIN,
+                            errno.EDEADLK,
+                        }:
+                            raise
+                        time.sleep(0.05)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            return handle
+        except BaseException:
+            handle.close()
+            raise
+
+    @staticmethod
+    def _release_filesystem_lock(handle) -> None:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def acquire(self) -> None:
+        self._reset_after_fork()
+        self._thread_lock.acquire()
+        try:
+            owner = threading.get_ident()
+            if self._depth == 0:
+                self._handle = self._acquire_filesystem_lock()
+                self._owner = owner
+            elif self._owner != owner:
+                raise RuntimeError(
+                    "inter-process writer lock ownership is inconsistent"
+                )
+            self._depth += 1
+        except BaseException:
+            self._thread_lock.release()
+            raise
+
+    def release(self, *, acquired_pid: int | None = None) -> None:
+        current_pid = os.getpid()
+        if acquired_pid is not None and acquired_pid != current_pid:
+            if current_pid != self._pid:
+                self._reset_after_fork()
+            return
+        if current_pid != self._pid:
+            # Never issue LOCK_UN for a context inherited from the parent:
+            # the descriptor shares its open-file description and doing so
+            # would release the parent's live writer lock.
+            self._reset_after_fork()
+            return
+        if (
+            self._depth <= 0
+            or self._owner != threading.get_ident()
+            or self._handle is None
+        ):
+            raise RuntimeError(
+                "inter-process writer lock released by a non-owner"
+            )
+        self._depth -= 1
+        try:
+            if self._depth == 0:
+                handle = self._handle
+                self._handle = None
+                self._owner = None
+                self._release_filesystem_lock(handle)
+        finally:
+            self._thread_lock.release()
+
+    def is_reentrant_acquisition(self) -> bool:
+        """Return whether the current owner holds this lock more than once."""
+        return (
+            self._owner == threading.get_ident()
+            and self._depth > 1
+        )
+
+    def __enter__(self) -> "_InterProcessWriterLock":
+        self.acquire()
+        self._context_pids.append(os.getpid())
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        if not self._context_pids:
+            raise RuntimeError("writer lock context stack is empty")
+        self.release(acquired_pid=self._context_pids.pop())
+
+
+def _shared_storage_lock(storage_dir: Path) -> _ProcessAwareRLock:
+    """Return the process-wide lock for one canonical index directory."""
+    key = os.path.normcase(str(storage_dir.resolve()))
+    with _STORAGE_LOCKS_GUARD:
+        lock = _STORAGE_LOCKS.get(key)
+        if lock is None:
+            lock = _ProcessAwareRLock()
+            _STORAGE_LOCKS[key] = lock
+        return lock
+
+
+def _shared_writer_lock(storage_dir: Path) -> _InterProcessWriterLock:
+    """Return the cross-process writer lock for one canonical directory."""
+    canonical = storage_dir.resolve()
+    key = os.path.normcase(str(canonical))
+    with _STORAGE_LOCKS_GUARD:
+        lock = _WRITER_LOCKS.get(key)
+        if lock is None:
+            lock = _InterProcessWriterLock(
+                canonical / ".code-search-writer.lock"
+            )
+            _WRITER_LOCKS[key] = lock
+        return lock
+
+
+def _with_storage_lock(method):
+    """Serialize operations that share FAISS and SQLite handles."""
+
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._storage_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
+def _with_writer_and_storage_lock(method):
+    """Serialize a destructive operation across threads and processes."""
+
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        # Match publication_transaction's lock order to avoid deadlocks.
+        with self._writer_lock:
+            with self._storage_lock:
+                return method(self, *args, **kwargs)
+
+    return locked
+
+
+class IndexPublicationRefused(RuntimeError):
+    """Raised when a defensive guard refuses to publish an index."""
+
 
 class CodeIndexManager:
     """Manages FAISS vector index and metadata storage for code chunks."""
@@ -143,19 +397,27 @@ class CodeIndexManager:
 
     def __init__(self, storage_dir: str):
         self.storage_dir = Path(storage_dir)
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._storage_lock = _shared_storage_lock(self.storage_dir)
+        with self._storage_lock:
+            self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._writer_lock = _shared_writer_lock(self.storage_dir)
+        self._logger = logging.getLogger(__name__)
         
         # File paths
         self.index_path = self.storage_dir / "code.index"
         self.metadata_path = self.storage_dir / "metadata.db" 
         self.chunk_id_path = self.storage_dir / "chunk_ids.pkl"
         self.stats_path = self.storage_dir / "stats.json"
+        self._fts_db_path = self.storage_dir / "fts5.db"
+        self._generation_root = self.storage_dir / ".generations"
+        self._publication_marker = (
+            self.storage_dir / ".publication-in-progress"
+        )
         
         # Initialize components
         self._index = None
         self._metadata_db = None
         self._chunk_ids = []
-        self._logger = logging.getLogger(__name__)
         self._on_gpu = False
 
         # Observability: status of the most recent _commit_epoch_manifest call.
@@ -166,9 +428,635 @@ class CodeIndexManager:
         # true success.
         self.last_manifest_commit_status: Optional[str] = None
 
-        # Initialize FTS5
+        # Complete recovery before SQLite opens root-level compatibility
+        # mirrors. The marker exists only across the non-atomic series of
+        # mirror replacements and the final manifest commit.
+        with self._writer_lock:
+            with self._storage_lock:
+                self._recover_published_generation()
+                self._upgrade_legacy_manifest_generation()
+
+                # Initialize FTS5
+                self._init_fts5()
+
+    @contextmanager
+    def publication_transaction(self):
+        """Hold writer locks across mutation, publication, or rollback.
+
+        Individual manager methods also take the process-local storage lock.
+        The outer scope adds a filesystem lock because an index mutation spans
+        several method calls (remove/begin, add, then save). Without it,
+        another manager or MCP process for the same storage directory can
+        mistake the live publication marker for a crashed writer and restore
+        the prior generation mid-rebuild.
+        """
+        with self._writer_lock:
+            if self._writer_lock.is_reentrant_acquisition():
+                raise IndexPublicationRefused(
+                    "Nested index publication transactions are not "
+                    "supported; use one outer transaction for the complete "
+                    "mutation and publication"
+                )
+            with self._storage_lock:
+                self._rebase_publication_working_set()
+                transaction_pid = os.getpid()
+                try:
+                    yield
+                except BaseException:
+                    if os.getpid() != transaction_pid:
+                        raise
+                    if self._publication_marker.exists():
+                        self.rollback_unpublished_changes()
+                    raise
+                if os.getpid() != transaction_pid:
+                    return
+                if self._publication_marker.exists():
+                    self.rollback_unpublished_changes()
+                    raise IndexPublicationRefused(
+                        "Index publication transaction exited without "
+                        "committing or rolling back its working set"
+                    )
+
+    def _rebase_publication_working_set(self) -> None:
+        """Reopen every mutable view after acquiring the filesystem lock.
+
+        A long-lived manager can retain FAISS state and SQLite connections
+        from before another process publishes a generation.  The writer lock
+        serializes publication but does not make those in-memory views fresh,
+        so discard them only after this process owns that lock.  A marker
+        found here belongs to a writer that exited without releasing a clean
+        publication point and is recovered before the authoritative mirrors
+        are reopened.
+        """
+        self._close_storage_handles()
+        self._recover_published_generation()
+        self._upgrade_legacy_manifest_generation()
+        self._repair_root_mirrors_from_verified_generation()
+        self._index = None
+        self._chunk_ids = []
+        self._is_binary = False
+        self._on_gpu = False
+        if hasattr(self, "_float_store"):
+            del self._float_store
         self._init_fts5()
-        
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def _root_mirrors_match_generation(
+        self,
+        manifest: dict[str, Any],
+    ) -> bool:
+        """Return whether every compatibility mirror matches its generation."""
+        destinations = {
+            "code.index": self.index_path,
+            "chunk_ids.pkl": self.chunk_id_path,
+            "metadata.db": self.metadata_path,
+            "fts5.db": self._fts_db_path,
+            "stats.json": self.stats_path,
+            "float_store.npy": self.storage_dir / "float_store.npy",
+        }
+        artifacts = manifest.get("artifacts", {})
+        try:
+            for name, destination in destinations.items():
+                entry = artifacts.get(name)
+                if entry is None:
+                    if destination.exists():
+                        return False
+                    continue
+                if (
+                    not destination.is_file()
+                    or self._sha256_file(destination)
+                    != entry.get("sha256")
+                ):
+                    return False
+
+            for destination in (self.metadata_path, self._fts_db_path):
+                for suffix in ("-wal", "-shm", "-journal"):
+                    if Path(f"{destination}{suffix}").exists():
+                        return False
+        except OSError:
+            return False
+        return True
+
+    def _repair_root_mirrors_from_verified_generation(self) -> None:
+        """Repair missing or damaged roots before a writer can mutate them."""
+        from search.epoch_manifest import read_with_fallback
+
+        publication = read_with_fallback(self.storage_dir)
+        manifest = publication.manifest
+        if manifest is None or not self._manifest_uses_generation(manifest):
+            return
+        self._validate_published_generation(manifest)
+        if self._root_mirrors_match_generation(manifest):
+            return
+
+        self._logger.warning(
+            "Root index mirrors differ from verified epoch %s; restoring "
+            "them before publication",
+            manifest.get("epoch_id"),
+        )
+        self._write_publication_marker(manifest)
+        self._materialize_generation(manifest)
+        self._clear_publication_marker()
+        self._prune_unreferenced_generations()
+
+    @_with_storage_lock
+    def has_persisted_index_state(self) -> bool:
+        """Return whether storage contains data that an append could reuse.
+
+        A newly constructed manager creates an empty FTS database, so file
+        presence alone cannot distinguish a genuinely empty store. All other
+        root artifacts are conservative signals, while FTS is checked for a
+        live row. Unreadable state fails closed.
+        """
+        import sqlite3
+
+        root_artifacts = (
+            self.index_path,
+            self.chunk_id_path,
+            self.metadata_path,
+            self.stats_path,
+            self.storage_dir / "float_store.npy",
+        )
+        for artifact in root_artifacts:
+            if any(
+                path.exists()
+                for path in (
+                    artifact,
+                    Path(f"{artifact}-wal"),
+                    Path(f"{artifact}-shm"),
+                )
+            ):
+                return True
+
+        for directory in (
+            self.storage_dir / "manifest",
+            self._generation_root,
+        ):
+            try:
+                if directory.exists() and next(directory.iterdir(), None):
+                    return True
+            except OSError:
+                return True
+
+        if not self._fts_db_path.exists():
+            return False
+        if not hasattr(self, "_fts_conn") or self._fts_conn is None:
+            return True
+        try:
+            return (
+                self._fts_conn.execute(
+                    "SELECT 1 FROM chunk_fts LIMIT 1"
+                ).fetchone()
+                is not None
+            )
+        except (OSError, sqlite3.Error):
+            return True
+
+    @staticmethod
+    def _fsync_file(path: Path) -> None:
+        """Flush a completed candidate artifact before it can be published."""
+        with path.open("rb") as handle:
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        """Persist directory-entry changes on platforms that support it."""
+        if os.name == "nt":
+            # Windows does not support opening directories for fsync. File
+            # handles are still flushed and os.replace remains atomic there.
+            return
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _sqlite_integrity_check(path: Path) -> None:
+        """Raise if a staged SQLite snapshot cannot be opened cleanly."""
+        import sqlite3
+
+        connection = sqlite3.connect(str(path))
+        try:
+            row = connection.execute("PRAGMA integrity_check").fetchone()
+        finally:
+            connection.close()
+        if not row or row[0] != "ok":
+            detail = row[0] if row else "no result"
+            raise RuntimeError(
+                f"SQLite integrity check failed for {path}: {detail}"
+            )
+
+    def _manifest_artifact_path(
+        self, manifest: dict[str, Any], artifact_name: str
+    ) -> Path | None:
+        entry = manifest.get("artifacts", {}).get(artifact_name)
+        if not entry:
+            return None
+        return self.storage_dir / entry["path"]
+
+    def _manifest_uses_generation(self, manifest: dict[str, Any]) -> bool:
+        prefix = self._generation_root.name + "/"
+        artifacts = manifest.get("artifacts", {})
+        return bool(artifacts) and all(
+            str(entry.get("path", "")).replace("\\", "/").startswith(prefix)
+            for entry in artifacts.values()
+        )
+
+    def _validate_published_generation(
+        self, manifest: dict[str, Any]
+    ) -> None:
+        """Validate hashes, persisted counts, FAISS readability, and SQLite."""
+        from search.epoch_manifest import verify_manifest
+
+        verification_error = verify_manifest(self.storage_dir, manifest)
+        if verification_error is not None:
+            raise RuntimeError(
+                f"Refusing invalid published index generation: "
+                f"{verification_error}"
+            )
+
+        index_path = self._manifest_artifact_path(manifest, "code.index")
+        chunk_ids_path = self._manifest_artifact_path(
+            manifest, "chunk_ids.pkl"
+        )
+        expected = manifest.get("consistency", {}).get("expected_count")
+        if index_path is None or chunk_ids_path is None:
+            if expected not in (None, 0):
+                raise RuntimeError(
+                    "Published generation is missing code.index or "
+                    "chunk_ids.pkl"
+                )
+        else:
+            with chunk_ids_path.open("rb") as handle:
+                persisted_chunk_ids = pickle.load(handle)
+            if not isinstance(persisted_chunk_ids, list):
+                raise RuntimeError(
+                    f"{chunk_ids_path} did not contain a chunk-id list"
+                )
+
+            float_path = self._manifest_artifact_path(
+                manifest, "float_store.npy"
+            )
+            if float_path is not None:
+                persisted_index = faiss.read_index_binary(str(index_path))
+                float_store = np.load(str(float_path), allow_pickle=False)
+                if len(float_store) != len(persisted_chunk_ids):
+                    raise RuntimeError(
+                        "Persisted float_store row count does not match "
+                        "chunk_ids.pkl"
+                    )
+            else:
+                persisted_index = faiss.read_index(str(index_path))
+
+            persisted_count = int(persisted_index.ntotal)
+            if persisted_count != len(persisted_chunk_ids):
+                raise RuntimeError(
+                    "Persisted FAISS ntotal does not match chunk_ids.pkl: "
+                    f"{persisted_count} != {len(persisted_chunk_ids)}"
+                )
+            if expected is not None and persisted_count != int(expected):
+                raise RuntimeError(
+                    "Persisted FAISS ntotal does not match manifest: "
+                    f"{persisted_count} != {expected}"
+                )
+
+        for database_name in ("metadata.db", "fts5.db"):
+            database_path = self._manifest_artifact_path(
+                manifest, database_name
+            )
+            if database_path is not None:
+                self._sqlite_integrity_check(database_path)
+
+    def _close_storage_handles(self) -> None:
+        """Close SQLite handles before cross-platform file replacement."""
+        if self._metadata_db is not None:
+            self._metadata_db.close()
+            self._metadata_db = None
+        if getattr(self, "_fts_conn", None) is not None:
+            self._fts_conn.close()
+            self._fts_conn = None
+
+    def _materialize_generation(self, manifest: dict[str, Any]) -> None:
+        """Atomically refresh root-level compatibility mirrors."""
+        destinations = {
+            "code.index": self.index_path,
+            "chunk_ids.pkl": self.chunk_id_path,
+            "metadata.db": self.metadata_path,
+            "fts5.db": self._fts_db_path,
+            "stats.json": self.stats_path,
+            "float_store.npy": self.storage_dir / "float_store.npy",
+        }
+        token = secrets.token_hex(8)
+        prepared: list[tuple[Path, Path]] = []
+        absent: list[Path] = []
+        try:
+            for name, destination in destinations.items():
+                source = self._manifest_artifact_path(manifest, name)
+                if source is None:
+                    absent.append(destination)
+                    continue
+                if source == destination:
+                    continue
+                temporary = destination.with_name(
+                    f".{destination.name}.publish-{token}"
+                )
+                shutil.copy2(source, temporary)
+                self._fsync_file(temporary)
+                prepared.append((temporary, destination))
+
+            if prepared:
+                self._fsync_directory(self.storage_dir)
+            self._close_storage_handles()
+
+            # A process crash can leave committed WAL/SHM bytes beside a
+            # root database. Replacing only the main database would let
+            # SQLite replay that unpublished working state over the restored
+            # generation on reopen. Remove every SQLite journal sidecar after
+            # handles close and before replacing the main files.
+            removed_sqlite_sidecar = False
+            for destination in (self.metadata_path, self._fts_db_path):
+                for suffix in ("-wal", "-shm", "-journal"):
+                    try:
+                        Path(f"{destination}{suffix}").unlink()
+                        removed_sqlite_sidecar = True
+                    except FileNotFoundError:
+                        pass
+            if removed_sqlite_sidecar:
+                self._fsync_directory(self.storage_dir)
+
+            removed_absent = False
+            for destination in absent:
+                try:
+                    destination.unlink()
+                    removed_absent = True
+                except FileNotFoundError:
+                    pass
+            for temporary, destination in prepared:
+                os.replace(temporary, destination)
+
+            if prepared or removed_absent:
+                self._fsync_directory(self.storage_dir)
+        finally:
+            for temporary, _ in prepared:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _write_publication_marker(self, manifest: dict[str, Any]) -> None:
+        """Durably mark that root mirrors may temporarily be inconsistent."""
+        temporary = self._publication_marker.with_name(
+            f".{self._publication_marker.name}-{secrets.token_hex(8)}"
+        )
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "candidate_epoch": manifest.get("epoch_id"),
+                        "candidate_artifacts": len(
+                            manifest.get("artifacts", {})
+                        ),
+                    },
+                    handle,
+                    sort_keys=True,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._publication_marker)
+            self._fsync_directory(self.storage_dir)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _clear_publication_marker(self) -> None:
+        try:
+            self._publication_marker.unlink()
+            self._fsync_directory(self.storage_dir)
+        except FileNotFoundError:
+            pass
+
+    def _mark_working_set_dirty(self) -> None:
+        """Ensure restart can roll unpublished root-store changes back."""
+        if self._publication_marker.exists():
+            return
+
+        from search.epoch_manifest import read_with_fallback
+
+        publication = read_with_fallback(self.storage_dir)
+        if (
+            publication.manifest is None
+            and publication.freshness == "missing"
+            and self.index_path.exists()
+            and self.chunk_id_path.exists()
+        ):
+            self._bootstrap_unmanifested_generation()
+        self._write_publication_marker({})
+
+    def _bootstrap_unmanifested_generation(self) -> None:
+        """Snapshot a healthy pre-manifest index before its first mutation."""
+        if self._index is None:
+            self._load_index()
+        if self._index is None:
+            raise RuntimeError(
+                "Cannot preserve unmanifested index because FAISS did not load"
+            )
+
+        self._generation_root.mkdir(parents=True, exist_ok=True)
+        self._fsync_directory(self.storage_dir)
+        token = f"legacy-unmanifested-{secrets.token_hex(12)}"
+        candidate_dir = self._generation_root / f".candidate-{token}"
+        generation_dir = self._generation_root / token
+        committed = False
+        try:
+            self._write_candidate_generation(candidate_dir)
+            candidate_manifest = self._build_generation_manifest(
+                candidate_dir
+            )
+            self._validate_published_generation(candidate_manifest)
+            os.replace(candidate_dir, generation_dir)
+            self._fsync_directory(self._generation_root)
+            manifest = self._build_generation_manifest(generation_dir)
+            self._validate_published_generation(manifest)
+            self._commit_epoch_manifest(manifest)
+            committed = True
+        finally:
+            if candidate_dir.exists():
+                self._remove_generation_path(
+                    candidate_dir, ignore_errors=True
+                )
+            if (
+                not committed
+                and generation_dir.exists()
+                and not self._generation_is_manifest_referenced(
+                    generation_dir
+                )
+            ):
+                self._remove_generation_path(
+                    generation_dir, ignore_errors=True
+                )
+        self._prune_unreferenced_generations()
+
+    def _recover_published_generation(self) -> None:
+        """Restore mirrors from the verified publication after a prior crash."""
+        from search.epoch_manifest import read_with_fallback
+
+        if not self._publication_marker.exists():
+            return
+        result = read_with_fallback(self.storage_dir)
+        if result.manifest is None:
+            if result.freshness == "missing":
+                # The first publication never reached its commit point.
+                # Nothing on disk is authoritative, so discard the working
+                # roots and any staged generation instead of wedging startup.
+                self._discard_unpublished_working_set()
+                if self._generation_root.exists():
+                    shutil.rmtree(self._generation_root)
+                    self._fsync_directory(self.storage_dir)
+                self._clear_publication_marker()
+                return
+            raise RuntimeError(
+                "Interrupted index publication has no verified committed "
+                "generation to restore"
+            )
+        if not self._manifest_uses_generation(result.manifest):
+            raise RuntimeError(
+                "Interrupted index publication references a legacy manifest; "
+                "refusing unverified root-level mirrors"
+            )
+        self._validate_published_generation(result.manifest)
+        self._materialize_generation(result.manifest)
+        self._clear_publication_marker()
+        self._prune_unreferenced_generations()
+
+    def _upgrade_legacy_manifest_generation(self) -> None:
+        """Repoint a verified root-path manifest at an immutable snapshot."""
+        from search.epoch_manifest import (
+            ManifestMissing,
+            read_current,
+            verify_manifest,
+        )
+
+        try:
+            manifest = read_current(self.storage_dir)
+        except (
+            ManifestMissing,
+            json.JSONDecodeError,
+            OSError,
+            UnicodeDecodeError,
+        ):
+            return
+        if self._manifest_uses_generation(manifest):
+            return
+
+        verification_error = verify_manifest(self.storage_dir, manifest)
+        if verification_error is not None:
+            self._logger.warning(
+                "Legacy index manifest is not verifiable; leaving its "
+                "root-level layout unchanged: %s",
+                verification_error,
+            )
+            return
+
+        self._generation_root.mkdir(parents=True, exist_ok=True)
+        self._fsync_directory(self.storage_dir)
+        token = secrets.token_hex(12)
+        candidate_dir = self._generation_root / f".legacy-{token}"
+        generation_dir = self._generation_root / f"legacy-{token}"
+        manifest_dir = self.storage_dir / "manifest"
+        manifest_candidate = manifest_dir / f".upgrade-{token}.json"
+        current_path = manifest_dir / "current.json"
+        promoted = False
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=False)
+            upgraded = json.loads(json.dumps(manifest))
+            used_names: set[str] = set()
+            for artifact_name, entry in upgraded["artifacts"].items():
+                source = self.storage_dir / entry["path"]
+                filename = Path(entry["path"]).name
+                if filename in used_names:
+                    filename = artifact_name.replace("/", "_")
+                used_names.add(filename)
+                destination = candidate_dir / filename
+                shutil.copy2(source, destination)
+                self._fsync_file(destination)
+                entry["path"] = str(
+                    (generation_dir / filename).relative_to(self.storage_dir)
+                ).replace("\\", "/")
+
+            self._fsync_directory(candidate_dir)
+            os.replace(candidate_dir, generation_dir)
+            self._fsync_directory(self._generation_root)
+            self._validate_published_generation(upgraded)
+
+            with manifest_candidate.open("w", encoding="utf-8") as handle:
+                json.dump(upgraded, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(manifest_candidate, current_path)
+            self._fsync_directory(manifest_dir)
+            promoted = True
+            self._logger.info(
+                "Upgraded legacy index manifest epoch=%s to generation %s",
+                upgraded.get("epoch_id"),
+                generation_dir,
+            )
+        finally:
+            try:
+                manifest_candidate.unlink()
+            except FileNotFoundError:
+                pass
+            if candidate_dir.exists():
+                self._remove_generation_path(
+                    candidate_dir, ignore_errors=True
+                )
+            if (
+                not promoted
+                and generation_dir.exists()
+                and not self._generation_is_manifest_referenced(
+                    generation_dir
+                )
+            ):
+                self._remove_generation_path(
+                    generation_dir, ignore_errors=True
+                )
+        if promoted:
+            self._prune_unreferenced_generations()
+    def bind_embedding_configuration(
+        self,
+        configuration: EffectiveEmbeddingConfig,
+        *,
+        pipeline_version: str,
+    ) -> None:
+        """Bind the exact embedding identity used for the next index commit."""
+        dimension = configuration.output_dimension
+        if (
+            not configuration.provider
+            or not configuration.model_name
+            or isinstance(dimension, bool)
+            or not isinstance(dimension, int)
+            or dimension <= 0
+            or not pipeline_version
+        ):
+            raise ValueError(
+                "Index commits require a complete effective embedding "
+                "provider/model/dimension/pipeline identity"
+            )
+        self._embedder_provider = configuration.provider
+        self._embedder_model = configuration.model_name
+        self._embedder_dimension = dimension
+        self._pipeline_version = pipeline_version
+
     def _init_fts5(self):
         """Initialize FTS5 full-text search table.
 
@@ -180,7 +1068,6 @@ class CodeIndexManager:
         degrades until the next reindex, search keeps working.
         """
         import sqlite3
-        self._fts_db_path = self.storage_dir / "fts5.db"
         for attempt in (1, 2):
             try:
                 self._fts_conn = sqlite3.connect(
@@ -248,6 +1135,7 @@ class CodeIndexManager:
         # Quote each token to prevent column-name interpretation
         return " OR ".join(f'"{t}"' for t in tokens)
 
+    @_with_storage_lock
     def search_bm25(
         self,
         query: str,
@@ -310,6 +1198,7 @@ class CodeIndexManager:
             return []
 
     @property
+    @_with_storage_lock
     def index(self):
         """Lazy loading of FAISS index."""
         if self._index is None:
@@ -317,6 +1206,7 @@ class CodeIndexManager:
         return self._index
     
     @property
+    @_with_storage_lock
     def metadata_db(self):
         """Lazy loading of metadata database.
 
@@ -340,6 +1230,7 @@ class CodeIndexManager:
                 ) from e
         return self._metadata_db
     
+    @_with_storage_lock
     def _load_index(self):
         """Load existing FAISS index or create new one."""
         self._is_binary = False
@@ -499,6 +1390,7 @@ class CodeIndexManager:
             pickle.dump(self._chunk_ids, f)
         self._logger.info("chunk_ids rebuilt and persisted (%d entries)", faiss_n)
     
+    @_with_storage_lock
     def create_index(self, embedding_dimension: int, index_type: str = "flat"):
         """Create a new FAISS index.
 
@@ -538,6 +1430,7 @@ class CodeIndexManager:
         if not self._is_binary:
             self._maybe_move_index_to_gpu()
     
+    @_with_storage_lock
     def add_embeddings(self, embedding_results: List[EmbeddingResult]) -> None:
         """Add embeddings to the index and metadata to the database."""
         if not embedding_results:
@@ -552,6 +1445,7 @@ class CodeIndexManager:
         # regression observed 2026-05-04/05.
         if self._index is None and self.index_path.exists():
             self._load_index()
+        self._mark_working_set_dirty()
 
         # Initialize index if needed
         if self._index is None:
@@ -691,6 +1585,7 @@ class CodeIndexManager:
         except Exception as e:
             self._logger.warning(f"Failed to move FAISS index to GPU, continuing on CPU: {e}")
     
+    @_with_storage_lock
     def search(
         self,
         query_embedding: np.ndarray,
@@ -852,11 +1747,23 @@ class CodeIndexManager:
         
         return True
     
+    @_with_storage_lock
     def get_chunk_by_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve chunk metadata by ID."""
         metadata_entry = self.metadata_db.get(chunk_id)
         return metadata_entry['metadata'] if metadata_entry else None
 
+    @_with_storage_lock
+    def get_chunk_entries(self) -> list[tuple[str, dict[str, Any]]]:
+        """Return a stable chunk/metadata snapshot for compound readers."""
+        entries = []
+        for chunk_id in self._chunk_ids:
+            metadata_entry = self.metadata_db.get(chunk_id)
+            if metadata_entry:
+                entries.append((chunk_id, metadata_entry))
+        return entries
+
+    @_with_storage_lock
     def count_chunks_in_file(self, relative_path: str) -> int:
         """Count the live chunks indexed for a specific file.
 
@@ -877,6 +1784,7 @@ class CodeIndexManager:
         except Exception:
             return 0
     
+    @_with_storage_lock
     def get_similar_chunks(self, chunk_id: str, k: int = 5) -> List[Tuple[str, float, Dict[str, Any]]]:
         """Find chunks similar to a given chunk."""
         metadata_entry = self.metadata_db.get(chunk_id)
@@ -950,6 +1858,7 @@ class CodeIndexManager:
             return chunk_abs.endswith("/" + target)
         return False
 
+    @_with_storage_lock
     def remove_file_chunks(self, file_path: str, project_name: Optional[str] = None) -> int:
         """Remove all chunks from a specific file.
 
@@ -1002,6 +1911,8 @@ class CodeIndexManager:
                 chunks_to_remove.append(chunk_id)
 
         # Remove chunks from metadata
+        if chunks_to_remove:
+            self._mark_working_set_dirty()
         for chunk_id in chunks_to_remove:
             try:
                 del self.metadata_db[chunk_id]
@@ -1039,8 +1950,450 @@ class CodeIndexManager:
             pass
         return len(chunks_to_remove)
     
-    def save_index(self, force: bool = False):
-        """Save the FAISS index and chunk IDs to disk.
+    def _snapshot_sqlite(self, source: Path, destination: Path) -> None:
+        """Create a single-file SQLite snapshot that includes committed WAL."""
+        import sqlite3
+
+        source_connection = sqlite3.connect(
+            f"{source.resolve().as_uri()}?mode=ro", uri=True
+        )
+        destination_connection = sqlite3.connect(str(destination))
+        try:
+            source_connection.backup(destination_connection)
+            destination_connection.commit()
+        finally:
+            destination_connection.close()
+            source_connection.close()
+        self._sqlite_integrity_check(destination)
+        self._fsync_file(destination)
+
+    def _write_faiss_candidate(self, destination: Path) -> None:
+        """Persist FAISS to a candidate path or propagate the final failure."""
+        if getattr(self, "_is_binary", False):
+            faiss.write_index_binary(self._index, str(destination))
+            return
+
+        index_to_write = self._index
+        if self._on_gpu and hasattr(faiss, "index_gpu_to_cpu"):
+            index_to_write = faiss.index_gpu_to_cpu(self._index)
+        try:
+            faiss.write_index(index_to_write, str(destination))
+        # FAISS bindings expose backend-specific exception types.
+        except Exception as first_error:  # noqa: BLE001
+            self._logger.warning(
+                "Primary FAISS candidate write failed; retrying: %s",
+                first_error,
+            )
+            try:
+                faiss.write_index(index_to_write, str(destination))
+            except Exception as final_error:
+                self._logger.error(
+                    "Both FAISS candidate writes failed: %s", final_error
+                )
+                raise final_error from first_error
+
+    def _write_candidate_generation(self, candidate_dir: Path) -> None:
+        """Write every artifact into an unpublished candidate directory."""
+        candidate_dir.mkdir(parents=True, exist_ok=False)
+
+        index_path = candidate_dir / "code.index"
+        self._write_faiss_candidate(index_path)
+        self._fsync_file(index_path)
+
+        chunk_ids_path = candidate_dir / "chunk_ids.pkl"
+        with chunk_ids_path.open("wb") as handle:
+            pickle.dump(self._chunk_ids, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if getattr(self, "_is_binary", False):
+            float_path = candidate_dir / "float_store.npy"
+            with float_path.open("wb") as handle:
+                np.save(handle, self._float_store, allow_pickle=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        if self._metadata_db is not None:
+            self._metadata_db.commit()
+        if self.metadata_path.exists():
+            self._snapshot_sqlite(
+                self.metadata_path, candidate_dir / "metadata.db"
+            )
+
+        if getattr(self, "_fts_conn", None) is not None:
+            self._fts_conn.commit()
+        if self._fts_db_path.exists():
+            self._snapshot_sqlite(
+                self._fts_db_path, candidate_dir / "fts5.db"
+            )
+
+        if self.stats_path.exists():
+            staged_stats = candidate_dir / "stats.json"
+            shutil.copy2(self.stats_path, staged_stats)
+            self._fsync_file(staged_stats)
+        self._fsync_directory(candidate_dir)
+
+    def _build_generation_manifest(
+        self, generation_dir: Path
+    ) -> dict[str, Any]:
+        """Build a manifest using persisted, reopened artifact counts."""
+        from search.epoch_manifest import ArtifactSpec, build_manifest
+
+        with (generation_dir / "chunk_ids.pkl").open("rb") as handle:
+            persisted_chunk_ids = pickle.load(handle)
+        if not isinstance(persisted_chunk_ids, list):
+            raise TypeError("Candidate chunk_ids.pkl is not a list")
+
+        index_path = generation_dir / "code.index"
+        if (generation_dir / "float_store.npy").exists():
+            persisted_index = faiss.read_index_binary(str(index_path))
+        else:
+            persisted_index = faiss.read_index(str(index_path))
+        persisted_dimension = int(getattr(persisted_index, "d", 0) or 0)
+        configured_dimension = int(
+            getattr(self, "_embedder_dimension", 0) or 0
+        )
+        if (
+            configured_dimension
+            and persisted_dimension != configured_dimension
+        ):
+            raise IndexPublicationRefused(
+                "Cannot publish index because configured embedding dimension "
+                f"{configured_dimension} does not match persisted FAISS "
+                f"dimension {persisted_dimension}"
+            )
+
+        artifacts = [
+            ArtifactSpec(
+                name="chunk_ids.pkl",
+                path=generation_dir / "chunk_ids.pkl",
+                count=len(persisted_chunk_ids),
+            ),
+            ArtifactSpec(
+                name="code.index",
+                path=index_path,
+                count=int(persisted_index.ntotal),
+            ),
+        ]
+        for name in (
+            "metadata.db",
+            "fts5.db",
+            "stats.json",
+            "float_store.npy",
+        ):
+            path = generation_dir / name
+            if path.exists():
+                artifacts.append(
+                    ArtifactSpec(name=name, path=path, count=None)
+                )
+
+        return build_manifest(
+            project_dir=self.storage_dir,
+            artifacts=artifacts,
+            provider=getattr(self, "_embedder_provider", "") or "",
+            model=getattr(self, "_embedder_model", "") or "",
+            vector_dim=persisted_dimension,
+            quantization=(
+                "binary"
+                if getattr(self, "_is_binary", False)
+                else (
+                    "int8"
+                    if self._index
+                    and "ScalarQuantizer" in type(self._index).__name__
+                    else "float32"
+                )
+            ),
+            pipeline_version=getattr(self, "_pipeline_version", "") or "",
+        )
+
+    def _restore_last_published_generation(self) -> None:
+        """Discard a failed working set and restore the publication point."""
+        from search.epoch_manifest import read_with_fallback
+
+        self._close_storage_handles()
+        result = read_with_fallback(self.storage_dir)
+        if (
+            result.manifest is not None
+            and self._manifest_uses_generation(result.manifest)
+        ):
+            self._validate_published_generation(result.manifest)
+            self._materialize_generation(result.manifest)
+        elif result.manifest is None:
+            manifest_dir = self.storage_dir / "manifest"
+            if (
+                (manifest_dir / "current.json").exists()
+                or (manifest_dir / "prior.json").exists()
+            ):
+                raise RuntimeError(
+                    "Cannot restore failed publication because no manifest "
+                    "generation verifies"
+                )
+            self._discard_unpublished_working_set()
+        self._index = None
+        self._chunk_ids = []
+        self._is_binary = False
+        self._on_gpu = False
+        if hasattr(self, "_float_store"):
+            del self._float_store
+        self._init_fts5()
+
+    def _discard_unpublished_working_set(self) -> None:
+        """Remove every root artifact when no generation ever committed."""
+        self._close_storage_handles()
+        removed = False
+        artifacts = (
+            self.index_path,
+            self.chunk_id_path,
+            self.metadata_path,
+            self._fts_db_path,
+            self.stats_path,
+            self.storage_dir / "float_store.npy",
+        )
+        for artifact in artifacts:
+            for path in (
+                artifact,
+                Path(f"{artifact}-wal"),
+                Path(f"{artifact}-shm"),
+            ):
+                try:
+                    path.unlink()
+                    removed = True
+                except FileNotFoundError:
+                    pass
+        if removed:
+            self._fsync_directory(self.storage_dir)
+
+    def _remove_generation_path(
+        self, path: Path, *, ignore_errors: bool = False
+    ) -> None:
+        """Remove an unpublished generation and persist its directory entry."""
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            self._fsync_directory(self._generation_root)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not ignore_errors:
+                raise
+
+    def _generation_is_manifest_referenced(
+        self, generation_dir: Path
+    ) -> bool:
+        """Return whether current or prior manifest names this generation."""
+        manifest_dir = self.storage_dir / "manifest"
+        for name in ("current.json", "prior.json"):
+            try:
+                with (manifest_dir / name).open(
+                    "r", encoding="utf-8"
+                ) as handle:
+                    manifest = json.load(handle)
+            except (
+                FileNotFoundError,
+                json.JSONDecodeError,
+                OSError,
+                TypeError,
+                UnicodeDecodeError,
+            ):
+                continue
+            for entry in manifest.get("artifacts", {}).values():
+                try:
+                    artifact_path = self.storage_dir / entry["path"]
+                    artifact_path.relative_to(generation_dir)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                return True
+        return False
+
+    def _prune_unreferenced_generations(self) -> None:
+        """Best-effort cleanup, called only after a successful commit."""
+        from search.epoch_manifest import (
+            read_current,
+            read_prior,
+            verify_manifest,
+        )
+
+        retained: set[Path] = set()
+        verified_manifests = 0
+        for label, reader in (
+            ("current", read_current),
+            ("prior", read_prior),
+        ):
+            try:
+                manifest = reader(self.storage_dir)
+            except Exception as exc:  # noqa: BLE001 - pruning is best effort
+                self._logger.warning(
+                    "Could not read %s manifest while pruning generations: %s",
+                    label,
+                    exc,
+                )
+                continue
+            if not manifest:
+                continue
+            try:
+                verification_error = verify_manifest(
+                    self.storage_dir,
+                    manifest,
+                )
+            except Exception as exc:  # noqa: BLE001 - pruning must fail closed
+                self._logger.warning(
+                    "Could not verify %s manifest while pruning generations: "
+                    "%s",
+                    label,
+                    exc,
+                )
+                continue
+            if verification_error is not None:
+                self._logger.warning(
+                    "Ignoring unverified %s manifest while pruning "
+                    "generations: %s",
+                    label,
+                    verification_error,
+                )
+                continue
+            verified_manifests += 1
+            for entry in manifest.get("artifacts", {}).values():
+                path = self.storage_dir / entry["path"]
+                try:
+                    relative = path.relative_to(self._generation_root)
+                except ValueError:
+                    continue
+                if relative.parts:
+                    retained.add(self._generation_root / relative.parts[0])
+
+        if verified_manifests == 0:
+            self._logger.warning(
+                "Skipping generation pruning because no manifest verifies"
+            )
+            return
+        if not self._generation_root.exists():
+            return
+        for path in self._generation_root.iterdir():
+            if path in retained:
+                continue
+            try:
+                self._remove_generation_path(path)
+            except OSError as exc:
+                self._logger.warning(
+                    "Could not prune unreferenced index generation %s: %s",
+                    path,
+                    exc,
+                )
+
+    @_with_storage_lock
+    def publish_root_generation(
+        self, expected_chunk_ids: list[str]
+    ) -> str:
+        """Publish a complete root snapshot after offline maintenance.
+
+        Administrative cleanup tools mutate the root compatibility files
+        while the service is quiesced. This method validates that those files
+        still form a complete searchable index, preserves identity from the
+        last verified manifest, and routes the snapshot through the same
+        immutable-generation transaction as normal saves.
+        """
+        from search.epoch_manifest import (
+            read_current,
+            read_with_fallback,
+        )
+
+        if not self.index_path.exists() or not self.chunk_id_path.exists():
+            raise IndexPublicationRefused(
+                "Cannot publish cleanup state without code.index and "
+                "chunk_ids.pkl"
+            )
+
+        try:
+            publication = read_with_fallback(self.storage_dir)
+        except Exception as exc:
+            raise IndexPublicationRefused(
+                "Cannot preserve index identity because the existing "
+                f"manifest is unreadable: {exc}"
+            ) from exc
+
+        manifest_dir = self.storage_dir / "manifest"
+        has_manifest_state = any(
+            (manifest_dir / name).exists()
+            for name in ("current.json", "prior.json")
+        )
+        if publication.manifest is None and has_manifest_state:
+            raise IndexPublicationRefused(
+                "Cannot publish cleanup state because no existing manifest "
+                "generation verifies"
+            )
+
+        self._load_index()
+        if self._index is None:
+            raise IndexPublicationRefused(
+                "Cannot publish cleanup state because code.index is unreadable"
+            )
+        if self._chunk_ids != expected_chunk_ids:
+            raise IndexPublicationRefused(
+                "Cannot publish cleanup state because persisted chunk IDs "
+                "do not match the audited chunk IDs"
+            )
+        if int(self._index.ntotal) != len(expected_chunk_ids):
+            raise IndexPublicationRefused(
+                "Cannot publish cleanup state because persisted FAISS ntotal "
+                "does not match chunk_ids.pkl"
+            )
+
+        expected_ids = set(expected_chunk_ids)
+        metadata_orphans = [
+            chunk_id
+            for chunk_id in self.metadata_db.keys()
+            if chunk_id not in expected_ids
+        ]
+        fts_orphans = [
+            chunk_id
+            for (chunk_id,) in self._fts_conn.execute(
+                "SELECT chunk_id FROM chunk_fts"
+            )
+            if chunk_id not in expected_ids
+        ]
+        if metadata_orphans or fts_orphans:
+            raise IndexPublicationRefused(
+                "Cannot publish incomplete cleanup state because sidecar "
+                "databases still contain chunk IDs outside chunk_ids.pkl "
+                f"(metadata={len(metadata_orphans)}, "
+                f"fts5={len(fts_orphans)})"
+            )
+
+        identity = publication.manifest
+        if identity is not None:
+            expected_dimension = int(identity.get("vector_dim", 0) or 0)
+            actual_dimension = int(getattr(self._index, "d", 0) or 0)
+            if (
+                expected_dimension
+                and actual_dimension != expected_dimension
+            ):
+                raise IndexPublicationRefused(
+                    "Cannot publish cleanup state because FAISS dimension "
+                    f"{actual_dimension} does not match the verified manifest "
+                    f"dimension {expected_dimension}"
+                )
+            self._embedder_provider = identity.get("provider", "") or ""
+            self._embedder_model = identity.get("model", "") or ""
+            self._pipeline_version = (
+                identity.get("pipeline_version", "") or ""
+            )
+
+        self.save_index(force=True, refresh_stats=False)
+        committed = read_current(self.storage_dir)
+        self._validate_published_generation(committed)
+        return str(committed["epoch_id"])
+
+    @_with_storage_lock
+    def save_index(
+        self, force: bool = False, *, refresh_stats: bool = True
+    ):
+        """Atomically publish a complete, persisted index generation.
+
+        Artifacts are written and reopened in a same-filesystem candidate
+        directory. Only a validated candidate is mirrored to the historical
+        root paths and made authoritative by the final manifest rename.
 
         Args:
             force: Bypass the chunk-truncation guard. Set True only by
@@ -1105,6 +2458,11 @@ class CodeIndexManager:
             and existing_count >= TRUNCATION_GUARD_MIN_COUNT
             and in_memory_len < existing_count * TRUNCATION_GUARD_RATIO
         ):
+            refusal = (
+                "Index publication refused by truncation guard: "
+                f"in-memory chunk count {in_memory_len} would replace "
+                f"committed count {existing_count}"
+            )
             self._logger.error(
                 "[CHUNK_ID_DIAG] save_index REFUSED: in_memory_chunk_ids_len=%s "
                 "would clobber healthy on_disk_chunk_ids_count=%s "
@@ -1113,231 +2471,120 @@ class CodeIndexManager:
                 "override (e.g., after clear_index or intentional reset).",
                 in_memory_len, existing_count, existing_pkl_size,
             )
-            return
+            should_restore = self._publication_marker.exists()
+            if not should_restore:
+                from search.epoch_manifest import read_with_fallback
 
-        if self._index is not None:
-            try:
-                if getattr(self, '_is_binary', False):
-                    # Binary mode: save binary index + float store
-                    faiss.write_index_binary(self._index, str(self.index_path))
-                    float_path = self.storage_dir / "float_store.npy"
-                    np.save(str(float_path), self._float_store)
-                    self._logger.info(f"Saved binary index + float store to {self.storage_dir}")
-                else:
-                    index_to_write = self._index
-                    if self._on_gpu and hasattr(faiss, 'index_gpu_to_cpu'):
-                        index_to_write = faiss.index_gpu_to_cpu(self._index)
-                    faiss.write_index(index_to_write, str(self.index_path))
-                    self._logger.info(f"Saved index to {self.index_path}")
-            except Exception as e:
-                self._logger.warning(f"Failed to save index: {e}")
-                if not getattr(self, '_is_binary', False):
-                    try:
-                        cpu_index = faiss.index_gpu_to_cpu(self._index)
-                        faiss.write_index(cpu_index, str(self.index_path))
-                    except Exception as e2:
-                        self._logger.error(f"Failed to save FAISS index: {e2}")
-        
-        # Save chunk IDs
-        with open(self.chunk_id_path, 'wb') as f:
-            pickle.dump(self._chunk_ids, f)
-
-        # CHUNK_ID DIAGNOSTIC: log post-save state.
-        try:
-            new_pkl_size = self.chunk_id_path.stat().st_size
-        except Exception:
-            new_pkl_size = -1
-        self._logger.warning(
-            "[CHUNK_ID_DIAG] save_index post-save: chunk_ids_len=%s "
-            "new_pkl_size=%s",
-            len(self._chunk_ids),
-            new_pkl_size,
-        )
-
-        self._update_stats()
-
-        # Plan-2 E2: commit an epoch-manifest for the artifacts just written.
-        # The cross-artifact consistency check at build_manifest time
-        # structurally prevents the chunk-truncation regression class —
-        # if FAISS ntotal disagrees with len(chunk_ids), commit fails loudly.
-        self._commit_epoch_manifest()
-
-    def _commit_epoch_manifest(self) -> None:
-        """Build + commit an epoch manifest covering the just-written artifacts.
-
-        Called from save_index after FAISS + chunk_ids.pkl + stats are
-        written.
-
-        Failure modes and their handling:
-        - ManifestConsistencyError (cross-artifact record counts disagree):
-          re-raised. This is a structural-invariant violation — on-disk
-          artifacts are demonstrably inconsistent (e.g., FAISS ntotal !=
-          len(chunk_ids)). Silently swallowing this masks the chunk-truncation
-          regression class. Caller learns about it via the propagated
-          exception AND `self.last_manifest_commit_status == "consistency_error"`.
-        - Other build_manifest errors (e.g., sha256 IO failure): logged and
-          swallowed. Transient; readers safely fall back to prior.json.
-        - commit_manifest errors (rename/fsync failure): logged and swallowed.
-          Same rationale — prior epoch's manifest stays current; readers OK.
-
-        Always sets `self.last_manifest_commit_status` to a stable string
-        ("ok", "skipped_empty", "consistency_error", "build_error",
-        "commit_error") for observability.
-        """
-        from search.epoch_manifest import (
-            ArtifactSpec,
-            ManifestConsistencyError,
-            build_manifest,
-            commit_manifest,
-        )
-
-        # WAL checkpoint guard: metadata.db is opened with journal_mode=WAL
-        # (see the metadata_db property). Without an explicit checkpoint
-        # here, pending writes sit in the .db-wal sidecar and the main
-        # metadata.db file still reflects an earlier (often empty) state.
-        # sha256(metadata.db) computed below would then capture that stale
-        # state, and any later auto-checkpoint (SQLite default ≥1000 pages)
-        # merges the WAL into the main file, breaking sha verification
-        # permanently. Observed 2026-05-22: 16/24 projects had identical
-        # manifest sha for metadata.db (42f67cde...) because all were
-        # captured at the empty-schema state. TRUNCATE merges WAL → main
-        # db and reclaims the .wal file space.
-        if self._metadata_db is not None:
-            try:
-                self._metadata_db.commit()
-            except Exception as exc:
-                self._logger.warning(
-                    "[EPOCH_MANIFEST] metadata_db.commit() failed before "
-                    "checkpoint: %s", exc,
+                publication = read_with_fallback(self.storage_dir)
+                should_restore = (
+                    publication.manifest is not None
+                    and self._manifest_uses_generation(
+                        publication.manifest
+                    )
                 )
-        if self.metadata_path.exists():
-            try:
-                import sqlite3
-                _con = sqlite3.connect(str(self.metadata_path))
-                try:
-                    _con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    _con.commit()
-                finally:
-                    _con.close()
-            except Exception as exc:
-                self._logger.warning(
-                    "[EPOCH_MANIFEST] metadata.db WAL checkpoint failed "
-                    "(manifest may capture stale sha): %s", exc,
-                )
+            if should_restore:
+                self._restore_last_published_generation()
+                self._clear_publication_marker()
+            self.last_manifest_commit_status = "consistency_error"
+            raise IndexPublicationRefused(refusal)
 
-        artifacts: list[ArtifactSpec] = []
-        chunk_count = len(self._chunk_ids)
-
-        # Authoritative chunk_ids count drives consistency check.
-        if self.chunk_id_path.exists():
-            artifacts.append(ArtifactSpec(
-                name="chunk_ids.pkl",
-                path=self.chunk_id_path,
-                count=chunk_count,
-            ))
-
-        # FAISS index — count via in-memory _index.ntotal (same value as on
-        # disk since we just wrote it). Keep optional in case _index is None.
-        if self.index_path.exists() and self._index is not None:
-            try:
-                ntotal = int(self._index.ntotal)
-            except Exception:
-                ntotal = chunk_count  # best-effort: assume consistent
-            artifacts.append(ArtifactSpec(
-                name="code.index",
-                path=self.index_path,
-                count=ntotal,
-            ))
-
-        # Sidecar SQLite stores. Pass count=None so they participate in
-        # SHA verification but NOT in the cross-artifact record-count
-        # consistency check.
-        #
-        # Why exclude them: remove_file_chunks updates metadata.db + fts5.db
-        # (the rows are deleted) but intentionally leaves chunk_ids.pkl and
-        # FAISS at their previous size — FAISS row removal is "rebuild on
-        # demand" (see test_save_index_allows_small_legitimate_shrinks).
-        # Treating sidecars as strict-count artifacts would fire a false
-        # consistency error on every incremental run with deletions. The
-        # invariant that DOES matter (the 2026-05-04 chunk-truncation
-        # regression signature: chunk_ids.pkl row count != FAISS ntotal)
-        # is preserved by chunk_ids + code.index above.
-        if self.metadata_path.exists():
-            artifacts.append(ArtifactSpec(
-                name="metadata.db",
-                path=self.metadata_path,
-                count=None,
-            ))
-        if self._fts_db_path.exists():
-            artifacts.append(ArtifactSpec(
-                name="fts5.db",
-                path=self._fts_db_path,
-                count=None,
-            ))
-        # stats.json is metadata, not a record-bearing artifact (count=None).
-        if self.stats_path.exists():
-            artifacts.append(ArtifactSpec(
-                name="stats.json",
-                path=self.stats_path,
-                count=None,
-            ))
-
-        if not artifacts:
+        if self._index is None:
             self._logger.info(
                 "[EPOCH_MANIFEST] no artifacts to commit (empty index?); skipping"
             )
             self.last_manifest_commit_status = "skipped_empty"
             return
 
+        self._mark_working_set_dirty()
+        token = secrets.token_hex(12)
+        candidate_dir = self._generation_root / f".candidate-{token}"
+        generation_dir = self._generation_root / token
+        committed = False
         try:
-            manifest = build_manifest(
-                project_dir=self.storage_dir,
-                artifacts=artifacts,
-                provider=getattr(self, "_embedder_provider", "") or "",
-                model=getattr(self, "_embedder_model", "") or "",
-                vector_dim=int(getattr(self._index, "d", 0) or 0),
-                quantization="binary" if getattr(self, "_is_binary", False) else "int8",
-                pipeline_version=getattr(self, "_pipeline_version", "") or "",
-            )
-        except ManifestConsistencyError as exc:
-            # Cross-artifact consistency failure: on-disk artifacts have
-            # mismatched record counts (e.g., FAISS ntotal != len(chunk_ids)).
-            # This is a structural-invariant violation, not a transient
-            # error — silently swallowing it masks the chunk-truncation
-            # regression class. Re-raise so the caller (IncrementalIndexer)
-            # learns the operation produced inconsistent state.
-            self._logger.error(
-                "[EPOCH_MANIFEST] consistency check failed; refusing to commit: %s",
-                exc,
-            )
-            self.last_manifest_commit_status = "consistency_error"
-            raise
+            if refresh_stats:
+                self._update_stats()
+            self._generation_root.mkdir(parents=True, exist_ok=True)
+            self._fsync_directory(self.storage_dir)
+            self._write_candidate_generation(candidate_dir)
+            candidate_manifest = self._build_generation_manifest(candidate_dir)
+            self._validate_published_generation(candidate_manifest)
+
+            # Directory rename makes the validated candidate immutable before
+            # any compatibility mirror or manifest points at it.
+            os.replace(candidate_dir, generation_dir)
+            self._fsync_directory(self._generation_root)
+            manifest = self._build_generation_manifest(generation_dir)
+            self._validate_published_generation(manifest)
+
+            # Refresh the marker with the validated candidate, then replace
+            # root-level compatibility mirrors before the manifest commit.
+            self._write_publication_marker(manifest)
+            self._materialize_generation(manifest)
+            self._commit_epoch_manifest(manifest)
+            committed = True
+            self._clear_publication_marker()
         except Exception as exc:
-            # Unexpected error in manifest construction — log + swallow.
-            # Transient (e.g., sha256 IO failure on a slow disk); readers
-            # safely fall back to prior.json. Operators can detect via
-            # verify_index_integrity or last_manifest_commit_status.
-            self._logger.warning(
-                "[EPOCH_MANIFEST] build failed (non-blocking): %s", exc,
+            from search.epoch_manifest import ManifestConsistencyError
+
+            if isinstance(exc, ManifestConsistencyError):
+                self.last_manifest_commit_status = "consistency_error"
+            else:
+                self.last_manifest_commit_status = "commit_error"
+            self._logger.error(
+                "[EPOCH_MANIFEST] atomic publication failed: %s", exc
             )
-            self.last_manifest_commit_status = "build_error"
-            return
+            try:
+                self._restore_last_published_generation()
+                self._clear_publication_marker()
+            # Preserve the publication error even if rollback also fails.
+            except Exception as restore_error:  # noqa: BLE001
+                self._logger.error(
+                    "Failed to restore the prior published generation: %s",
+                    restore_error,
+                )
+            raise
+        finally:
+            if candidate_dir.exists():
+                self._remove_generation_path(
+                    candidate_dir, ignore_errors=True
+                )
+            if (
+                not committed
+                and generation_dir.exists()
+                and not self._generation_is_manifest_referenced(
+                    generation_dir
+                )
+            ):
+                self._remove_generation_path(
+                    generation_dir, ignore_errors=True
+                )
+
+        self._init_fts5()
+        self._logger.warning(
+            "[CHUNK_ID_DIAG] save_index post-save: chunk_ids_len=%s "
+            "new_pkl_size=%s",
+            len(self._chunk_ids),
+            self.chunk_id_path.stat().st_size,
+        )
+        self._prune_unreferenced_generations()
+
+    def _commit_epoch_manifest(self, manifest: dict[str, Any]) -> None:
+        """Commit the already-validated generation manifest or raise."""
+        from search.epoch_manifest import commit_manifest
 
         try:
-            committed = commit_manifest(self.storage_dir, manifest)
-            self._logger.info(
-                "[EPOCH_MANIFEST] committed epoch=%s artifacts=%d at %s",
-                manifest["epoch_id"], len(artifacts), committed,
-            )
-            self.last_manifest_commit_status = "ok"
-        except Exception as exc:
-            # Commit-time error (rename failure, fsync failure). Log; the
-            # artifacts on disk are unchanged — readers see the previous
-            # epoch's manifest until the next successful commit.
-            self._logger.warning(
-                "[EPOCH_MANIFEST] commit failed (non-blocking): %s", exc,
-            )
+            committed_path = commit_manifest(self.storage_dir, manifest)
+        except Exception:
             self.last_manifest_commit_status = "commit_error"
+            raise
+        self._fsync_directory(committed_path.parent)
+        self._logger.info(
+            "[EPOCH_MANIFEST] committed epoch=%s artifacts=%d at %s",
+            manifest["epoch_id"],
+            len(manifest["artifacts"]),
+            committed_path,
+        )
+        self.last_manifest_commit_status = "ok"
     
     def _update_stats(self):
         """Update index statistics."""
@@ -1414,6 +2661,7 @@ class CodeIndexManager:
         with open(self.stats_path, 'w', encoding='utf-8') as f:
             json.dump(stats, f, indent=2)
 
+    @_with_storage_lock
     def get_stats(self) -> Dict[str, Any]:
         """Get index statistics.
 
@@ -1437,10 +2685,12 @@ class CodeIndexManager:
             'files_indexed': 0
         }
     
+    @_with_storage_lock
     def get_index_size(self) -> int:
         """Get the number of chunks in the index."""
         return len(self._chunk_ids)
 
+    @_with_storage_lock
     def stale_ratio(self) -> Optional[float]:
         """stale_vectors / live_chunks for the current on-disk index.
 
@@ -1461,34 +2711,62 @@ class CodeIndexManager:
         except Exception:
             return None
         return max(0, ntotal - live) / max(live, 1)
-    
-    def clear_index(self):
-        """Clear the entire index and metadata."""
-        # Close database connection
-        if self._metadata_db is not None:
-            self._metadata_db.close()
-            self._metadata_db = None
 
-        # Close and remove FTS5 database
-        if hasattr(self, "_fts_conn") and self._fts_conn is not None:
-            self._fts_conn.close()
-            self._fts_conn = None
-        fts_path = self.storage_dir / "fts5.db"
-        if fts_path.exists():
-            fts_path.unlink()
+    @_with_storage_lock
+    def begin_rebuild(self) -> None:
+        """Reset only the unpublished working set for a full rebuild.
 
-        # Remove files
-        for file_path in [self.index_path, self.metadata_path, self.chunk_id_path, self.stats_path]:
-            if file_path.exists():
-                file_path.unlink()
-
-        # Reset in-memory state
+        The verified manifest and immutable generations remain intact until
+        save_index commits a replacement. A failed rebuild can therefore
+        restore the last-good generation without a process restart.
+        """
+        self._mark_working_set_dirty()
+        self._discard_unpublished_working_set()
         self._index = None
         self._chunk_ids = []
-
-        # Re-initialize FTS5 for new inserts
+        self._is_binary = False
+        self._on_gpu = False
+        if hasattr(self, "_float_store"):
+            del self._float_store
+        self.last_manifest_commit_status = None
         self._init_fts5()
 
+    @_with_storage_lock
+    def rollback_unpublished_changes(self) -> bool:
+        """Restore the verified generation when a working mutation aborts."""
+        if not self._publication_marker.exists():
+            return False
+        self._restore_last_published_generation()
+        self._clear_publication_marker()
+        return True
+
+    @_with_writer_and_storage_lock
+    def clear_index(self):
+        """Clear root mirrors and every committed index generation."""
+        # A crash before manifest removal can roll back to the last verified
+        # generation; after manifest removal it fails closed until clear
+        # finishes and removes this marker.
+        self._write_publication_marker({})
+        self._discard_unpublished_working_set()
+
+        for directory in (
+            self.storage_dir / "manifest",
+            self._generation_root,
+        ):
+            if directory.exists():
+                shutil.rmtree(directory)
+                self._fsync_directory(self.storage_dir)
+
+        self._index = None
+        self._chunk_ids = []
+        self._is_binary = False
+        self._on_gpu = False
+        if hasattr(self, "_float_store"):
+            del self._float_store
+        self.last_manifest_commit_status = None
+
+        self._clear_publication_marker()
+        self._init_fts5()
         self._logger.info("Index cleared")
     
     def __del__(self):

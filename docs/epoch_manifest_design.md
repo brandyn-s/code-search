@@ -171,15 +171,16 @@ The plan flagged Windows rename atomicity as the hard part. Python's
 (unlike `os.rename()` which fails when the target exists on Windows).
 We use `os.replace` exclusively for the commit step.
 
-We do NOT use file locks (`fcntl.flock` / `msvcrt.locking`) because:
-1. `os.replace` is atomic; concurrent writers either lose or win the race
-   without leaving a half-committed state.
-2. Cross-platform file locking adds complexity without solving the
-   real problem (which is crash recovery, not write contention).
+`CodeIndexManager` also holds a per-index advisory writer lock while it
+performs startup recovery and across the complete mutation/publication
+transaction. The lock uses `fcntl.flock` on POSIX and `msvcrt.locking` on
+Windows. It is process-reentrant and the operating system releases it if a
+writer exits unexpectedly.
 
-The single-writer assumption is documented (one MCP server per project at
-a time). If multi-writer is ever needed, an advisory lockfile next to
-`current.json` can be added.
+`os.replace()` remains the atomic manifest commit primitive. The writer lock
+solves the separate multi-process ordering problem: without it, one process
+could prune a generation after another process selected it but before that
+process committed `current.json`.
 
 ## What this design does NOT do
 
@@ -188,8 +189,8 @@ a time). If multi-writer is ever needed, an advisory lockfile next to
 - **Not multi-version**: only `current` and `prior` are kept. Older
   epochs are gone after promotion. This is acceptable because the FAISS
   index can be rebuilt from source if both fail.
-- **Not multi-writer**: single writer per project. Documented; not
-  enforced by code.
+- **Not concurrent multi-writer**: writers for one local index are serialized
+  by the advisory lock; they do not merge concurrent working sets.
 - **Not consensus / distributed**: single-machine local index. No leader
   election, no Paxos, no Raft.
 

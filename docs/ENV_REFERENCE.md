@@ -14,7 +14,8 @@ soften or restate them without re-running the cited eval.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set) | Provider: `voyage` (recommended, uses voyage-4-large), `voyage-code-3` (available non-default; TypeScript-optimized, regresses on Nix — see `docs/findings/2026-05-15-voyage-code-3-ab-finding.md`), `voyage-context` (legacy contextualized), `openai`, `jina` (local, code-optimized), `local` |
-| `JINA_TRUNCATE_DIM` | - | Matryoshka dim truncation for jina provider (0.5b: 64-896, 1.5b: 128-1536) |
+| `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; known built-in models derive this automatically. Stored project metadata reuses the value only when its provider and model both match. |
+| `JINA_TRUNCATE_DIM` | - | Matryoshka dimension for Jina (0.5b: 64, 128, 256, 512, 896; 1.5b: 128, 256, 512, 1024, 1536) |
 | `VOYAGE_API_KEY` | - | Voyage AI API key |
 | `CONTENT_MODE` | `code` | `code` or `docs` - affects search weights and provider auto-select |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend context headers to embeddings |

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,36 @@ def test_new_project_provider_selection_matches_operator_contract(
     )
 
     assert project_info["embedding_provider"] == expected
+
+
+def test_new_project_records_resolved_provider_model_and_dimension(
+    temp_storage,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from mcp_server.code_search_server import CodeSearchServer
+
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-large")
+    monkeypatch.setenv("CONTENT_MODE", "docs")
+    project_path = tmp_path / "resolved-config-project"
+    project_path.mkdir()
+
+    server = CodeSearchServer()
+    project_dir = server.get_project_storage_dir(
+        str(project_path.resolve()),
+        provider="voyage",
+    )
+    project_info = json.loads(
+        (project_dir / "project_info.json").read_text(encoding="utf-8")
+    )
+
+    assert project_info["embedding_provider"] == "voyage"
+    assert project_info["embedding_model"] == "voyage-4-large"
+    assert project_info["embedding_dimension"] == 1024
+    assert project_info["content_mode"] == "docs"
+    assert os.environ["EMBEDDING_PROVIDER"] == "openai"
+    assert os.environ["EMBEDDING_MODEL"] == "text-embedding-3-large"
 
 
 def test_unqualified_status_reports_stored_project_provider(

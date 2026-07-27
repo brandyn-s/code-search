@@ -26,9 +26,10 @@ import pickle
 import tempfile
 
 import numpy as np
+import pytest
 
-from search.indexer import CodeIndexManager
 from embeddings.embedder import EmbeddingResult
+from search.indexer import CodeIndexManager, IndexPublicationRefused
 
 
 def _make_result(chunk_id: str, dim: int = 384) -> EmbeddingResult:
@@ -140,7 +141,8 @@ def test_save_index_refuses_clobber_without_force():
         mgr2._chunk_ids = ["c_lone"]
         # FAISS state: leave whatever add_embeddings produced (>=1 vector).
 
-        mgr2.save_index()  # default force=False — should refuse
+        with pytest.raises(IndexPublicationRefused):
+            mgr2.save_index()  # default force=False — should refuse
 
         # On-disk pkl should be UNCHANGED.
         new_pkl_size = chunk_id_path.stat().st_size

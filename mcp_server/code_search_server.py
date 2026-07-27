@@ -17,7 +17,12 @@ from functools import lru_cache
 
 from common_utils import get_storage_dir
 from chunking.multi_language_chunker import MultiLanguageChunker
-from embeddings.embedder import CodeEmbedder, _resolve_provider_name
+from embeddings.embedder import (
+    CodeEmbedder,
+    EffectiveEmbeddingConfig,
+    _resolve_provider_name,
+    resolve_embedding_config,
+)
 from search.index_identity import (
     IdentityCaptureError,
     IndexIdentity,
@@ -38,6 +43,8 @@ from mcp_server.query_history import QueryHistoryStore
 # Configure logging
 logger = logging.getLogger(__name__)
 _PROJECT_INFO_UPDATE_LOCK = threading.RLock()
+MAX_SEARCH_RESULTS = 100
+VALID_SEARCH_MODES = frozenset(("auto", "hybrid", "keyword", "semantic"))
 
 _PIPELINE_COMPONENTS = [
     "chunker_version=3",  # v3: cAST-style merge of small adjacent chunks
@@ -97,13 +104,14 @@ def _grammar_fingerprint() -> str:
     return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
 
 
-def get_pipeline_version() -> str:
+def get_pipeline_version(
+    configuration: Optional[EffectiveEmbeddingConfig] = None,
+) -> str:
     """Hash of pipeline config. Changes when re-embedding is needed.
 
     Inputs:
       - chunker version, overlap, contextual headers/bm25 (constants)
-      - EMBEDDING_PROVIDER + EMBEDDING_MODEL (env vars)
-      - CONTENT_MODE (env var)
+      - resolved embedding provider, model, content mode, and output dimension
       - tree-sitter grammar versions (Plan-2 B3, 2026-05-05) — when a
         grammar upgrades, chunk boundaries can shift; previously-embedded
         chunks become semantically stale.
@@ -114,13 +122,22 @@ def get_pipeline_version() -> str:
         client-visible signal. Workaround: schedule a quarterly full
         reindex if your provider publishes silent updates.
     """
-    provider = os.environ.get("EMBEDDING_PROVIDER", "voyage-context")
-    model = os.environ.get("EMBEDDING_MODEL", "")
-    content_mode = os.environ.get("CONTENT_MODE", "code")
+    configuration = configuration or resolve_embedding_config()
+    output_dimension = configuration.output_dimension
+    if (
+        isinstance(output_dimension, bool)
+        or not isinstance(output_dimension, int)
+        or output_dimension <= 0
+    ):
+        raise ValueError(
+            "Pipeline version requires a positive effective embedding "
+            "output dimension"
+        )
     components = _PIPELINE_COMPONENTS + [
-        f"provider={provider}",
-        f"model={model}",
-        f"content_mode={content_mode}",
+        f"provider={configuration.provider}",
+        f"model={configuration.model_name}",
+        f"content_mode={configuration.content_mode}",
+        f"output_dimension={output_dimension}",
         f"grammars={_grammar_fingerprint()}",
     ]
     return hashlib.md5("|".join(sorted(components)).encode()).hexdigest()[:16]
@@ -475,12 +492,17 @@ class CodeSearchServer:
     def _completed_index_metadata(
         self,
         pipeline_version: str,
+        configuration: EffectiveEmbeddingConfig,
     ) -> Dict[str, Any]:
         """Build provenance to publish with a coherent completed identity."""
         profile_metadata = _active_synonym_profile_metadata()
         return {
             "pipeline_version": pipeline_version,
             "synonym_profile": profile_metadata,
+            "embedding_provider": configuration.provider,
+            "embedding_model": configuration.model_name,
+            "embedding_dimension": configuration.output_dimension,
+            "content_mode": configuration.content_mode,
         }
 
     def _finalize_index_identity(
@@ -532,6 +554,7 @@ class CodeSearchServer:
         *,
         max_age_minutes: float,
         publish_pending: bool,
+        ready_metadata: Optional[Dict[str, Any]] = None,
     ) -> tuple[Any, bool, Dict[str, Any]]:
         """Run search-time reindexing as one source-identity transaction."""
         source_path = Path(project_path).resolve()
@@ -631,8 +654,9 @@ class CodeSearchServer:
                 source_path,
                 info_file,
                 start_identity,
+                ready_metadata=ready_metadata,
             )
-        return result, mutated, state
+        return result, succeeded and mutated, state
 
     def _warn_if_reranker_degraded(self) -> None:
         """Warn at startup when the configured reranker cannot run.
@@ -796,24 +820,16 @@ class CodeSearchServer:
         # Store project info
         project_info_file = project_dir / "project_info.json"
         if not project_info_file.exists():
-            # Auto-select embedding provider from CONTENT_MODE if not explicitly set
-            content_mode = os.environ.get("CONTENT_MODE", "code").lower()
-            effective_provider = provider or _resolve_provider_name()
-            if (
-                provider is None
-                and not os.environ.get("EMBEDDING_PROVIDER")
-                and content_mode == "docs"
-                and os.environ.get("VOYAGE_API_KEY")
-            ):
-                effective_provider = "voyage-context"
+            configuration = resolve_embedding_config(provider=provider)
             project_info = {
                 "project_name": project_name,
                 "project_path": str(project_path_obj),
                 "project_hash": project_hash,
                 "created_at": datetime.now().isoformat(),
-                "embedding_provider": effective_provider,
-                "embedding_model": os.environ.get("EMBEDDING_MODEL", ""),
-                "content_mode": content_mode,
+                "embedding_provider": configuration.provider,
+                "embedding_model": configuration.model_name,
+                "embedding_dimension": configuration.output_dimension,
+                "content_mode": configuration.content_mode,
             }
             with open(project_info_file, "w", encoding="utf-8") as f:
                 json.dump(project_info, f, indent=2)
@@ -869,6 +885,59 @@ class CodeSearchServer:
             logger.warning(f"Failed to check/auto-index project {project_path}: {e}")
             return False
 
+    @staticmethod
+    def _prefer_verified_manifest_embedding_identity(
+        project_dir: Path,
+        stored_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Repair an incomplete legacy config from a verified index manifest."""
+        stored_dimension = stored_config.get("embedding_dimension")
+        stored_complete = bool(
+            str(stored_config.get("embedding_provider") or "").strip()
+            and str(stored_config.get("embedding_model") or "").strip()
+            and isinstance(stored_dimension, int)
+            and not isinstance(stored_dimension, bool)
+            and stored_dimension > 0
+        )
+        if stored_complete:
+            return stored_config
+
+        try:
+            from search.epoch_manifest import read_with_fallback
+
+            publication = read_with_fallback(project_dir / "index")
+            manifest = publication.manifest
+        except Exception:
+            return stored_config
+        if not isinstance(manifest, dict):
+            return stored_config
+
+        manifest_provider = str(manifest.get("provider") or "").strip()
+        manifest_model = str(manifest.get("model") or "").strip()
+        manifest_dimension = manifest.get("vector_dim")
+        if (
+            not manifest_provider
+            or not manifest_model
+            or isinstance(manifest_dimension, bool)
+            or not isinstance(manifest_dimension, int)
+            or manifest_dimension <= 0
+        ):
+            return stored_config
+
+        repaired = dict(stored_config)
+        # Treat provider/model/dimension as one identity tuple. Mixing a
+        # surviving legacy provider with a manifest model can create another
+        # valid-looking but false configuration.
+        repaired.update(
+            {
+                "embedding_provider": manifest_provider,
+                "embedding_model": manifest_model,
+                "embedding_dimension": manifest_dimension,
+            }
+        )
+        repaired.setdefault("content_mode", "code")
+        return repaired
+
     def embedder(self, project_path: str = None, provider: str = None) -> CodeEmbedder:
         """Get embedder for a project, using its stored model config if available.
 
@@ -884,9 +953,9 @@ class CodeSearchServer:
         cache_dir = get_storage_dir() / "models"
         cache_dir.mkdir(exist_ok=True)
 
-        # Read project's stored embedding config if project_path given
-        stored_provider = ""
-        model_name = ""
+        # Read the project's stored config, then resolve the caller override
+        # without mutating process-global environment variables.
+        stored_config: Dict[str, Any] = {}
         if project_path:
             project_dir = self.get_project_storage_dir(project_path, provider=provider)
             info_file = project_dir / "project_info.json"
@@ -894,37 +963,43 @@ class CodeSearchServer:
                 try:
                     with open(info_file, "r", encoding="utf-8") as f:
                         info = json.load(f)
-                    stored_provider = info.get("embedding_provider", "")
-                    model_name = info.get("embedding_model", "")
+                    if isinstance(info, dict):
+                        stored_config = (
+                            self._prefer_verified_manifest_embedding_identity(
+                                project_dir,
+                                info,
+                            )
+                        )
                 except Exception:
                     pass
-        # Caller-supplied provider overrides anything stored
-        provider = provider or stored_provider
+        configuration = resolve_embedding_config(
+            provider=provider,
+            stored=stored_config,
+        )
+        embedder = CodeEmbedder(
+            cache_dir=str(cache_dir),
+            configuration=configuration,
+        )
+        logger.info(
+            "Embedder initialized: provider=%s, model=%s, dimension=%s",
+            embedder.configuration.provider,
+            embedder.configuration.model_name,
+            embedder.configuration.output_dimension,
+        )
+        return embedder
 
-        # Override env vars temporarily if project has stored config
-        env_overrides = {}
-        if provider:
-            env_overrides["EMBEDDING_PROVIDER"] = provider
-        if model_name:
-            env_overrides["EMBEDDING_MODEL"] = model_name
-
-        old_env = {}
-        for k, v in env_overrides.items():
-            old_env[k] = os.environ.get(k)
-            os.environ[k] = v
-
-        try:
-            embedder = CodeEmbedder(cache_dir=str(cache_dir))
-            logger.info(
-                f"Embedder initialized: provider={provider or 'default'}, model={model_name or 'default'}"
-            )
-            return embedder
-        finally:
-            for k, v in old_env.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+    @staticmethod
+    def _bind_effective_embedding_identity(
+        index_manager: CodeIndexManager,
+        embedder: CodeEmbedder,
+    ) -> str:
+        """Bind the exact embedder identity before any index publication."""
+        pipeline_version = get_pipeline_version(embedder.configuration)
+        index_manager.bind_embedding_configuration(
+            embedder.configuration,
+            pipeline_version=pipeline_version,
+        )
+        return pipeline_version
 
     @lru_cache(maxsize=1)
     def _maybe_start_model_preload(self) -> None:
@@ -1094,6 +1169,14 @@ class CodeSearchServer:
                 embedder = self.embedder(
                     project_path, provider=self._current_provider
                 )
+                pipeline_version = self._bind_effective_embedding_identity(
+                    index_manager,
+                    embedder,
+                )
+                ready_metadata = self._completed_index_metadata(
+                    pipeline_version,
+                    embedder.configuration,
+                )
                 chunker = MultiLanguageChunker(project_path)
                 ii = IncrementalIndexer(
                     indexer=index_manager, embedder=embedder, chunker=chunker
@@ -1104,6 +1187,7 @@ class CodeSearchServer:
                         project_path,
                         max_age_minutes=max_age_minutes,
                         publish_pending=True,
+                        ready_metadata=ready_metadata,
                     )
                 )
                 if mutated:
@@ -1172,6 +1256,59 @@ class CodeSearchServer:
         state explicitly should pass provider on every call OR use
         `switch_project` to set a new default.
         """
+        if not isinstance(query, str) or not query.strip():
+            return json.dumps(
+                {
+                    "error": {
+                        "code": "invalid_argument",
+                        "field": "query",
+                        "message": "query must contain non-whitespace text",
+                    }
+                }
+            )
+        if not isinstance(k, int) or isinstance(k, bool) or not 1 <= k <= MAX_SEARCH_RESULTS:
+            return json.dumps(
+                {
+                    "error": {
+                        "code": "invalid_argument",
+                        "field": "k",
+                        "message": (
+                            f"k must be between 1 and {MAX_SEARCH_RESULTS}"
+                        ),
+                    }
+                }
+            )
+        if search_mode not in VALID_SEARCH_MODES:
+            return json.dumps(
+                {
+                    "error": {
+                        "code": "invalid_argument",
+                        "field": "search_mode",
+                        "message": (
+                            "search_mode must be one of: "
+                            + ", ".join(sorted(VALID_SEARCH_MODES))
+                        ),
+                    }
+                }
+            )
+        if file_pattern is not None and (
+            not isinstance(file_pattern, str)
+            or not file_pattern.strip()
+            or "\x00" in file_pattern
+        ):
+            return json.dumps(
+                {
+                    "error": {
+                        "code": "invalid_argument",
+                        "field": "file_pattern",
+                        "message": (
+                            "file_pattern must be a non-empty glob without "
+                            "NUL bytes"
+                        ),
+                    }
+                }
+            )
+
         t_start = time.time()
         try:
             logger.info(
@@ -1248,6 +1385,14 @@ class CodeSearchServer:
                     embedder = self.embedder(
                         self._current_project, provider=self._current_provider
                     )
+                    pipeline_version = self._bind_effective_embedding_identity(
+                        index_manager,
+                        embedder,
+                    )
+                    ready_metadata = self._completed_index_metadata(
+                        pipeline_version,
+                        embedder.configuration,
+                    )
                     chunker = MultiLanguageChunker(self._current_project)
 
                     incremental_indexer = IncrementalIndexer(
@@ -1263,9 +1408,20 @@ class CodeSearchServer:
                         self._current_project,
                         max_age_minutes=max_age_minutes,
                         publish_pending=True,
+                        ready_metadata=ready_metadata,
                     )
 
-                    if reindex_mutated:
+                    if not bool(
+                        getattr(reindex_result, "success", True)
+                    ):
+                        logger.warning(
+                            "Auto-reindex failed; serving the last-good index: "
+                            "%s",
+                            getattr(reindex_result, "error", None)
+                            or "unknown error",
+                        )
+                        freshness = "stale_reindex_failed"
+                    elif reindex_mutated:
                         logger.info(
                             f"Auto-reindexed: {reindex_result.files_added} "
                             f"added, {reindex_result.files_modified} modified, "
@@ -1859,35 +2015,25 @@ class CodeSearchServer:
             try:
                 from search.incremental_indexer import IncrementalIndexer
 
-                # If provider is specified, temporarily override env for embedder
-                _old_provider = None
-                if provider:
-                    _old_provider = os.environ.get("EMBEDDING_PROVIDER")
-                    os.environ["EMBEDDING_PROVIDER"] = provider
+                # Reset cached manager/searcher so this index job gets a
+                # fresh manager bound to the provider-aware dir even if a
+                # previous run left one cached for a different provider.
+                self._index_manager = None
+                self._searcher = None
 
-                try:
-                    self._maybe_start_model_preload()
-
-                    # Reset cached manager/searcher so this index job gets a
-                    # fresh manager bound to the provider-aware dir even if a
-                    # previous run left one cached for a different provider.
-                    self._index_manager = None
-                    self._searcher = None
-
-                    index_manager = self.get_index_manager(
-                        str(directory_path_obj), provider=provider
+                index_manager = self.get_index_manager(
+                    str(directory_path_obj), provider=provider
+                )
+                embedder = self.embedder(
+                    str(directory_path_obj), provider=provider
+                )
+                current_pipeline_version = (
+                    self._bind_effective_embedding_identity(
+                        index_manager,
+                        embedder,
                     )
-                    embedder = self.embedder(
-                        str(directory_path_obj), provider=provider
-                    )
-                    chunker = MultiLanguageChunker(str(directory_path_obj))
-                finally:
-                    # Restore env even if setup fails
-                    if provider:
-                        if _old_provider is None:
-                            os.environ.pop("EMBEDDING_PROVIDER", None)
-                        else:
-                            os.environ["EMBEDDING_PROVIDER"] = _old_provider
+                )
+                chunker = MultiLanguageChunker(str(directory_path_obj))
 
                 # Phase A3 (2026-05-08): cancel_check propagates the
                 # _indexing_job["cancel_requested"] flag into the merkle
@@ -1922,7 +2068,6 @@ class CodeSearchServer:
                     str(directory_path_obj), provider=provider
                 )
                 info_file = project_dir / "project_info.json"
-                current_pipeline_version = get_pipeline_version()
                 if info_file.exists():
                     try:
                         with open(info_file, "r", encoding="utf-8") as f:
@@ -1982,6 +2127,7 @@ class CodeSearchServer:
                             completed_index_metadata = (
                                 self._completed_index_metadata(
                                     current_pipeline_version,
+                                    embedder.configuration,
                                 )
                             )
                         except Exception as metadata_exc:
@@ -3477,10 +3623,7 @@ class CodeSearchServer:
             file_chunks: list[dict] = []
             matched_path: Optional[str] = None
 
-            for chunk_id in index_manager._chunk_ids:
-                entry = index_manager.metadata_db.get(chunk_id)
-                if not entry:
-                    continue
+            for chunk_id, entry in index_manager.get_chunk_entries():
                 metadata = entry.get("metadata", {})
                 rel = metadata.get("relative_path") or metadata.get("file_path") or ""
                 rel_norm = rel.replace("\\", "/")

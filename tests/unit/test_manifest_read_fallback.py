@@ -115,6 +115,42 @@ def test_read_with_fallback_falls_back_to_prior_on_current_corruption(tmp_path):
     assert "current failed" in result.detail
 
 
+def test_read_with_fallback_uses_prior_when_current_json_is_malformed(
+    tmp_path,
+):
+    proj = tmp_path / "proj"
+    first = _commit_first(proj)
+    artifacts2 = _seed_artifacts(proj / "index2", chunk_count=4)
+    commit_manifest(proj, build_manifest(proj, artifacts2))
+    (proj / "manifest" / "current.json").write_text(
+        "{broken",
+        encoding="utf-8",
+    )
+
+    result = read_with_fallback(proj)
+    assert result.freshness == "stale_using_prior_epoch"
+    assert result.manifest is not None
+    assert result.manifest["epoch_id"] == first["epoch_id"]
+    assert "current.json unreadable" in result.detail
+
+
+def test_read_with_fallback_reports_malformed_prior_as_corrupt(tmp_path):
+    proj = tmp_path / "proj"
+    _commit_first(proj)
+    artifacts2 = _seed_artifacts(proj / "index2", chunk_count=4)
+    commit_manifest(proj, build_manifest(proj, artifacts2))
+    (proj / "index2" / "chunk_ids.pkl").write_bytes(b"corrupt")
+    (proj / "manifest" / "prior.json").write_text(
+        "{broken",
+        encoding="utf-8",
+    )
+
+    result = read_with_fallback(proj)
+    assert result.freshness == "corrupt"
+    assert result.manifest is None
+    assert "prior.json unreadable" in result.detail
+
+
 def test_read_with_fallback_uses_prior_when_current_missing(tmp_path):
     """current.json absent (e.g., crash between prior-promote and rename) but
     prior exists and verifies → returns prior with stale freshness."""

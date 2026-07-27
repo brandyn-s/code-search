@@ -125,8 +125,8 @@ def main():
         name="startup-audit",
         daemon=True,
     ).start()
-    mcp_server = CodeSearchMCP(server)
-    mcp_server.run(transport=args.transport, host=args.host, port=args.port)
+    mcp_server = CodeSearchMCP(server, host=args.host, port=args.port)
+    mcp_server.run(transport=args.transport)
 
 
 if __name__ == "__main__":
