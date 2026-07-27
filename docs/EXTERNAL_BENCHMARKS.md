@@ -92,11 +92,15 @@ Each `results_*.json` file contains:
 - per-query graded `ndcg@10` and binary `recall@10`; and
 - aggregate `external_metrics`.
 
-The manual `external-benchmarks` workflow runs the same command and uploads
-both the complete JSON results and human-readable logs as the `coir-metrics`
-artifact. Scoring fails closed on zero-query runs, missing or non-positive
-qrels, duplicate document IDs, or fewer than `k` unique ranked documents, so a
-green artifact cannot silently represent an incomplete measurement.
+The manual `external-benchmarks` workflow runs the same command and uploads the
+adapted golden/qrels files even when the credentialed evaluation is skipped.
+Credentialed runs also include the complete JSON results and human-readable
+logs in the `coir-metrics` artifact. The adapter retrieves complete qrels and
+corpus splits from manifest- and row-count-validated Parquet exports rather
+than scanning the paginated row API. Scoring fails closed on zero-query runs,
+missing or non-positive qrels, duplicate document IDs, or fewer than `k` unique
+ranked documents, so a green artifact cannot silently represent an incomplete
+measurement.
 `bench/research/ndcg.py` remains dependency-free and self-tested:
 `python bench/research/ndcg.py`.
 

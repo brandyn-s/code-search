@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -60,23 +62,107 @@ def test_coir_download_uses_full_corpus_and_complete_qrels(
         {"_id": f"d{i}", "text": f"relevant {i}", "language": "python"}
         for i in range(21)
     ] + [{"_id": "decoy", "text": "irrelevant", "language": "python"}]
-    calls = []
+    requested_json = []
+    requested_bytes = []
+    selected_calls = []
 
-    def fake_fetch(
+    def fake_request_json(url: str, label: str) -> dict:
+        requested_json.append((url, label))
+        if urllib.parse.urlparse(url).path == "/size":
+            return {
+                "partial": False,
+                "pending": [],
+                "failed": [],
+                "size": {
+                    "splits": [
+                        {
+                            "dataset": "CoIR-Retrieval/cosqa",
+                            "config": "default",
+                            "split": "test",
+                            "num_rows": len(qrel_rows),
+                        },
+                        {
+                            "dataset": "CoIR-Retrieval/cosqa",
+                            "config": "corpus",
+                            "split": "corpus",
+                            "num_rows": len(corpus_rows),
+                        },
+                    ]
+                },
+            }
+        return {
+            "partial": False,
+            "pending": [],
+            "failed": [],
+            "parquet_files": [
+                {
+                    "dataset": "CoIR-Retrieval/cosqa",
+                    "config": "default",
+                    "split": "test",
+                    "url": "https://huggingface.co/qrels.parquet",
+                    "filename": "qrels.parquet",
+                    "size": 5,
+                },
+                {
+                    "dataset": "CoIR-Retrieval/cosqa",
+                    "config": "corpus",
+                    "split": "corpus",
+                    "url": "https://huggingface.co/corpus.parquet",
+                    "filename": "corpus.parquet",
+                    "size": 6,
+                },
+            ],
+        }
+
+    def fake_request_bytes(url: str, label: str) -> bytes:
+        requested_bytes.append((url, label))
+        return {
+            "https://huggingface.co/qrels.parquet": b"qrels",
+            "https://huggingface.co/corpus.parquet": b"corpus",
+        }[url]
+
+    def fake_parse_parquet(payload: bytes, _label: str) -> list[dict]:
+        return {
+            b"qrels": qrel_rows,
+            b"corpus": corpus_rows,
+        }[payload]
+
+    def forbid_row_scan(*_args, **_kwargs):
+        pytest.fail("complete CoIR splits must use the Parquet export")
+
+    def fake_fetch_selected(
         _dataset: str,
         config: str,
         split: str,
-        limit: int | None = None,
+        column: str,
+        values: list[str],
     ) -> list[dict]:
-        calls.append((config, split, limit))
-        rows = {
-            "default": qrel_rows,
-            "queries": query_rows,
-            "corpus": corpus_rows,
-        }[config]
-        return list(rows if limit is None else rows[:limit])
+        selected_calls.append((config, split, column, values))
+        return list(query_rows)
 
-    monkeypatch.setattr(coir_adapter, "_fetch_rows", fake_fetch)
+    monkeypatch.setattr(coir_adapter, "_fetch_rows", forbid_row_scan)
+    monkeypatch.setattr(
+        coir_adapter,
+        "_request_json",
+        fake_request_json,
+    )
+    monkeypatch.setattr(
+        coir_adapter,
+        "_request_bytes",
+        fake_request_bytes,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        coir_adapter,
+        "_parse_parquet_rows",
+        fake_parse_parquet,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        coir_adapter,
+        "_fetch_selected_rows",
+        fake_fetch_selected,
+    )
 
     corpus_dir, _, qrels_path = coir_adapter.download(
         "CoIR-Retrieval/cosqa",
@@ -88,10 +174,18 @@ def test_coir_download_uses_full_corpus_and_complete_qrels(
     graded = json.loads(qrels_path.read_text(encoding="utf-8"))
     assert len(graded["q1"]) == 21
     assert (corpus_dir / "decoy.py").is_file()
-    assert calls == [
-        ("default", "test", None),
-        ("queries", "queries", None),
-        ("corpus", "corpus", None),
+    assert [label for _, label in requested_json] == [
+        "CoIR Parquet manifest",
+        "CoIR size manifest",
+        "CoIR Parquet manifest",
+        "CoIR size manifest",
+    ]
+    assert requested_bytes == [
+        ("https://huggingface.co/qrels.parquet", "default/test qrels.parquet"),
+        ("https://huggingface.co/corpus.parquet", "corpus/corpus corpus.parquet"),
+    ]
+    assert selected_calls == [
+        ("queries", "queries", "_id", ["q1"]),
     ]
 
 
@@ -137,6 +231,263 @@ def test_coir_fetch_fails_when_reported_split_is_incomplete(
 
     with pytest.raises(RuntimeError, match="incomplete corpus/corpus download"):
         coir_adapter._fetch_rows("example/dataset", "corpus", "corpus")
+
+
+def test_coir_fetch_retries_rate_limit_using_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    sleeps = []
+
+    def fake_urlopen(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise urllib.error.HTTPError(
+                "https://datasets-server.example/rows",
+                429,
+                "Too Many Requests",
+                {"Retry-After": "2"},
+                io.BytesIO(b"rate limited"),
+            )
+        return io.BytesIO(
+            json.dumps(
+                {
+                    "num_rows_total": 1,
+                    "rows": [{"row": {"_id": "q1"}}],
+                }
+            ).encode()
+        )
+
+    monkeypatch.setattr(
+        coir_adapter.urllib.request,
+        "urlopen",
+        fake_urlopen,
+    )
+    monkeypatch.setattr(coir_adapter.time, "sleep", sleeps.append)
+
+    rows = coir_adapter._fetch_rows(
+        "example/dataset",
+        "queries",
+        "queries",
+        limit=1,
+    )
+
+    assert rows == [{"_id": "q1"}]
+    assert attempts == 2
+    assert sleeps == [2.0]
+
+
+def test_coir_fetch_fails_closed_after_bounded_rate_limit_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    sleeps = []
+
+    def always_rate_limited(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise urllib.error.HTTPError(
+            "https://datasets-server.example/rows",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "0"},
+            io.BytesIO(b"rate limited"),
+        )
+
+    monkeypatch.setattr(
+        coir_adapter.urllib.request,
+        "urlopen",
+        always_rate_limited,
+    )
+    monkeypatch.setattr(coir_adapter.time, "sleep", sleeps.append)
+    monkeypatch.setattr(coir_adapter, "_MAX_REQUEST_ATTEMPTS", 3)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"queries/queries request failed with HTTP 429 after 3 attempts",
+    ):
+        coir_adapter._fetch_rows(
+            "example/dataset",
+            "queries",
+            "queries",
+            limit=1,
+        )
+
+    assert attempts == 3
+    assert sleeps == [0.0, 0.0]
+
+
+def test_coir_selected_query_fetch_is_encoded_and_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_urls = []
+
+    def fake_request(url: str, label: str) -> dict:
+        requested_urls.append((url, label))
+        return {
+            "partial": False,
+            "num_rows_total": 2,
+            "rows": [
+                {"row": {"_id": "q one", "text": "first"}},
+                {"row": {"_id": "q'two", "text": "second"}},
+            ],
+        }
+
+    monkeypatch.setattr(coir_adapter, "_request_json", fake_request)
+
+    rows = coir_adapter._fetch_selected_rows(
+        "example/dataset",
+        "queries",
+        "queries",
+        "_id",
+        ["q one", "q'two"],
+    )
+
+    assert [row["_id"] for row in rows] == ["q one", "q'two"]
+    assert len(requested_urls) == 1
+    url, label = requested_urls[0]
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    assert label == "queries/queries filtered rows"
+    assert query["dataset"] == ["example/dataset"]
+    assert query["where"] == [
+        '"_id"=\'q one\' OR "_id"=\'q\'\'two\'',
+    ]
+
+
+def test_coir_selected_query_fetch_rejects_partial_filter_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        coir_adapter,
+        "_request_json",
+        lambda *_args: {
+            "partial": True,
+            "num_rows_total": 1,
+            "rows": [{"row": {"_id": "q1"}}],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="filter returned partial results"):
+        coir_adapter._fetch_selected_rows(
+            "example/dataset",
+            "queries",
+            "queries",
+            "_id",
+            ["q1"],
+        )
+
+
+def test_coir_parquet_fetch_rejects_row_count_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_request_json(url: str, _label: str) -> dict:
+        path = urllib.parse.urlparse(url).path
+        if path == "/parquet":
+            return {
+                "partial": False,
+                "pending": [],
+                "failed": [],
+                "parquet_files": [
+                    {
+                        "dataset": "example/dataset",
+                        "config": "corpus",
+                        "split": "corpus",
+                        "url": "https://huggingface.co/corpus.parquet",
+                        "filename": "corpus.parquet",
+                        "size": 4,
+                    }
+                ],
+            }
+        assert path == "/size"
+        return {
+            "partial": False,
+            "pending": [],
+            "failed": [],
+            "size": {
+                "splits": [
+                    {
+                        "dataset": "example/dataset",
+                        "config": "corpus",
+                        "split": "corpus",
+                        "num_rows": 2,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(coir_adapter, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        coir_adapter,
+        "_request_bytes",
+        lambda *_args: b"data",
+    )
+    monkeypatch.setattr(
+        coir_adapter,
+        "_parse_parquet_rows",
+        lambda *_args: [{"_id": "only-row"}],
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"incomplete corpus/corpus Parquet export: expected 2 rows, received 1",
+    ):
+        coir_adapter._fetch_parquet_rows(
+            "example/dataset",
+            "corpus",
+            "corpus",
+        )
+
+
+def test_coir_parquet_fetch_rejects_untrusted_shard_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_request_json(url: str, _label: str) -> dict:
+        if urllib.parse.urlparse(url).path == "/parquet":
+            return {
+                "partial": False,
+                "pending": [],
+                "failed": [],
+                "parquet_files": [
+                    {
+                        "dataset": "example/dataset",
+                        "config": "corpus",
+                        "split": "corpus",
+                        "url": "https://attacker.example/corpus.parquet",
+                        "filename": "corpus.parquet",
+                        "size": 4,
+                    }
+                ],
+            }
+        return {
+            "partial": False,
+            "pending": [],
+            "failed": [],
+            "size": {
+                "splits": [
+                    {
+                        "dataset": "example/dataset",
+                        "config": "corpus",
+                        "split": "corpus",
+                        "num_rows": 1,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(coir_adapter, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        coir_adapter,
+        "_request_bytes",
+        lambda *_args: pytest.fail("untrusted URL must not be requested"),
+    )
+
+    with pytest.raises(RuntimeError, match="untrusted Parquet URL"):
+        coir_adapter._fetch_parquet_rows(
+            "example/dataset",
+            "corpus",
+            "corpus",
+        )
 
 
 def test_coir_adapter_preserves_query_ids_when_text_is_duplicated(tmp_path: Path) -> None:
@@ -279,3 +630,7 @@ def test_external_benchmark_workflow_persists_scored_rankings() -> None:
     assert "--unique-documents" in workflow
     assert "--k 10" in workflow
     assert "${{ runner.temp }}/results_*.json" in workflow
+    assert "python -m pip install pyarrow==25.0.0" in workflow
+    assert "${{ runner.temp }}/coir_task/golden.json" in workflow
+    assert "${{ runner.temp }}/coir_task/qrels_graded.json" in workflow
+    assert "if-no-files-found: error" in workflow

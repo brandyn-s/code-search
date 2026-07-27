@@ -45,7 +45,8 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
+          python -m pip install pyarrow==25.0.0
 
       - name: Adapt CoIR task (no key needed)
         env:
@@ -95,4 +96,6 @@ jobs:
           path: |
             ${{ runner.temp }}/metrics_*.txt
             ${{ runner.temp }}/results_*.json
-          if-no-files-found: warn
+            ${{ runner.temp }}/coir_task/golden.json
+            ${{ runner.temp }}/coir_task/qrels_graded.json
+          if-no-files-found: error
