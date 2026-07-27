@@ -17,7 +17,7 @@ from functools import lru_cache
 
 from common_utils import get_storage_dir
 from chunking.multi_language_chunker import MultiLanguageChunker
-from embeddings.embedder import CodeEmbedder
+from embeddings.embedder import CodeEmbedder, _resolve_provider_name
 from search.index_identity import (
     IdentityCaptureError,
     IndexIdentity,
@@ -124,6 +124,41 @@ def get_pipeline_version() -> str:
         f"grammars={_grammar_fingerprint()}",
     ]
     return hashlib.md5("|".join(sorted(components)).encode()).hexdigest()[:16]
+
+
+def _model_information(provider: str, model_name: str = "") -> Dict[str, str]:
+    """Describe the selected provider without constructing an embedder."""
+    default_models = {
+        "openai": "text-embedding-3-small",
+        "voyage": "voyage-4-large",
+        "voyage-code-3": "voyage-code-3",
+        "voyage-context": "voyage-context-3",
+        "jina": "jinaai/jina-code-embeddings-0.5b",
+        "jina-code": "jinaai/jina-code-embeddings-0.5b",
+        "local": "sentence-transformers/all-MiniLM-L6-v2",
+        "gemma": "google/embeddinggemma-300m",
+    }
+    if not model_name:
+        model_environment = (
+            "EMBEDDING_MODEL"
+            if provider
+            in {
+                "openai",
+                "voyage",
+                "voyage-code-3",
+                "voyage-context",
+            }
+            else "LOCAL_EMBEDDING_MODEL"
+        )
+        model_name = os.environ.get(
+            model_environment,
+            default_models.get(provider, "(unknown)"),
+        )
+    return {
+        "provider": provider,
+        "model_name": model_name,
+        "status": "configured",
+    }
 
 
 def _format_staleness_warning(age_seconds: float) -> str | None:
@@ -763,10 +798,14 @@ class CodeSearchServer:
         if not project_info_file.exists():
             # Auto-select embedding provider from CONTENT_MODE if not explicitly set
             content_mode = os.environ.get("CONTENT_MODE", "code").lower()
-            default_provider = "voyage-context" if content_mode == "docs" else "voyage"
-            effective_provider = provider or os.environ.get(
-                "EMBEDDING_PROVIDER", default_provider
-            )
+            effective_provider = provider or _resolve_provider_name()
+            if (
+                provider is None
+                and not os.environ.get("EMBEDDING_PROVIDER")
+                and content_mode == "docs"
+                and os.environ.get("VOYAGE_API_KEY")
+            ):
+                effective_provider = "voyage-context"
             project_info = {
                 "project_name": project_name,
                 "project_path": str(project_path_obj),
@@ -2385,27 +2424,13 @@ class CodeSearchServer:
         provider = (
             project_info.get("embedding_provider")
             or provider_hint
-            or os.environ.get("EMBEDDING_PROVIDER", "openai")
+            or _resolve_provider_name()
         )
-        model_name = project_info.get("embedding_model")
-        if not model_name:
-            model_name = (
-                os.environ.get(
-                    "EMBEDDING_MODEL",
-                    "text-embedding-3-small",
-                )
-                if provider == "openai"
-                else os.environ.get(
-                    "LOCAL_EMBEDDING_MODEL",
-                    "all-MiniLM-L6-v2",
-                )
-            )
         response["provider"] = provider
-        response["model_information"] = {
-            "provider": provider,
-            "model_name": model_name,
-            "status": "configured",
-        }
+        response["model_information"] = _model_information(
+            provider,
+            project_info.get("embedding_model", ""),
+        )
 
         identity = project_info.get("index_identity")
         response["index_identity_status"] = project_info.get(
@@ -2560,16 +2585,8 @@ class CodeSearchServer:
             stats = index_manager.get_stats()
 
             # Return model info without triggering API calls or heavy imports
-            provider = os.environ.get("EMBEDDING_PROVIDER", "openai")
-            model_info = {
-                "provider": provider,
-                "model_name": os.environ.get(
-                    "EMBEDDING_MODEL", "text-embedding-3-small"
-                )
-                if provider == "openai"
-                else os.environ.get("LOCAL_EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
-                "status": "configured",
-            }
+            provider = _resolve_provider_name()
+            model_info = _model_information(provider)
 
             response = {
                 "index_statistics": stats,
@@ -2587,6 +2604,12 @@ class CodeSearchServer:
                 try:
                     with open(info_file, encoding="utf-8") as handle:
                         project_info = json.load(handle)
+                    stored_provider = project_info.get("embedding_provider")
+                    if isinstance(stored_provider, str) and stored_provider:
+                        response["model_information"] = _model_information(
+                            stored_provider,
+                            project_info.get("embedding_model", ""),
+                        )
                     identity = project_info.get("index_identity")
                     response["index_identity_status"] = project_info.get(
                         "index_identity_status",

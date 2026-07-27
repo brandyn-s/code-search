@@ -51,8 +51,8 @@ def test_default_provider_is_voyage_context_when_voyage_key_present():
         assert info["provider"] == "openai"  # voyage provider uses OpenAIEmbeddingModel
 
 
-def test_default_provider_is_openai_when_only_openai_key_present():
-    """When no EMBEDDING_PROVIDER set and only OPENAI_API_KEY exists, default to openai."""
+def test_openai_key_alone_keeps_credential_free_local_default():
+    """An ambient OpenAI key must not opt source indexing into API egress."""
     env = os.environ.copy()
     env.pop("EMBEDDING_PROVIDER", None)
     env.pop("VOYAGE_API_KEY", None)
@@ -61,8 +61,7 @@ def test_default_provider_is_openai_when_only_openai_key_present():
         from embeddings.embedder import CodeEmbedder
 
         embedder = CodeEmbedder()
-        info = embedder.get_model_info()
-        assert info["provider"] == "openai"
+        assert embedder._provider == "local"
 
 
 def test_voyage_provider_selected_when_env_set():

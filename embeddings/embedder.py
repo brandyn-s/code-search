@@ -167,7 +167,9 @@ def _resolve_provider_name() -> str:
     """Resolve the active provider name from env + sensible fallbacks.
 
     Same precedence as pre-R12: explicit EMBEDDING_PROVIDER wins; otherwise
-    auto-detect by which API key is present; finally fall back to local.
+    auto-detect Voyage when its documented key is present; otherwise use the
+    credential-free local provider. OpenAI remains an explicit opt-in because
+    an ambient OPENAI_API_KEY must not silently enable source-code egress.
     """
     provider = os.environ.get("EMBEDDING_PROVIDER", "").strip().lower()
     if provider:
@@ -176,8 +178,6 @@ def _resolve_provider_name() -> str:
     # (102 queries, 2026-04-08) — auto-pick voyage when key is present.
     if os.environ.get("VOYAGE_API_KEY"):
         return "voyage"
-    if os.environ.get("OPENAI_API_KEY"):
-        return "openai"
     return "local"
 
 

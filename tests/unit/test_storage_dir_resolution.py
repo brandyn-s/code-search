@@ -97,6 +97,117 @@ def test_provider_none_no_sibling_uses_legacy_hash(
     assert resolved == legacy_dir
 
 
+@pytest.mark.parametrize("content_mode", ["code", "docs"])
+def test_provider_none_without_api_keys_records_local_provider(
+    temp_storage, tmp_path, monkeypatch, content_mode
+):
+    """A credential-free default must match CodeEmbedder's local fallback."""
+    from mcp_server.code_search_server import CodeSearchServer
+
+    monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("CONTENT_MODE", content_mode)
+    project_path = tmp_path / "credential-free-project"
+    project_path.mkdir()
+
+    server = CodeSearchServer()
+    project_dir = server.get_project_storage_dir(
+        str(project_path.resolve()), provider=None
+    )
+    project_info = json.loads(
+        (project_dir / "project_info.json").read_text(encoding="utf-8")
+    )
+
+    assert project_info["embedding_provider"] == "local"
+
+
+@pytest.mark.parametrize(
+    ("content_mode", "explicit_provider", "voyage_key", "openai_key", "expected"),
+    [
+        ("code", "openai", None, None, "openai"),
+        ("docs", "openai", "voyage", None, "openai"),
+        ("code", None, "voyage", None, "voyage"),
+        ("docs", None, "voyage", None, "voyage-context"),
+        ("code", None, None, "openai", "local"),
+        ("docs", None, None, "openai", "local"),
+        ("code", None, "voyage", "openai", "voyage"),
+        ("docs", None, "voyage", "openai", "voyage-context"),
+    ],
+)
+def test_new_project_provider_selection_matches_operator_contract(
+    temp_storage,
+    tmp_path,
+    monkeypatch,
+    content_mode,
+    explicit_provider,
+    voyage_key,
+    openai_key,
+    expected,
+):
+    from mcp_server.code_search_server import CodeSearchServer
+
+    for name, value in (
+        ("EMBEDDING_PROVIDER", explicit_provider),
+        ("VOYAGE_API_KEY", voyage_key),
+        ("OPENAI_API_KEY", openai_key),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CONTENT_MODE", content_mode)
+    project_path = tmp_path / "provider-contract-project"
+    project_path.mkdir()
+
+    server = CodeSearchServer()
+    project_dir = server.get_project_storage_dir(
+        str(project_path.resolve()), provider=None
+    )
+    project_info = json.loads(
+        (project_dir / "project_info.json").read_text(encoding="utf-8")
+    )
+
+    assert project_info["embedding_provider"] == expected
+
+
+def test_unqualified_status_reports_stored_project_provider(
+    temp_storage, tmp_path, monkeypatch
+):
+    from mcp_server.code_search_server import CodeSearchServer
+
+    for name in (
+        "EMBEDDING_PROVIDER",
+        "VOYAGE_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    project_path = tmp_path / "status-provider-project"
+    project_path.mkdir()
+    server = CodeSearchServer()
+    project_dir = server.get_project_storage_dir(
+        str(project_path.resolve()), provider=None
+    )
+    project_info = json.loads(
+        (project_dir / "project_info.json").read_text(encoding="utf-8")
+    )
+
+    class StubIndexManager:
+        def get_stats(self):
+            return {}
+
+    monkeypatch.setattr(
+        server, "get_index_manager", lambda *_args, **_kwargs: StubIndexManager()
+    )
+    server._current_project = str(project_path.resolve())
+    server._current_provider = None
+    status = json.loads(server.get_index_status())
+
+    assert status["model_information"]["provider"] == project_info[
+        "embedding_provider"
+    ]
+
+
 def test_provider_none_skips_unpopulated_sibling(
     temp_storage, tmp_path
 ):

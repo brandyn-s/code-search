@@ -127,11 +127,11 @@ class TestResolveProviderName:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         assert _resolve_provider_name() == "voyage"
 
-    def test_openai_key_autopicks_openai_when_no_voyage(self, monkeypatch):
+    def test_openai_key_does_not_override_local_default(self, monkeypatch):
         monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "fake")
-        assert _resolve_provider_name() == "openai"
+        assert _resolve_provider_name() == "local"
 
     def test_no_keys_falls_back_to_local(self, monkeypatch):
         for k in ("EMBEDDING_PROVIDER", "VOYAGE_API_KEY", "OPENAI_API_KEY"):
