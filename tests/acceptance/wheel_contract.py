@@ -7,6 +7,7 @@ CI invokes this file directly after installing the development dependencies.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -172,12 +173,22 @@ def _assert_fresh_install(wheel: Path, work_dir: Path) -> None:
     assert "Code Search MCP Server" in help_result.stdout
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--wheel",
+        type=Path,
+        help="Validate this exact pre-built wheel instead of building from source",
+    )
+    args = parser.parse_args(argv)
+
     _assert_pytest_contract()
     _assert_documented_source_cli()
     with tempfile.TemporaryDirectory(prefix="code-search-wheel-contract-") as raw:
         work_dir = Path(raw)
-        wheel = _build_wheel(work_dir)
+        wheel = args.wheel.resolve() if args.wheel else _build_wheel(work_dir)
+        if not wheel.is_file() or wheel.suffix != ".whl":
+            parser.error(f"--wheel must identify an existing .whl file: {wheel}")
         _assert_wheel_contents(wheel)
         _assert_fresh_install(wheel, work_dir)
     print("wheel contract: PASS")

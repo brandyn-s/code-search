@@ -353,6 +353,14 @@ code-graph's harness, not here.)
 
 ## P9 — Public benchmark anchor (Loc-Bench file-level)
 
+**2026-07-26 bounded foundation:** the shared evaluation worker now emits
+stable query-ID-keyed, unique document rankings and scores graded nDCG@k and
+Recall@k. The manual CoIR workflow persists those scored runs. This removes a
+worker-level prerequisite for public evaluation, but P9 remains **BLOCKED ON
+MEASUREMENT** until the reachable Loc-Bench lock and current-main baseline
+below are produced. See
+`docs/findings/2026-07-26-p9-ranked-list-ndcg-foundation.md`.
+
 **Evidence/motivation**: all our quality numbers live on private PSM fixtures;
 nothing is externally comparable. Cursor/GitHub/Voyage publish on private
 benches too — an anchor on a public set is a differentiator and keeps our

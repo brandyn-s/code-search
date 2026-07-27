@@ -1,5 +1,2 @@
-# Two-tier review: repo owner has final say, team provides security review.
-# Tier 1 (security-engineering-reviewers) participates via branch protection rules.
-# Tier 2 (security-engineering-approvers) is a required code owner.
-# Repo owner (@redacted-brandyn) — auto-detected as top contributor.
-* @redacted-brandyn @redacted-org/security-engineering-approvers
+# Repository owner has final review responsibility.
+* @redacted-brandyn

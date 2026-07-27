@@ -1,11 +1,12 @@
 # External benchmark runbook — CoIR & CodeRAG-Bench
 
-**Status (2026-05-30): BLOCKED ON MEASUREMENT.** code-search has never been
-evaluated on a public code-retrieval benchmark. Every headline number (MRR 0.828
-golden / 0.670 PSM-multitarget) is internal and not comparable to any
-leaderboard. This runbook is the procedure to produce *external, comparable*
-numbers so the embedding-provider and reranker choices have a defensible basis
-beyond a possibly-label-biased internal golden set (see
+**Status (2026-07-26): HARNESS READY; OUTCOME BLOCKED ON MEASUREMENT.**
+code-search has not yet produced a scored run on a public code-retrieval
+benchmark. Every headline number (MRR 0.828 golden / 0.670 PSM-multitarget) is
+internal and not comparable to any leaderboard. The manual workflow now emits
+query-ID-stable document rankings plus graded nDCG@10 and Recall@10 artifacts.
+It still needs a credentialed run before any provider-quality conclusion is
+supportable (see
 `docs/findings/2026-05-24-r9-extension-session-synthesis.md` and
 `docs/findings/2026-05-30-embedding-model-string-confirmation.md`).
 
@@ -49,43 +50,55 @@ python benchmarks/_eval_worker.py <config_json> <corpus_dir> <golden_path> <stor
 ```
 
 and consumes a corpus directory plus a golden file of
-`[{"query": str, "expected_files": [str, ...]}]`. Adapt each external task into
-that shape:
+`[{"query_id": str, "query": str, "expected_files": [str, ...]}]`. Adapt each
+external task into that shape:
 
-- `corpus_dir`: materialize the task's corpus as files (one file per corpus doc,
-  path = doc id). The chunker indexes them like any repo.
+- `corpus_dir`: materialize the task's **complete candidate corpus** as files
+  (one file per corpus doc, path = doc id). Restricting the corpus to judged
+  positives would make retrieval artificially easy and invalidate comparison.
 - `golden_path`: for each query, `expected_files` = the doc ids with qrel > 0.
 
-Keep the qrels' graded relevance alongside (CoIR has graded judgments) so Step 4
-can compute true nDCG@10 rather than the binary HR@k the worker emits.
+Fetch the complete qrels split before selecting the query subset, then keep
+each selected query's full graded relevance map keyed by `query_id` alongside
+the golden file. Truncated qrels change the ideal DCG denominator and invalidate
+nDCG@10.
 
 ## Step 3 — Run both providers (needs `VOYAGE_API_KEY`)
 
 ```bash
-for prov in "voyage:voyage-4-large" "voyage-code-3:voyage-code-3"; do
-  P="${prov%%:*}"; M="${prov##*:}"
-  cfg="{\"name\":\"$M\",\"provider\":\"$P\",\"model\":\"$M\",\"use_input_type\":true,\"use_reranker\":false,\"use_voyage_input_type\":true}"
-  python benchmarks/_eval_worker.py "$cfg" /path/to/coir_task_corpus /path/to/coir_task_golden.json /tmp/coir_$M
+for M in voyage-4-large voyage-code-3; do
+  cfg="{\"name\":\"$M\",\"provider\":\"voyage\",\"model\":\"$M\",\"use_input_type\":true,\"use_reranker\":false,\"needs_reindex\":true}"
+  EMBEDDING_PROVIDER=voyage EMBEDDING_MODEL="$M" VOYAGE_INPUT_TYPE=on RERANKER=off \
+    python benchmarks/_eval_worker.py \
+      "$cfg" \
+      /path/to/coir_task/corpus \
+      /path/to/coir_task/golden.json \
+      "/tmp/coir_$M" \
+      --k 10 \
+      --qrels /path/to/coir_task/qrels_graded.json \
+      --output "/tmp/results_$M.json" \
+      --unique-documents
 done
 ```
 
 Run rerank-off first (isolates the embedding model), then repeat with
 `RERANKER=sonnet` to measure the reranker's external lift.
 
-## Step 4 — Score with the comparable metric
+## Step 4 — Inspect the comparable metric
 
-The worker emits MRR/HR@k. For leaderboard comparability, capture the per-query
-ranked doc-id lists and feed them to `bench/research/ndcg.py`:
+Each `results_*.json` file contains:
 
-```python
-from bench.research.ndcg import ndcg_at_k, recall_at_k, aggregate
-per_query = [{"ndcg@10": ndcg_at_k(ranked, qrels, 10),
-              "recall@10": recall_at_k(ranked, [d for d,r in qrels.items() if r>0], 10)}
-             for ranked, qrels in runs]
-print(aggregate(per_query))
-```
+- the unique document ranking for every stable `query_id`;
+- per-query graded `ndcg@10` and binary `recall@10`; and
+- aggregate `external_metrics`.
 
-(`ndcg.py` is dependency-free and self-tested: `python bench/research/ndcg.py`.)
+The manual `external-benchmarks` workflow runs the same command and uploads
+both the complete JSON results and human-readable logs as the `coir-metrics`
+artifact. Scoring fails closed on zero-query runs, missing or non-positive
+qrels, duplicate document IDs, or fewer than `k` unique ranked documents, so a
+green artifact cannot silently represent an incomplete measurement.
+`bench/research/ndcg.py` remains dependency-free and self-tested:
+`python bench/research/ndcg.py`.
 
 ## Step 5 — Close per ship-discipline rule 10
 

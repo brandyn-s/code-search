@@ -270,18 +270,52 @@ This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, c
 
 ## Installation
 
-### 1. Clone and install dependencies
+### 1. Install the verified v0.2.0 release
+
+The release contains a wheel, its checksum manifest, and a signed GitHub
+artifact-attestation bundle. The commands below download and verify all three
+before installing the wheel:
+
+```bash
+REPO="redacted-org/code-search"
+TAG="v0.2.0"
+WHEEL="redacted_code_search-0.2.0-py3-none-any.whl"
+BUNDLE="redacted_code_search-0.2.0-provenance.jsonl"
+
+mkdir code-search-v0.2.0
+cd code-search-v0.2.0
+gh release download "$TAG" --repo "$REPO"
+
+# Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)
+sha256sum --check SHA256SUMS
+
+RELEASE_SHA="$(
+  gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha'
+)"
+gh attestation verify "$WHEEL" \
+  --bundle "$BUNDLE" \
+  --deny-self-hosted-runners \
+  --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" \
+  --source-ref "refs/heads/main" \
+  --source-digest "$RELEASE_SHA"
+gh release verify "$TAG" --repo "$REPO"
+gh release verify-asset "$TAG" "$WHEEL" --repo "$REPO"
+gh release verify-asset "$TAG" SHA256SUMS --repo "$REPO"
+gh release verify-asset "$TAG" "$BUNDLE" --repo "$REPO"
+
+python3 -m venv .venv
+.venv/bin/python -m pip install "$WHEEL"
+```
+
+This path requires Python 3.12 or newer and the
+[GitHub CLI](https://cli.github.com/). For a source checkout used in
+development, install the current checkout without changing another clone:
 
 ```bash
 git clone https://github.com/redacted-org/code-search.git
 cd code-search
-python -m venv .venv
-
-# Linux/Mac
-.venv/bin/pip install -r requirements.txt
-
-# Windows
-.venv\Scripts\pip install -r requirements.txt
+./scripts/install.sh
 ```
 
 ### 2. Configure Claude Code
