@@ -83,7 +83,12 @@ def test_failed_faiss_writes_preserve_committed_generation(
         raise OSError("simulated disk failure")
 
     monkeypatch.setattr(faiss, "write_index", fail_write)
-    monkeypatch.setattr(faiss, "index_gpu_to_cpu", lambda index: index)
+    monkeypatch.setattr(
+        faiss,
+        "index_gpu_to_cpu",
+        lambda index: index,
+        raising=False,
+    )
 
     with pytest.raises(OSError, match="simulated disk failure"):
         manager.save_index()
@@ -132,7 +137,10 @@ def test_cpu_faiss_write_retry_does_not_require_gpu_conversion(
 
     monkeypatch.setattr(faiss, "write_index", fail_write)
     monkeypatch.setattr(
-        faiss, "index_gpu_to_cpu", reject_gpu_conversion
+        faiss,
+        "index_gpu_to_cpu",
+        reject_gpu_conversion,
+        raising=False,
     )
 
     with pytest.raises(OSError, match="CPU write failure"):
@@ -552,7 +560,12 @@ def test_first_publication_failure_leaves_clean_empty_state(
         raise OSError("simulated first-save failure")
 
     monkeypatch.setattr(faiss, "write_index", fail_write)
-    monkeypatch.setattr(faiss, "index_gpu_to_cpu", lambda index: index)
+    monkeypatch.setattr(
+        faiss,
+        "index_gpu_to_cpu",
+        lambda index: index,
+        raising=False,
+    )
     with pytest.raises(OSError, match="first-save failure"):
         manager.save_index()
     _close(manager)
