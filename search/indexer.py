@@ -10,6 +10,10 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import faiss
 from search.metadata_store import JsonSqliteKV, LegacyMetadataFormatError
+from search.logging_privacy import (
+    format_query_exception_for_log,
+    format_query_for_log,
+)
 from embeddings.embedder import EmbeddingResult
 
 
@@ -298,7 +302,11 @@ class CodeIndexManager:
                     break
             return results
         except Exception as e:
-            self._logger.warning(f"FTS5 search failed for '{fts_query}': {e}")
+            self._logger.warning(
+                "FTS5 search failed for %s: %s",
+                format_query_for_log(fts_query, label="fts_query"),
+                format_query_exception_for_log(e),
+            )
             return []
 
     @property

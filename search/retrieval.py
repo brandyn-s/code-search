@@ -1,0 +1,140 @@
+"""Candidate retrieval, rank fusion, and deterministic hybrid boosts."""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from search.result_models import SearchResult
+
+
+@dataclass
+class HybridRetrieval:
+    """Post-retrieval state consumed by the optional ranking pipeline."""
+
+    candidates: list[SearchResult]
+    metadata_lookup: dict[str, dict[str, Any]]
+
+
+def retrieve_hybrid_candidates(
+    searcher: Any,
+    query: str,
+    *,
+    k: int,
+    context_depth: int,
+    filters: dict[str, Any] | None,
+    config: Any,
+    chunk_type_boosts: Mapping[str, Mapping[str, float]],
+    expand_query: Callable[[str], str],
+    fuse_results: Callable[..., list[tuple[str, float]]],
+) -> HybridRetrieval:
+    """Retrieve, fuse, materialize, boost, and sort hybrid candidates."""
+    from search.config import resolve_hybrid_weights
+
+    candidate_k = 50
+    vector_weight, bm25_weight = resolve_hybrid_weights(config)
+
+    optimized_query = searcher._optimize_query(query)
+    query_embedding = searcher._get_query_embedding(optimized_query)
+    vector_raw = searcher.index_manager.search(
+        query_embedding,
+        candidate_k,
+        filters,
+    )
+    vector_pairs = [
+        (chunk_id, similarity)
+        for chunk_id, similarity, _metadata in vector_raw
+    ]
+
+    # Preserve the established order: optional LLM rewrite first, static
+    # expansion second, then BM25 retrieval.
+    bm25_query = query
+    if config.bm25_rewrite:
+        from search.query_rewriter import rewrite_query_for_bm25
+
+        bm25_query = rewrite_query_for_bm25(query)
+    if config.query_expansion:
+        bm25_query = expand_query(bm25_query)
+    bm25_raw = searcher.index_manager.search_bm25(
+        bm25_query,
+        k=candidate_k,
+        filters=filters,
+    )
+    bm25_pairs = [
+        (chunk_id, rank)
+        for chunk_id, rank, _metadata in bm25_raw
+    ]
+
+    fused = fuse_results(
+        vector_pairs,
+        bm25_pairs,
+        k=config.fusion_k,
+        vector_weight=vector_weight,
+        bm25_weight=bm25_weight,
+    )
+
+    metadata_lookup: dict[str, dict[str, Any]] = {}
+    for chunk_id, _similarity, metadata in vector_raw:
+        metadata_lookup[chunk_id] = metadata
+    for chunk_id, _rank, metadata in bm25_raw:
+        if chunk_id not in metadata_lookup:
+            metadata_lookup[chunk_id] = metadata
+
+    over_fetch = min(k * 3, len(fused))
+    candidates: list[SearchResult] = []
+    for chunk_id, rrf_score in fused[:over_fetch]:
+        metadata = metadata_lookup.get(chunk_id)
+        if metadata:
+            candidates.append(
+                searcher._create_search_result(
+                    chunk_id,
+                    rrf_score,
+                    metadata,
+                    context_depth,
+                )
+            )
+
+    # Deployment overrides layer on the current module-level policy passed by
+    # searcher.py. Passing the mapping preserves the legacy
+    # search.searcher.CHUNK_TYPE_BOOSTS monkey-patch seam.
+    boosts = dict(chunk_type_boosts.get(config.content_mode, {}))
+    override_raw = os.environ.get("CHUNK_TYPE_BOOST_OVERRIDE")
+    if override_raw:
+        try:
+            override = json.loads(override_raw)
+            if isinstance(override, dict):
+                for chunk_type_key, boost_value in override.items():
+                    boosts[chunk_type_key] = float(boost_value)
+        except (ValueError, TypeError):
+            pass
+
+    query_tokens = searcher._normalize_to_tokens(query.lower())
+    for result in candidates:
+        if boosts:
+            result.similarity_score *= boosts.get(result.chunk_type, 1.0)
+
+        name_boost = searcher._calculate_name_boost(
+            result.name,
+            query,
+            query_tokens,
+        )
+        if name_boost > 1.0:
+            name_boost = 1.0 + (name_boost - 1.0) * 2.0
+        result.similarity_score *= name_boost
+
+        path_boost = searcher._calculate_path_boost(
+            result.relative_path,
+            query_tokens,
+        )
+        if path_boost > 1.0:
+            path_boost = 1.0 + (path_boost - 1.0) * 3.0
+        result.similarity_score *= path_boost
+
+    candidates.sort(key=lambda result: result.similarity_score, reverse=True)
+    return HybridRetrieval(
+        candidates=candidates,
+        metadata_lookup=metadata_lookup,
+    )

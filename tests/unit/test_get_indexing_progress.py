@@ -25,6 +25,7 @@ def test_idle_when_nothing_running(server):
     """No foreground job + no background reindex → idle."""
     out = json.loads(server.get_indexing_progress())
     assert out["status"] == "idle"
+    assert out["index_ready"] is False
     assert out["background_reindex_active"] is False
 
 
@@ -33,6 +34,7 @@ def test_background_reindex_active_when_only_bg_running(server):
     server._background_reindex_active = True
     out = json.loads(server.get_indexing_progress())
     assert out["status"] == "background_reindex_active"
+    assert out["index_ready"] is False
     assert out["background_reindex_active"] is True
     assert "freshness=stale_reindex_in_progress" in out["message"]
 
@@ -52,6 +54,7 @@ def test_indexing_status_when_foreground_job_running(server):
     }
     out = json.loads(server.get_indexing_progress())
     assert out["status"] == "indexing"
+    assert out["index_ready"] is False
     assert out["job_id"] == "abc123"
     assert out["phase"] == "embedding"
     assert out["chunks_done"] == 50
@@ -94,9 +97,11 @@ def test_completed_job_includes_result(server):
         "project_name": "x",
         "errors": [],
         "result": {"chunks_indexed": 100, "elapsed_seconds": 30},
+        "index_ready": True,
     }
     out = json.loads(server.get_indexing_progress())
     assert out["status"] == "completed"
+    assert out["index_ready"] is True
     assert out["result"] == {"chunks_indexed": 100, "elapsed_seconds": 30}
 
 
@@ -114,6 +119,7 @@ def test_failed_job_includes_result(server):
     }
     out = json.loads(server.get_indexing_progress())
     assert out["status"] == "failed"
+    assert out["index_ready"] is False
     assert out["result"] == {"errors": ["api error"]}
 
 
@@ -145,3 +151,39 @@ def test_total_zero_omits_percent_field(server):
     assert "chunks_done" not in out
     assert "chunks_total" not in out
     assert out["status"] == "indexing"
+
+
+@pytest.mark.parametrize(
+    "status",
+    ("indexing", "completed", "failed", "cancelled"),
+)
+def test_foreground_progress_preserves_provider_storage_target(
+    server,
+    status,
+):
+    terminal = status != "indexing"
+    server._indexing_job = {
+        "job_id": "bound-job",
+        "status": status,
+        "phase": "done" if terminal else "embedding",
+        "current": 2,
+        "total": 3,
+        "directory": "/source/repo",
+        "project_name": "repo",
+        "provider": "voyage-context",
+        "storage_target": "/storage/repo_provider_hash",
+        "errors": [],
+        "result": {"success": status == "completed"} if terminal else None,
+        "index_ready": status == "completed",
+    }
+
+    out = json.loads(server.get_indexing_progress())
+
+    assert out["provider"] == "voyage-context"
+    assert out["storage_target"] == "/storage/repo_provider_hash"
+    if terminal:
+        assert out["result"]["provider"] == "voyage-context"
+        assert (
+            out["result"]["storage_target"]
+            == "/storage/repo_provider_hash"
+        )

@@ -46,7 +46,8 @@ See also: `docs/EVAL_RUNBOOK.md` (how to run paired-bootstrap CI).
 
 - **Embedding providers**: Voyage AI (`voyage-4-large` default — +0.053 weighted avg MRR over `voyage-context-3` across 4 langs), `voyage-code-3` (available, non-default — wins on TypeScript, regresses on Nix vs voyage-4-large per 2026-05-15 A/B; see `docs/findings/`), `voyage-context-3` legacy, OpenAI, local sentence-transformers
 - **Search**: Weighted RRF fusion of FAISS vector + FTS5 BM25. Content mode boosts (code: function/method 1.3x, docs: section 1.3x)
-- **Chunking**: Tree-sitter AST for 12+ languages, regex-based for TOML/YAML/HCL/Markdown/Nix. Post-processing merge step (cAST-style) greedily combines small adjacent chunks to 1500 NWS char budget, capturing gap code (imports, constants) between semantic units.
+- **Search policy modules**: `search/fusion.py` owns RRF and chunk boosts; `search/query_expansion.py` owns synonym profiles and BM25 expansion; `search/result_models.py` owns the result data model; `search/retrieval.py` owns vector/BM25 retrieval, fusion, and deterministic boosts; `search/pipeline.py` owns optional PPR and reranker stages. `search/searcher.py` orchestrates them and retains compatibility exports.
+- **Chunking**: Tree-sitter AST for 12+ languages, regex-based for TOML/YAML/HCL/Markdown/Nix. Post-processing merge step (cAST-style) greedily combines small adjacent chunks to 2500 NWS char budget, capturing gap code (imports, constants) between semantic units.
 - **Per-project config**: `project_info.json` stores embedding provider, model, content mode. Server creates correct embedder on project switch.
 - **Contextual headers**: `# From <path> - <type> <name>` prepended before embedding (controlled by `CONTEXTUAL_HEADERS=on`)
 
@@ -76,11 +77,19 @@ per-cohort prompt/threshold overrides, latency-diag logging, `LLM_CONTEXT_PATH`,
 | `CONTENT_MODE` | `code` | `code` or `docs` — affects search weights and provider auto-select |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend `# From <path>` context headers before embedding |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
+| `CODE_SYNONYM_PROFILE` | `corsair` | Built-in synonym profile: `corsair`, `generic`, or `off`. Keep `corsair` as the default until comparative measurement supports a switch. |
+| `CODE_SYNONYMS_PATH` | `unset` | Optional JSON synonym overlay applied after the selected profile |
+| `CODE_SEARCH_LOG_LEVEL` | `INFO` | Minimum code-search log level |
+| `CODE_SEARCH_LOG_QUERY_TEXT` | `off` | Opt in to raw query text in logs; default off preserves query privacy |
+| `CODE_SEARCH_QUERY_HISTORY` | `metadata` | `off`, `metadata`, or `full`; metadata mode excludes raw query text |
+| `CODE_SEARCH_QUERY_RETENTION_DAYS` | `30` | Query-history retention window in days |
 | `RERANKER` | `sonnet` | `sonnet` (pointwise, default), `listwise`, `cross-encoder` (legacy), `off`. Graceful fallback to hybrid order on any error (reason recorded in `_metadata`). Full knob set + eval history in ENV_REFERENCE. |
 | `QUANTIZATION` | `int8` | `int8` (QT_8bit trained, 4x smaller), `float32` (legacy), `binary` (32x smaller, 100K+ chunks). **Gotcha**: must be QT_8bit, NOT QT_8bit_direct (silently returns 0.0 sims — reindex anything built pre-2026-04-05). |
 | `VOYAGE_BATCH_API` | `off` | `on` for 33% cheaper async embedding on full reindex (1000+ chunks) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |
 | `CODE_SEARCH_DISABLE_AUTO_REINDEX` | unset | `1`/`true`/`yes`/`on` makes `auto_reindex_if_needed` a no-op (large projects); refresh on demand via `index_directory(incremental=false)` |
+
+These settings are process-static: they are read once when the MCP server starts. Restart the MCP server after changing them.
 
 ## Search Response Metadata
 
@@ -138,7 +147,8 @@ weighted avg MRR over `voyage-context-3` across 4 languages (per-language eval
 table and full provider comparison in
 [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md)). Pipeline: tree-sitter AST
 chunks → contextual headers → Voyage embeddings → FAISS (int8) + BM25 →
-weighted RRF (50/50) → chunk-type boosts → optional Sonnet rerank. Voyage
+weighted RRF using code 65/35, docs 70/30, all 50/50 (vector/BM25) →
+chunk-type boosts → optional Sonnet rerank. Voyage
 rerank-2.5 degrades quality (−30% MRR) and is disabled; the reranking layer is
 Sonnet (see `RERANKER`).
 

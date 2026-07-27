@@ -1,29 +1,18 @@
 """FastMCP server for Claude Code integration - main entry point."""
 import json
 import os
-import sys
 import threading
-from pathlib import Path
-
-# Add the parent directory to the path so we can import our modules
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from typing import TYPE_CHECKING
 
 import logging
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
-logging.getLogger("mcp").setLevel(logging.DEBUG)
-logging.getLogger("fastmcp").setLevel(logging.DEBUG)
 
-from mcp_server.code_search_server import CodeSearchServer
-from mcp_server.code_search_mcp import CodeSearchMCP
+if TYPE_CHECKING:
+    from mcp_server.code_search_server import CodeSearchServer
 
 
-def _run_startup_integrity_audit(server: CodeSearchServer) -> None:
+def _run_startup_integrity_audit(server: "CodeSearchServer") -> None:
     """Run verify_index_integrity on startup; log the summary.
 
     Detects ghost projects, orphan rows, stats drift, and corrupt manifests
@@ -94,6 +83,9 @@ def _run_startup_integrity_audit(server: CodeSearchServer) -> None:
 def main():
     """Main entry point for the server."""
     import argparse
+    from mcp_server.logging_config import configure_first_party_logging
+
+    configure_first_party_logging()
 
     parser = argparse.ArgumentParser(description="Code Search MCP Server")
     parser.add_argument(
@@ -115,6 +107,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Keep imports behind argument parsing so the installed console script can
+    # answer --help before loading the heavyweight runtime dependency graph.
+    # Normal startup still imports the same server and registration classes.
+    from mcp_server.code_search_server import CodeSearchServer
+    from mcp_server.code_search_mcp import CodeSearchMCP
 
     # Create and run server
     server = CodeSearchServer()

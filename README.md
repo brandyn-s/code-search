@@ -37,36 +37,13 @@ flowchart LR
 ```
 
 
-```mermaid
-flowchart LR
-    subgraph Chunk["1. Chunk"]
-        A[Source Files] --> B[Tree-Sitter AST]
-        B --> C[Semantic Boundaries]
-        C --> D[Merge Small Chunks]
-    end
-    subgraph Embed["2. Embed"]
-        D --> E[Contextual Headers]
-        E --> F[Voyage AI voyage-4-large]
-        F --> G[FAISS int8 Index]
-    end
-    subgraph Search["3. Search"]
-        H[Query] --> I[Vector Search]
-        H --> J[BM25 Keyword]
-        I --> K[RRF Fusion]
-        J --> K
-        K --> L[Type Boost]
-        L --> M[Ranked Results]
-    end
-```
-
-
 ### 1. Chunking (Tree-Sitter AST)
 
 Source files are parsed into Abstract Syntax Trees using tree-sitter, then split at semantic boundaries — function definitions, class declarations, module sections. This means a search result is always a complete logical unit (a full function, a full class), never a random 500-character window that starts mid-expression.
 
 **18 languages supported**: Python, JavaScript, TypeScript, JSX, TSX, Go, Rust, Java, C, C++, C#, Svelte, plus regex-based chunking for Markdown, TOML, YAML, HCL, Nix, and configuration files.
 
-**Chunk merging** (inspired by the cAST paper, CMU 2025): After AST splitting, a post-processing pass greedily merges adjacent small chunks up to a 1,500 non-whitespace character budget. This captures gap code — imports, constants, and comments that fall between semantic units — and prevents sub-100-token chunks that degrade embedding quality by 6-16% (Ekimetrics 2026 benchmark). The merge uses non-whitespace character count rather than line count because a 50-line file of blank lines and a 50-line file of dense code are not equivalent.
+**Chunk merging** (inspired by the cAST paper, CMU 2025): After AST splitting, a post-processing pass greedily merges adjacent small chunks up to a 2,500 non-whitespace character budget. This captures gap code — imports, constants, and comments that fall between semantic units — and prevents sub-100-token chunks that degrade embedding quality by 6-16% (Ekimetrics 2026 benchmark). The merge uses non-whitespace character count rather than line count because a 50-line file of blank lines and a 50-line file of dense code are not equivalent.
 
 **Contextual headers**: Before embedding, each chunk gets a header prepended: `# From <filepath> - <type> <name>`. This gives the embedding model critical context about what the chunk *is* (a function named `authenticate` in `auth/handlers.py`), improving retrieval accuracy by connecting the code content to its structural role. Adds +9.6% MRR on Nix files when combined with enriched sibling context.
 
@@ -85,11 +62,11 @@ Four embedding providers are available:
 
 ¹ `voyage-code-3` aggregate A/B vs voyage-4-large: CI includes zero (PSM-full, n=102 golden + 183 harvested, rerank=off, 2026-05-15). Per-subproject: wins on TypeScript/mithrandir (+0.119 MRR, CI excludes zero), regresses on Nix (-0.091 MRR, CI excludes zero). Use for TypeScript-heavy corpora. See `docs/findings/2026-05-15-voyage-code-3-ab-finding.md`.
 
-MRR (Mean Reciprocal Rank) is measured on 102 golden queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo. A score of 0.828 means the correct answer is almost always the #1 result.
+MRR (Mean Reciprocal Rank) was measured on 102 golden queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo. MRR aggregates reciprocal rank across queries; it does not by itself determine top-result accuracy, a typical rank, or the probability that any one query succeeds.
 
-> **Note (2026-05-14 multitarget baseline)**: The 0.828 figure above is the Voyage-only MRR measured 2026-04-26 on the original 102-query golden set. The current production stack adds a Sonnet 4.6 reranker (see "Reranking" below) and the most recent PSM multitarget eval reports golden MRR=0.670 / HR@1=0.569 and harvested real-session MRR=0.814 / HR@1=0.770 on a broader, harder query mix. See [benchmarks/eval_v4/run_psm-full-voyage-multitarget/summary.json](benchmarks/eval_v4/run_psm-full-voyage-multitarget/summary.json) and `CLAUDE.md` for the defended current numbers.
+> **Historical baseline (2026-04-26)**: The 0.828 Voyage-only MRR below comes from the original 102-query golden set and its recorded configuration. These are historical evaluation results, not current production guarantees. Current-stack retrieval quality is **BLOCKED ON MEASUREMENT** until that evaluation is rerun against the current code and configuration.
 
-**Why Voyage over local models?** The quality gap is enormous. Local sentence-transformers (all-MiniLM-L6-v2) score 0.35-0.45 MRR — the right answer is typically at position #3-5. Voyage-4-large scores 0.828 — position #1 almost every time. For an AI assistant consuming results in a token-limited context window, the difference between "right answer at #1" and "right answer at #4" means 3-4x fewer wasted tokens per query.
+**Why offer Voyage and local models?** The historical evaluations below measured higher aggregate reciprocal-rank performance for Voyage than for the local sentence-transformer baseline. Treat that as dated comparative evidence, not a current top-result probability or token-savings guarantee.
 
 **Reranking.** The current default is **Sonnet 4.6 pointwise reranking** with the R9 Nix-aware clause (`RERANKER=sonnet`, validated +0.087 MRR / +0.137 HR@1 on n=183 multi-target real_session, see `CLAUDE.md`). Reranks top-15 hybrid candidates via Anthropic API with always-on graceful fallback to hybrid order. PR #199 briefly flipped the default to listwise on 2026-05-23 citing Phase C v2 bootstrap CI, but the rule-9 re-eval on current main (post-R9 pointwise) showed listwise harvested MRR delta −0.0456 CI [−0.0891, −0.0024] excludes zero unfavorable — the default was reverted the same day. Listwise (`RERANKER=listwise`) remains selectable for callers wanting the single-call latency profile. See `docs/findings/2026-05-23-listwise-default-eval-finding.md` for the eval narrative. The earlier "cross-encoder rerank (rerank-2.5) degrades quality by -30% MRR" finding still holds and is preserved as the off-by-default `RERANKER=cross-encoder` legacy path; `RERANKER=off` skips reranking entirely.
 
@@ -101,7 +78,7 @@ Queries run through two parallel search paths:
 
 2. **BM25 keyword search**: SQLite FTS5 full-text search finds exact keyword matches. This handles cases where you know the exact name — `validate_jwt_token` — and want direct string matching.
 
-3. **Reciprocal Rank Fusion (RRF)**: Both result lists are fused using weighted RRF (50/50 for code, 70/30 vector-heavy for docs). RRF combines the *rankings* from both systems rather than raw scores, which is robust to score scale differences between vector similarity and BM25 TF-IDF.
+3. **Reciprocal Rank Fusion (RRF)**: Both result lists are fused using content-specific weights: code 65/35, docs 70/30, all 50/50 (vector/BM25). RRF combines the *rankings* from both systems rather than raw scores, which is robust to score scale differences between vector similarity and BM25 TF-IDF.
 
 4. **Chunk type boosting**: After fusion, results are boosted by type — functions and methods get 1.3x in code mode, sections and documents get 1.3x in docs mode. This ensures that searching for "authentication" surfaces the `authenticate()` function over the `# Authentication` markdown section when searching code.
 
@@ -111,9 +88,9 @@ Queries run through two parallel search paths:
 
 After initial indexing, only changed files are re-embedded. A Merkle DAG (directed acyclic graph) tracks content hashes for every file and directory. On re-index, the tree is diffed against the stored snapshot — only files whose hashes changed get re-chunked and re-embedded. For a 3,000-chunk repo where 5 files changed, this means re-embedding ~20 chunks instead of 3,000, completing in seconds instead of minutes.
 
-## Benchmarks
+## Historical Benchmarks
 
-Quality was measured using golden test sets — hand-verified query-to-expected-file mappings across 4 language sub-projects from a production monorepo:
+These recorded results used golden test sets — hand-verified query-to-expected-file mappings across 4 language sub-projects from a production monorepo. They describe their dated evaluation configurations, not the current production stack:
 
 | Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) | Weighted Avg |
 |----------|-------|:---:|:---:|:---:|:---:|:---:|
@@ -128,8 +105,8 @@ Quality was measured using golden test sets — hand-verified query-to-expected-
 
 ### What the numbers mean
 
-- **0.828 MRR**: The correct file is typically the #1 result. A developer (or AI agent) reading just the top result gets the right answer 83% of the time.
-- **0.42 MRR**: The correct file is typically at position #3-5. The agent must read 3-5 results to find the right one, consuming 3-5x more context tokens.
+- **0.828 MRR**: On that evaluation set, the arithmetic mean of reciprocal relevant-result ranks was 0.828.
+- **0.42 MRR**: On its evaluation set, the arithmetic mean of reciprocal relevant-result ranks was 0.42. Compare MRR values only when the query set, relevance labels, and retrieval configuration are compatible.
 - **The Nix gap**: Nix has unusual syntax (`mkOption`, `mkEnableOption`, `imports = [...]`) that generic models struggle with. Contextual headers and domain synonym expansion were specifically added to close this gap — Nix MRR improved from 0.72 to 0.826 with these features.
 
 ### Indexing performance
@@ -375,9 +352,17 @@ mcp__code-search__search_code(query="authentication middleware")
 | `CONTEXTUAL_HEADERS` | `on` | Prepend structural context headers before embedding |
 | `ENRICHED_CONTEXT` | `on` (jina/local), `off` (voyage-context) | Include sibling chunk names in headers (+9.6% MRR on Nix) |
 | `QUERY_EXPANSION` | `on` | Expand queries with domain-specific synonyms before BM25 |
+| `CODE_SYNONYM_PROFILE` | `corsair` | Built-in synonym profile: `corsair`, `generic`, or `off`. The default remains `corsair` pending comparative measurement. |
+| `CODE_SYNONYMS_PATH` | `unset` | Optional path to a JSON synonym overlay applied after the selected built-in profile |
+| `CODE_SEARCH_LOG_LEVEL` | `INFO` | Minimum code-search log level |
+| `CODE_SEARCH_LOG_QUERY_TEXT` | `off` | Opt in to raw query text in logs; the default avoids logging query text |
+| `CODE_SEARCH_QUERY_HISTORY` | `metadata` | Query-history mode: `off`, `metadata`, or `full`; metadata mode excludes raw query text |
+| `CODE_SEARCH_QUERY_RETENTION_DAYS` | `30` | Retain query-history records for this many days |
 | `QUANTIZATION` | `int8` | FAISS index type: `int8` (4x smaller), `float32`, `binary` (32x smaller) |
 | `VOYAGE_BATCH_API` | `off` | Use Voyage Batch API for full reindexes (33% cheaper, 1000+ chunks) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory for all indexes |
+
+These settings are process-static: they are read once when the MCP server starts. Restart the MCP server after changing them.
 
 ## Architecture
 
@@ -385,7 +370,7 @@ mcp__code-search__search_code(query="authentication middleware")
 code-search/
 ├── chunking/                       # Multi-language AST chunking (18 file types)
 │   ├── tree_sitter.py              # Tree-sitter grammar loading and AST parsing
-│   ├── chunk_merging.py            # cAST-style post-processing merge (400-1500 NWS budget)
+│   ├── chunk_merging.py            # cAST-style post-processing merge (400-2500 NWS budget)
 │   ├── multi_language_chunker.py   # Language detection and chunker dispatch
 │   └── languages/                  # Per-language chunkers (Python, Rust, Go, TS, etc.)
 ├── embeddings/
@@ -397,8 +382,13 @@ code-search/
 │   └── sentence_transformer.py     # Local sentence-transformers fallback
 ├── search/
 │   ├── indexer.py                  # FAISS vector index + SQLite FTS5 metadata store
-│   ├── searcher.py                 # Hybrid BM25+vector search with RRF fusion
-│   ├── query_rewriter.py           # Domain synonym expansion
+│   ├── fusion.py                   # Weighted RRF fusion + chunk-type boost policy
+│   ├── query_expansion.py          # Synonym profiles and BM25 query expansion
+│   ├── result_models.py            # Search result data model
+│   ├── retrieval.py                # Vector/BM25 retrieval, fusion, and deterministic boosts
+│   ├── pipeline.py                 # Optional PPR and reranker stages
+│   ├── searcher.py                 # Thin search orchestration + compatibility exports
+│   ├── query_rewriter.py           # Optional multi-query rewrite support
 │   └── incremental_indexer.py      # Merkle-tree-based change detection
 ├── merkle/
 │   ├── merkle_dag.py               # Content-hash Merkle DAG for file change tracking
@@ -432,30 +422,6 @@ code-search/
 ```
 
 The evaluation harness runs each golden query, checks whether the expected file appears in the top-K results, and computes MRR per language. Results are saved as timestamped JSON for A/B comparison between configurations.
-
-## Troubleshooting
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| **Results are irrelevant** | Wrong embedding provider or stale index | Check `get_index_status` — if provider is `local`, switch to `voyage`. If index is >7 days old, re-run `index_directory`. |
-| **Empty results** | Wrong project active, or index doesn't exist | Run `list_projects` to see what's indexed. Run `switch_project` to the correct path. |
-| **"Indexing in progress"** | Auto-reindex triggered by stale detection | Wait 5-10 min for Voyage, or set `auto_reindex: false` to search the existing (possibly stale) index. |
-| **Slow indexing** | Using Jina on CPU | First run downloads ~1GB model. Subsequent runs: ~50 min for 3K chunks on CPU. Switch to `voyage` provider for 5-10 min indexing via API. |
-| **Wrong language detected** | File extension not in the 18 supported types | Check `chunking/available_languages.py`. Unsupported extensions fall back to generic line-based chunking. |
-| **Nix results are poor** | Missing domain synonyms | Ensure `QUERY_EXPANSION=on` and `CONTEXTUAL_HEADERS=on`. These features were specifically tuned for Nix syntax. |
-| **int8 index returns 0.0 similarity** | Index built with QT_8bit_direct (pre-2026-04-05 bug) | Delete the index (`clear_index`) and re-run `index_directory`. QT_8bit (trained) replaced QT_8bit_direct. |
-
-## Comparison to Alternatives
-
-| Tool | Strengths | Limitations | When to use instead of code-search |
-|------|-----------|-------------|-----------------------------------|
-| **grep / ripgrep** | Instant, exact, no indexing needed, regex support | No understanding of meaning — "auth" won't find "credential validation" | You know the exact string. Literal lookups. |
-| **GitHub Code Search** | Searches all of GitHub, regex, symbol-aware | Cloud-only, no private GHES support, no custom embeddings | Searching across public repos you don't have locally. |
-| **Sourcegraph** | Enterprise-grade, cross-repo, code intelligence | Requires deployment infrastructure, no local-first option | Large org with 100+ repos needing unified search. |
-| **IDE search (VS Code, JetBrains)** | Real-time, integrated in editor, symbol navigation | Single-repo, no semantic understanding, no cross-project | Navigating within a single file or project you have open. |
-| **code-graph** | Structural queries — call graphs, dead code, blast radius | No semantic/meaning-based search | "What calls this?" not "Where is the auth code?" |
-
-**code-search is best when**: You need to find code by meaning across a codebase, especially when you don't know the exact names. It's designed for AI assistants that need to quickly locate relevant code with minimal token waste.
 
 ## Troubleshooting
 

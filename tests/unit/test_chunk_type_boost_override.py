@@ -92,16 +92,18 @@ def test_static_dict_not_mutated():
     assert STATIC == static_copy
 
 
-def test_searcher_imports_boost_override_logic():
-    """Smoke test that the override mechanism is wired into searcher.py.
+def test_retrieval_module_contains_boost_override_logic():
+    """Smoke test that the override mechanism is wired into retrieval.py.
 
     Imports the module and checks the symbol is referenced. The full search
     path requires a project + index to exercise; the unit test stops at
     "the code path exists in the file".
     """
     import inspect
-    from search import searcher
-    src = inspect.getsource(searcher)
+
+    from search import retrieval
+
+    src = inspect.getsource(retrieval)
     assert "CHUNK_TYPE_BOOST_OVERRIDE" in src
     assert "json.loads" in src
 
@@ -121,8 +123,10 @@ def test_override_loop_does_not_shadow_function_k():
     bad pattern. It's a structural regression guard, not a behavioral one.
     """
     import inspect
-    from search import searcher
-    src = inspect.getsource(searcher)
+
+    from search.retrieval import retrieve_hybrid_candidates
+
+    src = inspect.getsource(retrieve_hybrid_candidates)
     # Pinpoint the override-merge block by its env var name.
     block_start = src.find('CHUNK_TYPE_BOOST_OVERRIDE')
     assert block_start >= 0, "Override hook missing"

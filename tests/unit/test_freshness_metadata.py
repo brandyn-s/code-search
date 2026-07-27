@@ -162,7 +162,13 @@ def test_freshness_fresh_after_reindex_when_blocking_modified_files(server, monk
     server._current_project = "/some/path"
     server._current_provider = None
 
-    fake_result = MagicMock(files_modified=2, files_added=1, time_taken=0.5)
+    fake_result = MagicMock(
+        success=True,
+        files_modified=2,
+        files_added=1,
+        files_removed=0,
+        time_taken=0.5,
+    )
     with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
          patch.object(server, "get_index_manager"), \
          patch.object(server, "embedder"):
@@ -180,7 +186,13 @@ def test_freshness_fresh_when_blocking_no_changes(server, monkeypatch):
     server._current_project = "/some/path"
     server._current_provider = None
 
-    fake_result = MagicMock(files_modified=0, files_added=0, time_taken=0.05)
+    fake_result = MagicMock(
+        success=True,
+        files_modified=0,
+        files_added=0,
+        files_removed=0,
+        time_taken=0.05,
+    )
     with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
          patch.object(server, "get_index_manager"), \
          patch.object(server, "embedder"):
@@ -188,6 +200,105 @@ def test_freshness_fresh_when_blocking_no_changes(server, monkeypatch):
         raw = server.search_code(query="x", k=5, auto_reindex=True)
     out = json.loads(raw)
     assert out["_metadata"]["freshness"] == "fresh"
+
+
+def test_freshness_fresh_after_deletion_only_reindex(server, monkeypatch):
+    """Deletion-only runs mutate the index and must refresh identity/cache."""
+    monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
+    monkeypatch.delenv("CODE_SEARCH_NONBLOCKING_SEARCH", raising=False)
+    _stub_searcher_returning_empty(server)
+    server._current_project = "/some/path"
+    server._current_provider = None
+
+    fake_result = MagicMock(
+        success=True,
+        files_modified=0,
+        files_added=0,
+        files_removed=1,
+        time_taken=0.05,
+    )
+    with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
+         patch.object(server, "get_index_manager"), \
+         patch.object(server, "embedder"):
+        mock_ii_cls.return_value.auto_reindex_if_needed.return_value = fake_result
+        raw = server.search_code(query="x", k=5, auto_reindex=True)
+
+    out = json.loads(raw)
+    assert out["_metadata"]["freshness"] == "fresh_after_reindex"
+
+
+def test_blocking_reindex_persists_the_new_identity(
+    server,
+    tmp_path,
+    monkeypatch,
+):
+    """The blocking search path uses the same coherent identity transaction."""
+    from dataclasses import replace
+    from search.index_identity import IndexIdentity
+
+    source = tmp_path / "source"
+    source.mkdir()
+    project_dir = tmp_path / "stored-project"
+    project_dir.mkdir()
+    info_file = project_dir / "project_info.json"
+    original = IndexIdentity(
+        schema_version=1,
+        repository_id="a" * 64,
+        checkout_id="b" * 64,
+        source_revision="c" * 40,
+        dirty_fingerprint="clean",
+        index_generation="d" * 64,
+        captured_at="2026-07-26T18:00:00Z",
+    )
+    updated = replace(
+        original,
+        dirty_fingerprint="e" * 64,
+        index_generation="f" * 64,
+    )
+    info_file.write_text(
+        json.dumps(
+            {
+                "project_path": str(source),
+                "index_identity_status": "ready",
+                "index_identity": original.to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CODE_SEARCH_DISABLE_AUTO_REINDEX", raising=False)
+    monkeypatch.delenv("CODE_SEARCH_NONBLOCKING_SEARCH", raising=False)
+    _stub_searcher_returning_empty(server)
+    server._current_project = str(source)
+    server._current_provider = None
+    monkeypatch.setattr(
+        server,
+        "get_project_storage_dir",
+        lambda *_args, **_kwargs: project_dir,
+    )
+    monkeypatch.setattr(
+        server,
+        "_capture_index_identity",
+        lambda _path: updated,
+    )
+    fake_result = MagicMock(
+        success=True,
+        files_modified=1,
+        files_added=0,
+        files_removed=0,
+        time_taken=0.05,
+    )
+
+    with patch("search.incremental_indexer.IncrementalIndexer") as mock_ii_cls, \
+         patch.object(server, "get_index_manager"), \
+         patch.object(server, "embedder"):
+        mock_ii_cls.return_value.auto_reindex_if_needed.return_value = fake_result
+        raw = server.search_code(query="x", k=5, auto_reindex=True)
+
+    out = json.loads(raw)
+    persisted = json.loads(info_file.read_text(encoding="utf-8"))
+    assert out["_metadata"]["freshness"] == "fresh_after_reindex"
+    assert persisted["index_identity_status"] == "ready"
+    assert persisted["index_identity"] == updated.to_dict()
 
 
 def test_freshness_vocabulary_is_stable():

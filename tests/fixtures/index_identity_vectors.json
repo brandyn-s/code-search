@@ -1,0 +1,68 @@
+{
+  "origin_normalization": [
+    {
+      "input": "  https://User:Secret@GitHub.COM/Org/Repo.git/  ",
+      "normalized": "https://github.com/Org/Repo"
+    },
+    {
+      "input": "git@GitHub.COM:Org/Repo.git",
+      "normalized": "https://github.com/Org/Repo"
+    },
+    {
+      "input": "GitHub.COM:Org/Repo.git",
+      "normalized": "https://github.com/Org/Repo"
+    },
+    {
+      "input": "https://User:Secret@GitHub.COM/Org/Repo.git?access_token=topsecret#credential",
+      "normalized": "https://github.com/Org/Repo"
+    },
+    {
+      "input": "SSH://deploy@Example.COM:2222/team/service.git",
+      "normalized": "ssh://example.com:2222/team/service"
+    },
+    {
+      "input": "ssh://user@[2001:db8::1]:2222/Org/Repo.git",
+      "normalized": "ssh://[2001:db8::1]:2222/Org/Repo"
+    },
+    {
+      "input": "https://Example.COM/team/.git",
+      "normalized": "https://example.com/team"
+    },
+    {
+      "input": " /srv/git/Service.git/ ",
+      "normalized": "/srv/git/Service"
+    },
+    {
+      "input": "C:\\work\\Service.git",
+      "normalized": "C:\\work\\Service"
+    },
+    {
+      "input": "   ",
+      "normalized": ""
+    }
+  ],
+  "index_generation": [
+    {
+      "repository_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_revision": "0123456789abcdef0123456789abcdef01234567",
+      "dirty_fingerprint": "clean",
+      "index_generation": "7e789edc80bcf056257cbea1cd49b764ccd18aeff08ca6b922cbc5df097b4dd2"
+    },
+    {
+      "repository_id": "d34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33fd34db33f",
+      "source_revision": "unborn",
+      "dirty_fingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "index_generation": "13fa4032419c93432bcb12281bcb22ab1d85996a3a7de96537cef632ff5ca41e"
+    }
+  ],
+  "submodule_framing": [
+    {
+      "relative_path_hex": "76656e646f722fff646570",
+      "expected_object_id": "1111111111111111111111111111111111111111",
+      "current_object_id": "2222222222222222222222222222222222222222",
+      "nested_dirty_fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
+      "payload_hex": "76656e646f722fff646570003131313131313131313131313131313131313131313131313131313131313131313131313131313100323232323232323232323232323232323232323232323232323232323232323232323232323232320033333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+      "dirty_fingerprint": "62cdb8c85bba0abff37b149f3a9bee846d86753eb3e1dae4a9739f80a9ce9afd"
+    }
+  ]
+}

@@ -1,15 +1,21 @@
 """Intelligent search functionality with query optimization."""
 
-import json
-import os
 import re
 import logging
 from collections import OrderedDict
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
 
 from search.indexer import CodeIndexManager
 from embeddings.embedder import CodeEmbedder
+from search.fusion import CHUNK_TYPE_BOOSTS, reciprocal_rank_fusion
+from search.logging_privacy import format_query_for_log
+from search.query_expansion import (
+    CODE_SYNONYMS,
+    _active_synonyms,
+    _query_stem,
+    expand_code_query,
+)
+from search.result_models import SearchResult
 
 
 # R11 (PR forthcoming): the env-var parsing primitives moved to
@@ -21,242 +27,11 @@ from search.config import (
     parse_env_float as _parse_env_float,
 )
 
-
-def reciprocal_rank_fusion(
-    vector_results: List[Tuple[str, float]],
-    bm25_results: List[Tuple[str, float]],
-    k: int = 60,
-    vector_weight: float = 0.5,
-    bm25_weight: float = 0.5,
-) -> List[Tuple[str, float]]:
-    """Fuse two ranked lists using Weighted Reciprocal Rank Fusion.
-
-    Args:
-        vector_results: List of (chunk_id, score) from vector search, ordered by relevance.
-        bm25_results: List of (chunk_id, score) from BM25 search, ordered by relevance.
-        k: Smoothing parameter (default 60, industry standard).
-        vector_weight: Weight for vector search contributions (default 0.5).
-        bm25_weight: Weight for BM25 search contributions (default 0.5).
-
-    Returns:
-        List of (chunk_id, rrf_score) sorted by fused relevance.
-    """
-    scores: Dict[str, float] = {}
-    for rank, (chunk_id, _score) in enumerate(vector_results):
-        scores[chunk_id] = scores.get(chunk_id, 0.0) + vector_weight * (
-            1.0 / (k + rank + 1)
-        )
-    for rank, (chunk_id, _score) in enumerate(bm25_results):
-        scores[chunk_id] = scores.get(chunk_id, 0.0) + bm25_weight * (
-            1.0 / (k + rank + 1)
-        )
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-
 # Content mode configurations re-exported from search.config for callers
 # (CONTENT_MODE_WEIGHTS values: code=(0.65, 0.35) tuned 2026-05-03,
 # vw=0.65 wins over vw=0.5 by MRR +0.016 on n=99 multi-target gold,
 # B2 per-arm sweep PR #90). Source-of-truth lives in search.config now.
 from search.config import CONTENT_MODE_WEIGHTS  # noqa: E402
-
-# Chunk type boost multipliers per content mode
-CHUNK_TYPE_BOOSTS = {
-    "code": {
-        "function": 1.3,
-        "method": 1.3,
-        "class": 1.3,
-        "decorated_definition": 1.3,
-        "let": 1.3,
-        "binding": 1.3,
-        "option": 1.3,          # NixOS mkOption declarations
-        "service_config": 1.3,  # NixOS service configurations
-        "imports": 1.1,         # NixOS imports lists
-        "section": 0.7,
-        "document": 0.7,
-        "module": 0.9,
-    },
-    "docs": {
-        "function": 0.8,
-        "method": 0.8,
-        "class": 0.8,
-        "decorated_definition": 0.8,
-        "section": 1.3,
-        "document": 1.3,
-        "module": 0.9,
-    },
-    "all": {},
-}
-
-# Code-domain synonym map for BM25 query expansion
-CODE_SYNONYMS = {
-    "auth": ["authentication", "oauth", "jwt", "token", "credential", "login", "entra"],
-    "authentication": ["auth", "oauth", "jwt", "token", "credential", "login", "entra"],
-    "error": ["exception", "raise", "ToolError", "HTTPException", "error_handling"],
-    "retry": ["backoff", "retryable", "retry_delay", "429", "529"],
-    "rate": ["rate_limit", "throttle", "RPM", "TPM"],
-    "middleware": ["ASGI", "middleware", "intercept"],
-    "route": ["Route", "endpoint", "path", "handler", "Starlette"],
-    "network": ["networking", "internal-svc-19", "interface", "vlan", "firewall", "nftables", "allowedTCPPorts"],
-    "service": ["systemd", "daemon", "enable", "wantedBy", "serviceConfig", "systemd.services", "mkEnableOption"],
-    "package": ["pkgs", "nix", "derivation", "buildInputs", "nativeBuildInputs", "stdenv", "mkDerivation", "fetchurl"],
-    "option": ["mkOption", "mkEnableOption", "types", "default", "description"],
-    # NixOS-specific expansions
-    "nix": ["nixos", "nixpkgs", "derivation", "flake", "overlay"],
-    "module": ["nixos-module", "imports", "options", "mkIf"],
-    "derivation": ["stdenv", "mkDerivation", "buildInputs", "nativeBuildInputs", "fetchurl"],
-    "flake": ["flake.nix", "inputs", "outputs", "nixpkgs"],
-    "enable": ["mkEnableOption", "mkIf", "cfg.enable"],
-    "firewall": ["nftables", "allowedTCPPorts", "allowedUDPPorts", "networking.firewall"],
-    "systemd": ["systemd.services", "serviceConfig", "wantedBy", "ExecStart"],
-    "boot": ["bootloader", "grub", "systemd-boot", "initrd", "kernelModules"],
-    "nixos": ["nix", "nixpkgs", "nix-module", "mkOption"],
-    "environment": ["systemPackages", "environment.systemPackages"],
-    # Corsair service domains
-    "sensor": [
-        "internal-svc-62",
-        "internal-svc-28",
-        "internal-svc-51",
-        "internal-svc-25",
-        "internal-svc-20",
-        "internal-svc-23",
-        "internal-svc-15",
-        "internal-svc-40",
-    ],
-    "navigation": [
-        "internal-svc-62",
-        "internal-svc-51",
-        "internal-svc-28",
-        "internal-svc-20",
-        "internal-svc-23",
-        "internal-svc-60",
-        "internal-svc-14",
-        "internal-svc-57",
-    ],
-    "gps": ["internal-svc-62", "internal-svc-51", "internal-svc-25", "internal-svc-10", "internal-svc-36"],
-    "imu": ["internal-svc-28", "internal-svc-20", "internal-svc-23"],
-    "perception": ["internal-svc-26", "internal-svc-27", "internal-svc-56", "internal-svc-13", "internal-svc-6"],
-    "camera": ["internal-svc-26", "internal-svc-56", "internal-svc-37", "internal-svc-50", "internal-svc-3"],
-    "video": ["internal-svc-56", "internal-svc-8", "internal-svc-26", "internal-svc-3", "internal-svc-58"],
-    "tracking": ["internal-svc-27", "internal-svc-26", "internal-svc-5", "internal-svc-63"],
-    "motor": ["internal-svc-12", "internal-svc-34", "throttled", "internal-svc-31", "internal-svc-30"],
-    "propulsion": ["internal-svc-12", "internal-svc-34", "throttled", "internal-svc-30", "internal-svc-43"],
-    "engine": ["internal-svc-30", "internal-svc-12", "internal-svc-34"],
-    "steering": ["internal-svc-12", "internal-svc-34", "rudder"],
-    "communication": ["internal-svc-41", "internal-svc-44", "internal-svc-47", "internal-svc-64", "internal-svc-45", "internal-svc-49"],
-    "radio": ["internal-svc-44", "internal-svc-41", "internal-svc-24"],
-    "satellite": ["internal-svc-47", "internal-svc-32", "internal-svc-48"],
-    "safety": ["internal-svc-55", "internal-svc-31", "internal-svc-39", "internal-svc-9", "internal-svc-16"],
-    "emergency": ["internal-svc-39", "internal-svc-31", "internal-svc-55", "internal-svc-16"],
-    "power": ["internal-svc-43", "internal-svc-18", "charged", "internal-svc-54", "internal-svc-53"],
-    "battery": ["internal-svc-18", "charged", "internal-svc-43"],
-    "radar": ["internal-svc-35", "internal-svc-61", "internal-svc-63"],
-    "autonomy": ["internal-svc-52", "internal-svc-17", "internal-svc-57", "internal-svc-42", "internal-svc-46"],
-    "planning": ["internal-svc-57", "internal-svc-52", "internal-svc-17", "internal-svc-42"],
-    "fleet": ["internal-svc-46", "internal-svc-65", "internal-svc-24", "internal-svc-21"],
-    "logging": ["internal-svc-45", "internal-svc-33", "internal-svc-49", "internal-svc-4"],
-    "monitoring": ["internal-svc-7", "internal-svc-2", "internal-svc-59", "metrics"],
-    "configuration": ["internal-svc-29", "internal-svc-11", "internal-svc-19", "internal-svc-38"],
-    "calibration": ["internal-svc-38", "internal-svc-1", "internal-svc-22"],
-}
-
-
-# Order matters: longest suffix first so "navigations" -> strip "s" (not "tion").
-# Each token has AT MOST one suffix stripped — we only need stem-equivalence to a
-# CODE_SYNONYMS key, not full English morphology. `str.rstrip(<chars>)` is a
-# character-class strip and was the prior implementation's bug
-# (e.g. "navigation".rstrip("ing") removes trailing n, producing "navigatio";
-# subsequent rstrip("tion") strips o/i/t producing "naviga" — never matches "navigation").
-_QUERY_STEM_SUFFIXES = ("tion", "ing", "ed", "s")
-
-
-def _query_stem(token: str) -> str:
-    for suffix in _QUERY_STEM_SUFFIXES:
-        if token.endswith(suffix) and len(token) > len(suffix) + 2:
-            return token[: -len(suffix)]
-    return token
-
-
-# Per-deployment synonym overlay (CODE_SYNONYMS_PATH). The built-in map
-# above bakes Corsair-specific daemon names into engine source — on any
-# other corpus, queries containing "power", "camera", "safety", … get
-# expanded with boat-daemon tokens. The env var lets a deployment extend
-# or disable entries without a code change: a JSON object whose values are
-# either a list of synonyms (extends/overrides the key) or null (removes
-# the built-in key). Default behavior (env unset) is byte-identical to the
-# built-in map — changing the defaults is a retrieval-behavior change and
-# stays BLOCKED ON MEASUREMENT per ship-discipline rule 10.
-_SYNONYMS_OVERLAY_CACHE: Optional[Tuple[str, Dict[str, List[str]]]] = None
-
-
-def _active_synonyms() -> Dict[str, List[str]]:
-    """Return the synonym map, applying the CODE_SYNONYMS_PATH overlay."""
-    global _SYNONYMS_OVERLAY_CACHE
-    path = os.environ.get("CODE_SYNONYMS_PATH", "")
-    if not path:
-        return CODE_SYNONYMS
-    if _SYNONYMS_OVERLAY_CACHE is not None and _SYNONYMS_OVERLAY_CACHE[0] == path:
-        return _SYNONYMS_OVERLAY_CACHE[1]
-    merged: Dict[str, List[str]] = dict(CODE_SYNONYMS)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            for key, value in data.items():
-                norm_key = str(key).lower()
-                if value is None:
-                    merged.pop(norm_key, None)
-                elif isinstance(value, list):
-                    merged[norm_key] = [str(s) for s in value]
-    except (OSError, ValueError) as e:
-        logging.getLogger(__name__).warning(
-            "CODE_SYNONYMS_PATH=%s load failed (%s); using built-in synonyms",
-            path, e,
-        )
-        merged = CODE_SYNONYMS
-    _SYNONYMS_OVERLAY_CACHE = (path, merged)
-    return merged
-
-
-def expand_code_query(query: str) -> str:
-    """Expand a query with code-domain synonyms for better BM25 recall."""
-    tokens = query.lower().split()
-    expanded_tokens = list(tokens)
-
-    synonyms_map = _active_synonyms()
-    for token in tokens:
-        stem = _query_stem(token)
-        for key, synonyms in synonyms_map.items():
-            if token == key or stem == key or token in synonyms:
-                for syn in synonyms:
-                    if syn.lower() not in [t.lower() for t in expanded_tokens]:
-                        expanded_tokens.append(syn)
-                break
-
-    if expanded_tokens == tokens:
-        return query  # No expansion happened, return original
-
-    return " ".join(expanded_tokens)
-
-
-@dataclass
-class SearchResult:
-    """Enhanced search result with rich metadata."""
-
-    chunk_id: str
-    similarity_score: float
-    content_preview: str
-    file_path: str
-    relative_path: str
-    folder_structure: List[str]
-    chunk_type: str
-    name: Optional[str]
-    parent_name: Optional[str]
-    start_line: int
-    end_line: int
-    docstring: Optional[str]
-    tags: List[str]
-    context_info: Dict[str, Any]
-
 
 class IntelligentSearcher:
     """Intelligent code search with query optimization and context awareness."""
@@ -362,7 +137,10 @@ class IntelligentSearcher:
         cache_key = query.strip().lower()
         cache = self._query_embedding_cache
         if cache_key in cache:
-            self._logger.debug(f"Query embedding cache hit for: '{cache_key}'")
+            self._logger.debug(
+                "Query embedding cache hit for: %s",
+                format_query_for_log(cache_key, label="normalized_query"),
+            )
             cache.move_to_end(cache_key)
             return cache[cache_key]
         embedding = self.embedder.embed_query(query)
@@ -440,7 +218,9 @@ class IntelligentSearcher:
         intent_tags = self._detect_query_intent(query)
 
         self._logger.info(
-            f"Searching for: '{optimized_query}' with intent: {intent_tags}"
+            "Searching for: %s with intent: %s",
+            format_query_for_log(optimized_query, label="optimized_query"),
+            intent_tags,
         )
 
         # Generate query embedding (cached)
@@ -491,390 +271,30 @@ class IntelligentSearcher:
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[SearchResult]:
         """Hybrid BM25 + vector search with weighted RRF fusion and content mode boosting."""
+        from search.config import get_search_config
+        from search.pipeline import run_hybrid_pipeline
+        from search.retrieval import retrieve_hybrid_candidates
 
-        # R11: read all search-time knobs through the validated SearchConfig.
-        # Pre-R11 these were scattered `os.environ.get(...)` calls with
-        # inconsistent failure modes (some crashed on malformed input,
-        # some silently mapped to defaults). SearchConfig parses + validates
-        # once, logs warnings for bad values, and provides typed access.
-        from search.config import get_search_config, resolve_hybrid_weights
-        cfg = get_search_config()
-
-        fusion_k = cfg.fusion_k
-        candidate_k = 50  # Retrieve 50 from each source
-
-        # Determine content mode and weights
-        content_mode = cfg.content_mode
-        vector_weight, bm25_weight = resolve_hybrid_weights(cfg)
-
-        # Vector search
-        optimized_query = self._optimize_query(query)
-        query_embedding = self._get_query_embedding(optimized_query)
-        vector_raw = self.index_manager.search(query_embedding, candidate_k, filters)
-        vector_pairs = [(chunk_id, sim) for chunk_id, sim, _meta in vector_raw]
-
-        # BM25 search: LLM rewrite (if enabled) then static expansion
-        bm25_query = query
-        if cfg.bm25_rewrite:
-            from search.query_rewriter import rewrite_query_for_bm25
-            bm25_query = rewrite_query_for_bm25(query)
-        if cfg.query_expansion:
-            bm25_query = expand_code_query(bm25_query)
-        bm25_raw = self.index_manager.search_bm25(bm25_query, k=candidate_k, filters=filters)
-        bm25_pairs = [(chunk_id, rank) for chunk_id, rank, _meta in bm25_raw]
-
-        # Weighted RRF fusion
-        fused = reciprocal_rank_fusion(
-            vector_pairs,
-            bm25_pairs,
-            k=fusion_k,
-            vector_weight=vector_weight,
-            bm25_weight=bm25_weight,
+        config = get_search_config()
+        retrieval = retrieve_hybrid_candidates(
+            self,
+            query,
+            k=k,
+            context_depth=context_depth,
+            filters=filters,
+            config=config,
+            chunk_type_boosts=CHUNK_TYPE_BOOSTS,
+            expand_query=expand_code_query,
+            fuse_results=reciprocal_rank_fusion,
         )
-
-        # Build SearchResult objects for top-k fused results
-        metadata_lookup = {}
-        for chunk_id, _sim, metadata in vector_raw:
-            metadata_lookup[chunk_id] = metadata
-        for chunk_id, _rank, metadata in bm25_raw:
-            if chunk_id not in metadata_lookup:
-                metadata_lookup[chunk_id] = metadata
-
-        # Collect more candidates than k so chunk type boosting can re-order
-        over_fetch = min(k * 3, len(fused))
-        candidates = []
-        for chunk_id, rrf_score in fused[:over_fetch]:
-            metadata = metadata_lookup.get(chunk_id)
-            if metadata:
-                result = self._create_search_result(
-                    chunk_id, rrf_score, metadata, context_depth
-                )
-                candidates.append(result)
-
-        # Apply chunk type boosts and name-match boost based on content mode.
-        # `CHUNK_TYPE_BOOST_OVERRIDE` env var (Phase B3, 2026-05-08) layers a
-        # JSON dict on top of the static defaults at search-time, enabling
-        # the sweep harness to test alternative boost values without
-        # restarting the server. Keys not in the override fall through to the
-        # static dict; malformed JSON is silently ignored.
-        boosts = dict(CHUNK_TYPE_BOOSTS.get(content_mode, {}))
-        override_raw = os.environ.get("CHUNK_TYPE_BOOST_OVERRIDE")
-        if override_raw:
-            try:
-                override = json.loads(override_raw)
-                if isinstance(override, dict):
-                    # NOTE: avoid using `k` as a loop variable here — `k` is the
-                    # search top-k argument at function scope and shadowing it
-                    # silently breaks `candidates[:k]` slicing later.
-                    for chunk_type_key, boost_value in override.items():
-                        boosts[chunk_type_key] = float(boost_value)
-            except (ValueError, TypeError):
-                pass
-        query_tokens = self._normalize_to_tokens(query.lower())
-
-        for result in candidates:
-            # Chunk type boost
-            if boosts:
-                result.similarity_score *= boosts.get(result.chunk_type, 1.0)
-
-            # Name-match boost (amplified 2x — A/B eval: +0.041 avg MRR)
-            name_boost = self._calculate_name_boost(result.name, query, query_tokens)
-            if name_boost > 1.0:
-                name_boost = 1.0 + (name_boost - 1.0) * 2.0
-            result.similarity_score *= name_boost
-
-            # Path relevance boost (amplified 3x — fixes Nix +0.036 MRR
-            # where correct files are retrieved but ranked too low)
-            path_boost = self._calculate_path_boost(result.relative_path, query_tokens)
-            if path_boost > 1.0:
-                path_boost = 1.0 + (path_boost - 1.0) * 3.0
-            result.similarity_score *= path_boost
-
-        # Phase H fix (2026-05-10): sort candidates by post-boost
-        # similarity_score BEFORE the rerank branch. This ensures all paths
-        # (sonnet success, sonnet override-fallback, RERANKER=off) start
-        # from the same boost-sorted order. Previously, only the
-        # RERANKER=off path applied this sort (line ~600); sonnet's
-        # hybrid_prior_fallback returned `candidates[:top_k]` in
-        # RRF-fused-rank order, which differs from the boost-sorted order
-        # on subprojects whose chunk-type / name / path boosts re-order
-        # the top-15 (libnet: 13/18 queries had different top-1 between
-        # the two paths; see bench/research/2026-05-10-assetman-override-refresh.md).
-        candidates.sort(key=lambda r: r.similarity_score, reverse=True)
-
-        # Arc A (2026-05-11): Personalized PageRank over code-graph as
-        # post-boost-sort, pre-rerank re-ranking signal. Gated by env var
-        # `CODE_SEARCH_PPR_ENABLED=1` (default off). Blends
-        # `similarity_score *= (1 + alpha * ppr_score)` where alpha is read
-        # from `CODE_SEARCH_PPR_ALPHA` (default 0.5). Mechanism-correctness
-        # gate (Plan A2.4 falsifier): with PPR disabled OR alpha=0.0, this
-        # block is a no-op and candidates pass through unchanged.
-        #
-        # R8 (2026-05-23): write `self.last_ppr_metadata` on every path so
-        # the MCP `_metadata.ppr` envelope can surface enable/disable/
-        # missing-DB to consumers. Previously this was visible only via
-        # sidecar log lines.
-        import time as _time
-        from search.ppr_scorer import (
-            PPRScorer, blend_ppr_into_candidates, get_env_config,
+        return run_hybrid_pipeline(
+            self,
+            query,
+            k=k,
+            config=config,
+            candidates=retrieval.candidates,
+            metadata_lookup=retrieval.metadata_lookup,
         )
-        ppr_enabled, ppr_alpha = get_env_config()
-        ppr_start = _time.monotonic()
-        if not ppr_enabled:
-            self.last_ppr_metadata = {
-                "applied": False,
-                "reason": "disabled_by_env",
-                "latency_ms": 0,
-            }
-        elif ppr_alpha == 0.0:
-            self.last_ppr_metadata = {
-                "applied": False,
-                "reason": "alpha_zero",
-                "latency_ms": 0,
-            }
-        elif not candidates:
-            self.last_ppr_metadata = {
-                "applied": False,
-                "reason": "no_candidates",
-                "latency_ms": 0,
-            }
-        else:
-            try:
-                hint = None
-                for c in candidates:
-                    abs_path = getattr(c, "file_path", None) or getattr(c, "absolute_path", None)
-                    if abs_path:
-                        hint = str(abs_path)
-                        break
-                with PPRScorer() as ppr:
-                    cps = [(c.relative_path, c.similarity_score) for c in candidates]
-                    ppr_scores = ppr.score(cps, hint_abs_path=hint)
-                latency_ms = int((_time.monotonic() - ppr_start) * 1000)
-                if ppr_scores:
-                    blend_ppr_into_candidates(candidates, ppr_alpha, ppr_scores)
-                    candidates.sort(key=lambda r: r.similarity_score, reverse=True)
-                    self.last_ppr_metadata = {
-                        "applied": True,
-                        "reason": "ok",
-                        "latency_ms": latency_ms,
-                        "scored_candidates": len(ppr_scores),
-                        "alpha": ppr_alpha,
-                    }
-                else:
-                    # Empty dict from PPRScorer.score() means either the
-                    # graph DB is missing or the subgraph was too small.
-                    # The scorer logs which via [PPR_DIAG]; both surface
-                    # here as no_graph_db (the dominant cause in practice).
-                    self.last_ppr_metadata = {
-                        "applied": False,
-                        "reason": "no_graph_db",
-                        "latency_ms": latency_ms,
-                    }
-            except Exception as ppr_err:
-                self._logger.warning("[PPR_DIAG] ppr_blend_failed err=%s", ppr_err)
-                self.last_ppr_metadata = {
-                    "applied": False,
-                    "reason": "error",
-                    "latency_ms": int((_time.monotonic() - ppr_start) * 1000),
-                    "error_class": type(ppr_err).__name__,
-                }
-
-        # Reranking. Default mode is "sonnet" (validated 2026-05-03 PR #93+:
-        # +0.087 MRR, +0.137 HR@1 on n=183 multi-target real_session). The
-        # Sonnet reranker is graceful: on missing ANTHROPIC_API_KEY, timeout,
-        # or any error, it silently returns input candidates unchanged.
-        # Disable explicitly with RERANKER=off. Legacy cross-encoder via
-        # RERANKER=cross-encoder (off-by-default since A/B showed quality
-        # regression).
-        rerank_mode = cfg.reranker_mode
-        # Surface "no candidates" as the most specific signal, regardless of
-        # mode. This catches empty-index searches; downstream consumers don't
-        # need to disambiguate "no candidates because mode=off" vs "no
-        # candidates because index empty" — the latter is the real signal.
-        if not candidates:
-            self.last_reranker_metadata = {
-                "applied": False,
-                "reason": "not_invoked_no_candidates",
-                "latency_ms": 0,
-            }
-            return []
-        if rerank_mode == "sonnet" and len(candidates) > k:
-            # Phase B'''(b) skip-threshold gate (opt-in, default off):
-            # SONNET_RERANKER_SKIP_THRESHOLD allows operators to skip Sonnet
-            # entirely when the hybrid top-1 score already exceeds a
-            # confidence floor. Motivation: the 2026-05-14 Phase B''
-            # labeling analysis identified ~7% of harvested queries where
-            # Sonnet at pool=5 CORRUPTS already-perfect hybrid rank-1
-            # results. Skipping Sonnet on high-confidence queries preserves
-            # the rank-1 + saves ~4-5s latency. Threshold is corpus-
-            # specific — set per-deployment based on local similarity_score
-            # distribution. See CLAUDE.md SONNET_RERANKER_SKIP_THRESHOLD
-            # for tuning guidance.
-            # R11: skip threshold is None when unset / non-positive (handled
-            # by SearchConfig._parse_optional_float).
-            skip_threshold = cfg.sonnet_skip_threshold
-            if skip_threshold is not None:
-                top_1_score = candidates[0].similarity_score
-                if top_1_score >= skip_threshold:
-                    self._logger.info(
-                        "[RERANK_REASON] skipped_high_confidence "
-                        "top_1_score=%.4f threshold=%.4f "
-                        "n_candidates=%d; preserved hybrid order",
-                        top_1_score, skip_threshold, len(candidates),
-                    )
-                    self.last_reranker_metadata = {
-                        "applied": False,
-                        "reason": "skipped_high_confidence",
-                        "latency_ms": 0,
-                        "top_1_score": top_1_score,
-                        "skip_threshold": skip_threshold,
-                    }
-                    return candidates[:k]
-
-            from search.sonnet_reranker import rerank_with_sonnet
-
-            # Rerank only the top-15 candidates (D4b validated: top-30 is
-            # equivalent to top-15 with 2x cost). Build dicts with
-            # full_content so the LLM scores against actual code, not
-            # 200-char snippets.
-            n_to_rerank = min(15, len(candidates))
-            top_candidates = candidates[:n_to_rerank]
-            rerank_input = []
-            for r in top_candidates:
-                meta = metadata_lookup.get(r.chunk_id, {}) or {}
-                full = (meta.get("full_content")
-                        or meta.get("content")
-                        or r.content_preview
-                        or "")
-                rerank_input.append({
-                    "chunk_id": r.chunk_id,
-                    "file_path": r.relative_path,
-                    "full_content": full,
-                    "_orig": r,
-                })
-            # PR Plan-2 A1: opt into structured metadata so the MCP layer
-            # can surface reranker outcome to LLM agents.
-            reranked, rerank_meta = rerank_with_sonnet(
-                query, rerank_input, top_k=k, return_metadata=True,
-            )
-            self.last_reranker_metadata = rerank_meta
-            # Extract original SearchResult objects in new order; tail any
-            # candidates beyond top-15 in their existing order.
-            new_top = [d["_orig"] for d in reranked]
-            tail = candidates[n_to_rerank:]
-            candidates = new_top + tail
-        elif rerank_mode == "sonnet" and len(candidates) <= k:
-            # Sonnet path entered but no reranking needed (candidate pool
-            # is already <= k). Surface as a non-error reason.
-            self.last_reranker_metadata = {
-                "applied": False,
-                "reason": "not_invoked_insufficient_candidates",
-                "latency_ms": 0,
-            }
-        elif rerank_mode == "listwise" and len(candidates) > k:
-            # Listwise reranker (opt-in canary, validated 2026-05-16 Phase C
-            # v2 with bootstrap CI gates ALL PASS):
-            #   - PSM golden: +0.047 nDCG@10 CI [+0.004, +0.095] favorable
-            #   - PSM harvested: +0.044 MRR CI [+0.003, +0.084] favorable
-            #   - PSM nix subset: +0.008 MRR (parity confirmed, regression
-            #     from v1 reversed by nix-aware rubric clause)
-            #   - flask/requests adversarial: +0.13 to +0.22 MRR favorable
-            # Replaces pointwise (15 isolated Sonnet calls) with ONE
-            # comparative call. Architecturally cleaner: removes the
-            # slowest-of-15 latency pattern + arbitrary-tie behavior +
-            # per-domain pointwise inconsistency. Retires the
-            # SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES hack.
-            #
-            # Hard deadline default 12s per Phase C v2 simulated-deadline
-            # analysis. 10s is the smallest deadline where all 4 fixtures
-            # stay favorable; 12s captures more of the listwise lift
-            # (harvested applied 93.4% vs 76.5% at 10s; worst Δ nDCG@10
-            # +0.010 vs +0.004) at the cost of 2s more p99. User picked
-            # 12s 2026-05-16 for the higher applied rate.
-            # On deadline/error/parse-failure, listwise returns baseline
-            # order — graceful fallback per the always-on contract.
-            #
-            # Override deadline via SONNET_LISTWISE_TIMEOUT env var.
-            from search.listwise_sonnet_reranker import (
-                listwise_rerank_with_sonnet,
-            )
-
-            n_to_rerank = min(15, len(candidates))
-            top_candidates = candidates[:n_to_rerank]
-            rerank_input = []
-            for r in top_candidates:
-                meta = metadata_lookup.get(r.chunk_id, {}) or {}
-                full = (meta.get("full_content")
-                        or meta.get("content")
-                        or r.content_preview
-                        or "")
-                rerank_input.append({
-                    "chunk_id": r.chunk_id,
-                    "file_path": r.relative_path,
-                    "name": r.name,
-                    "parent_name": r.parent_name,
-                    "chunk_type": r.chunk_type,
-                    "start_line": r.start_line,
-                    "end_line": r.end_line,
-                    "content_preview": full,
-                    "similarity_score": r.similarity_score,
-                    "_orig": r,
-                })
-            # R11: timeout validated + parsed by SearchConfig.
-            reranked, rerank_meta = listwise_rerank_with_sonnet(
-                query, rerank_input, top_k=k,
-                timeout=cfg.listwise_timeout_s,
-                return_metadata=True,
-            )
-            self.last_reranker_metadata = rerank_meta
-            new_top = [d["_orig"] for d in reranked]
-            tail = candidates[n_to_rerank:]
-            candidates = new_top + tail
-        elif rerank_mode == "listwise" and len(candidates) <= k:
-            self.last_reranker_metadata = {
-                "applied": False,
-                "reason": "not_invoked_insufficient_candidates",
-                "latency_ms": 0,
-            }
-        elif rerank_mode == "cross-encoder" and candidates:
-            # Legacy cross-encoder path (off by default; degrades quality
-            # per 2026-03-22 A/B eval but kept for fallback/comparison).
-            from search.reranker import rerank_results
-
-            rerank_input = [
-                {
-                    "chunk_id": r.chunk_id,
-                    "content": r.content_preview,
-                    "score": r.similarity_score,
-                    "result": r,
-                }
-                for r in candidates
-            ]
-            reranked = rerank_results(query, rerank_input, top_k=k)
-            candidates = [item["result"] for item in reranked]
-            for item, candidate in zip(reranked, candidates):
-                candidate.similarity_score = item.get(
-                    "rerank_score", candidate.similarity_score
-                )
-            # PR Plan-2 A1: cross-encoder path doesn't invoke Sonnet — surface
-            # explicit reason so MCP consumers don't misinterpret a default
-            # "not_invoked".
-            self.last_reranker_metadata = {
-                "applied": False,
-                "reason": "not_invoked_cross_encoder_mode",
-                "latency_ms": 0,
-            }
-        else:
-            # rerank_mode == "off" — explicit disable. The empty-candidates
-            # path is handled earlier and returns immediately, so candidates
-            # is non-empty here.
-            self.last_reranker_metadata = {
-                "applied": False,
-                "reason": "disabled_by_env",
-                "latency_ms": 0,
-            }
-            candidates.sort(key=lambda r: r.similarity_score, reverse=True)
-        return candidates[:k]
 
     def _optimize_query(self, query: str) -> str:
         """Optimize query for better embedding generation."""

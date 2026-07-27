@@ -174,6 +174,10 @@ RERANKER_MODES: Tuple[str, ...] = (
 # Search mode allowlist (search_code's search_mode arg).
 SEARCH_MODES: Tuple[str, ...] = ("auto", "hybrid", "keyword", "semantic")
 
+# Packaged query-expansion profile selection. The current Corsair behavior
+# remains the default until a generic-default change passes retrieval eval.
+SYNONYM_PROFILES: Tuple[str, ...] = ("corsair", "generic", "off")
+
 
 @dataclass(frozen=True)
 class SearchConfig:
@@ -200,6 +204,9 @@ class SearchConfig:
     content_mode: str
 
     # Behavioral toggles
+    synonym_profile: str
+    """Packaged query-expansion profile: corsair (default), generic, or off."""
+
     query_expansion: bool
     """Domain synonym expansion on BM25 query (default on)."""
 
@@ -264,6 +271,11 @@ def get_search_config() -> SearchConfig:
         # Modes
         content_mode=parse_env_enum("CONTENT_MODE", default="code", allowed=CONTENT_MODES),
         reranker_mode=parse_env_enum("RERANKER", default="sonnet", allowed=RERANKER_MODES),
+        synonym_profile=parse_env_enum(
+            "CODE_SYNONYM_PROFILE",
+            default="corsair",
+            allowed=SYNONYM_PROFILES,
+        ),
 
         # Toggles (default-on for query_expansion is documented; rest default-off)
         query_expansion=parse_env_bool("QUERY_EXPANSION", default=True),

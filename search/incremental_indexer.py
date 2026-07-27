@@ -17,6 +17,11 @@ from search.path_validation import refuse_as_project_root_reason
 
 logger = logging.getLogger(__name__)
 
+REINDEX_DISPOSITION_COMPLETED = "completed"
+REINDEX_DISPOSITION_SKIPPED_FRESH = "skipped_fresh"
+REINDEX_DISPOSITION_SKIPPED_DISABLED = "skipped_disabled"
+REINDEX_DISPOSITION_REFUSED = "refused"
+
 
 @dataclass
 class ChunkingDiagnostics:
@@ -75,6 +80,7 @@ class IncrementalIndexResult:
     success: bool
     error: Optional[str] = None
     chunking_diagnostics: Optional[ChunkingDiagnostics] = None
+    reindex_disposition: str = REINDEX_DISPOSITION_COMPLETED
 
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
@@ -87,6 +93,7 @@ class IncrementalIndexResult:
             "time_taken": self.time_taken,
             "success": self.success,
             "error": self.error,
+            "reindex_disposition": self.reindex_disposition,
         }
         if self.chunking_diagnostics is not None:
             out["chunking_diagnostics"] = self.chunking_diagnostics.to_dict()
@@ -819,6 +826,7 @@ class IncrementalIndexer:
                 chunks_removed=0,
                 time_taken=time.time() - start_time,
                 success=True,
+                reindex_disposition=REINDEX_DISPOSITION_REFUSED,
             )
 
         if os.environ.get("CODE_SEARCH_DISABLE_AUTO_REINDEX", "").lower() in (
@@ -837,6 +845,7 @@ class IncrementalIndexer:
                 chunks_removed=0,
                 time_taken=time.time() - start_time,
                 success=True,
+                reindex_disposition=REINDEX_DISPOSITION_SKIPPED_DISABLED,
             )
 
         if self.needs_reindex(project_path, max_age_minutes):
@@ -856,4 +865,5 @@ class IncrementalIndexer:
                 chunks_removed=0,
                 time_taken=time.time() - start_time,
                 success=True,
+                reindex_disposition=REINDEX_DISPOSITION_SKIPPED_FRESH,
             )

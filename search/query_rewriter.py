@@ -38,6 +38,11 @@ import os
 import re
 from typing import List, Optional
 
+from search.logging_privacy import (
+    format_query_exception_for_log,
+    format_query_for_log,
+)
+
 logger = logging.getLogger(__name__)
 
 # Cache rewrites to avoid redundant API calls
@@ -123,11 +128,19 @@ def rewrite_short_natural_query(query: str, n_alternatives: int = 3) -> List[str
                 _short_query_cache.pop(next(iter(_short_query_cache)))
             _short_query_cache[cache_key] = list(alternatives)
             logger.debug(
-                "short-query rewrite: '%s' -> %r", query, alternatives,
+                "short-query rewrite: %s -> %s",
+                format_query_for_log(query),
+                [
+                    format_query_for_log(value, label="rewrite")
+                    for value in alternatives
+                ],
             )
             return alternatives
     except Exception as e:
-        logger.debug("short-query rewrite failed, returning []: %s", e)
+        logger.debug(
+            "short-query rewrite failed, returning []: %s",
+            format_query_exception_for_log(e),
+        )
 
     return []
 
@@ -159,10 +172,17 @@ def rewrite_query_for_bm25(query: str) -> str:
                 # Evict oldest entry
                 _rewrite_cache.pop(next(iter(_rewrite_cache)))
             _rewrite_cache[query] = rewritten
-            logger.debug(f"BM25 rewrite: '{query}' -> '{rewritten}'")
+            logger.debug(
+                "BM25 rewrite: %s -> %s",
+                format_query_for_log(query),
+                format_query_for_log(rewritten, label="rewrite"),
+            )
             return rewritten
     except Exception as e:
-        logger.debug(f"BM25 rewrite failed, using original: {e}")
+        logger.debug(
+            "BM25 rewrite failed, using original: %s",
+            format_query_exception_for_log(e),
+        )
 
     return query
 
@@ -285,8 +305,9 @@ def _call_haiku(query: str) -> Optional[str]:
         logger.warning(
             "BM25 rewriter API call failed (status=%d); falling back to "
             "original query. model=%s. Override via BM25_REWRITE_MODEL env. "
-            "Body: %s",
-            resp.status_code, model, resp.text[:200] if resp.text else "(empty)",
+            "Response body omitted because it may echo query text.",
+            resp.status_code,
+            model,
         )
     return None
 

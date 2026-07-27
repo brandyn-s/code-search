@@ -3,28 +3,41 @@
 import hashlib
 import os
 import shutil
-import sys
 import json
 import asyncio
 import logging
-import sqlite3
+import stat
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from functools import lru_cache
 
-# Add the parent directory to the path so we can import our modules
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from common_utils import get_storage_dir
 from chunking.multi_language_chunker import MultiLanguageChunker
 from embeddings.embedder import CodeEmbedder
+from search.index_identity import (
+    IdentityCaptureError,
+    IndexIdentity,
+    capture_index_identity,
+    describe_identity_mismatches,
+    identity_mismatch_fields,
+    validate_index_identity_dict,
+)
 from search.indexer import CodeIndexManager
+from search.logging_privacy import (
+    format_query_exception_for_log,
+    format_query_for_log,
+    query_text_logging_enabled,
+)
 from search.searcher import IntelligentSearcher
+from mcp_server.query_history import QueryHistoryStore
 
 # Configure logging
 logger = logging.getLogger(__name__)
+_PROJECT_INFO_UPDATE_LOCK = threading.RLock()
 
 _PIPELINE_COMPONENTS = [
     "chunker_version=3",  # v3: cAST-style merge of small adjacent chunks
@@ -135,6 +148,175 @@ def _job_terminal_state(success: bool) -> tuple[str, str]:
     return ("completed", "done") if success else ("failed", "error")
 
 
+def _active_synonym_profile_metadata() -> Dict[str, object]:
+    """Resolve query policy lazily so telemetry modules stay independent."""
+    from search.query_expansion import get_active_synonym_profile_metadata
+
+    return dict(get_active_synonym_profile_metadata())
+
+
+def _update_project_info(
+    info_file: Path,
+    updates: Dict[str, Any],
+    *,
+    remove_fields: tuple[str, ...] = (),
+) -> Dict[str, Any]:
+    """Serialize read-modify-write updates to shared project metadata."""
+    with _PROJECT_INFO_UPDATE_LOCK:
+        with open(info_file, encoding="utf-8") as handle:
+            project_info = json.load(handle)
+        for field in remove_fields:
+            project_info.pop(field, None)
+        project_info.update(updates)
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=info_file.parent,
+            prefix=f".{info_file.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            try:
+                temporary_handle = os.fdopen(
+                    descriptor,
+                    "w",
+                    encoding="utf-8",
+                )
+            except (OSError, ValueError):
+                os.close(descriptor)
+                raise
+            with temporary_handle:
+                json.dump(project_info, temporary_handle, indent=2)
+                temporary_handle.flush()
+                os.fsync(temporary_handle.fileno())
+            os.chmod(
+                temporary_path,
+                stat.S_IMODE(info_file.stat().st_mode),
+            )
+            os.replace(temporary_path, info_file)
+            temporary_path = None
+            try:
+                directory_flags = os.O_RDONLY | getattr(
+                    os,
+                    "O_DIRECTORY",
+                    0,
+                )
+                directory_descriptor = os.open(
+                    info_file.parent,
+                    directory_flags,
+                )
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+            except OSError:
+                # Atomic replacement already succeeded; directory fsync is
+                # unavailable on some supported filesystems/platforms.
+                pass
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        return project_info
+
+
+def _planned_index_storage_target(
+    project_path: str | Path,
+    provider: str | None,
+) -> Path:
+    """Resolve an index target without creating or migrating directories."""
+    project_path_obj = Path(project_path).resolve()
+    project_name = project_path_obj.name
+    projects_dir = get_storage_dir() / "projects"
+    legacy_hash = hashlib.md5(
+        str(project_path_obj).encode()
+    ).hexdigest()[:8]
+    legacy_dir = projects_dir / f"{project_name}_{legacy_hash}"
+
+    if provider:
+        provider_hash = hashlib.md5(
+            f"{project_path_obj}:{provider}".encode()
+        ).hexdigest()[:8]
+        return projects_dir / f"{project_name}_{provider_hash}"
+
+    if projects_dir.exists():
+        for candidate in projects_dir.glob(f"{project_name}_*"):
+            if not candidate.is_dir() or candidate == legacy_dir:
+                continue
+            info_file = candidate / "project_info.json"
+            if not info_file.exists():
+                continue
+            try:
+                with open(info_file, encoding="utf-8") as handle:
+                    info = json.load(handle)
+                stored_path_value = info.get("project_path")
+                if not stored_path_value:
+                    continue
+                stored_path = Path(stored_path_value).resolve()
+            except (OSError, TypeError, ValueError):
+                continue
+            if (
+                stored_path == project_path_obj
+                and (candidate / "index" / "code.index").exists()
+            ):
+                return candidate
+    return legacy_dir
+
+
+def _resolve_targeted_index_storage(
+    project_path: str | Path,
+    provider_hint: str | None,
+) -> tuple[Path, list[str]]:
+    """Resolve an existing index without creating, migrating, or guessing."""
+    if provider_hint is not None:
+        return (
+            _planned_index_storage_target(project_path, provider_hint),
+            [],
+        )
+
+    project_path_obj = Path(project_path).resolve()
+    projects_dir = get_storage_dir() / "projects"
+    legacy_hash = hashlib.md5(
+        str(project_path_obj).encode()
+    ).hexdigest()[:8]
+    legacy_dir = projects_dir / f"{project_path_obj.name}_{legacy_hash}"
+    if not projects_dir.exists():
+        return legacy_dir, []
+
+    populated_candidates: list[tuple[Path, str]] = []
+    for candidate in sorted(projects_dir.glob(f"{project_path_obj.name}_*")):
+        if (
+            not candidate.is_dir()
+            or not (candidate / "index" / "code.index").exists()
+        ):
+            continue
+        info_file = candidate / "project_info.json"
+        try:
+            with open(info_file, encoding="utf-8") as handle:
+                project_info = json.load(handle)
+            if not isinstance(project_info, dict):
+                raise ValueError("expected a JSON object")
+            stored_path = Path(project_info.get("project_path")).resolve()
+        except (OSError, TypeError, ValueError):
+            # The legacy directory is deterministically bound to this exact
+            # path even when its metadata is corrupt. Select it when it is the
+            # only candidate so the caller can surface the corruption.
+            if candidate == legacy_dir:
+                populated_candidates.append((candidate, "legacy"))
+            continue
+        if stored_path != project_path_obj:
+            continue
+        provider = project_info.get("embedding_provider") or "legacy"
+        populated_candidates.append((candidate, str(provider)))
+
+    if len(populated_candidates) == 1:
+        return populated_candidates[0][0], []
+    if len(populated_candidates) > 1:
+        return (
+            legacy_dir,
+            sorted({provider for _, provider in populated_candidates}),
+        )
+    return legacy_dir, []
+
+
 # Phase A (2026-05-07): refuse-as-project-root reasons. When auto-index
 # would otherwise pick a path that isn't a real project — most commonly
 # `$HOME` because the MCP server was spawned with cwd at the user's home —
@@ -186,13 +368,17 @@ class CodeSearchServer:
         # crashed thread between line 596's `finally` and process restart
         # is the failure shape this guards against.
         import threading as _threading
+        self._indexing_job_lock = _threading.RLock()
         self._background_reindex_lock = _threading.Lock()
         self._background_reindex_active = False
         self._background_reindex_started_at: Optional[float] = None
         self._background_reindex_thread: Optional[Any] = None
 
-        # Query logging (ported from memory-search)
-        self._query_log_db = self._init_query_log()
+        # Consent-aware query history. Metadata-only is the safe default;
+        # plaintext requires CODE_SEARCH_QUERY_HISTORY=full.
+        self._query_history = QueryHistoryStore.from_environment(
+            get_storage_dir()
+        )
 
         # Startup preflight: announce silent reranker degradation once,
         # loudly, instead of only in per-query _metadata (PR #229 finding:
@@ -201,6 +387,217 @@ class CodeSearchServer:
         # hybrid order, and nothing said so until a query's metadata was
         # inspected). Never fails startup.
         self._warn_if_reranker_degraded()
+
+    def _capture_index_identity(self, project_path: Path) -> IndexIdentity:
+        """Seam for deterministic start/end identity capture tests."""
+        return capture_index_identity(project_path)
+
+    def _persist_index_identity_state(
+        self,
+        info_file: Path,
+        published: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Replace persisted identity state without retaining stale fields."""
+        try:
+            _update_project_info(
+                info_file,
+                published,
+                remove_fields=(
+                    "index_identity",
+                    "index_identity_error",
+                    "index_identity_status",
+                ),
+            )
+        except (OSError, ValueError) as exc:
+            return {
+                "index_identity_status": "error",
+                "index_identity_error": (
+                    f"Could not persist index identity: {exc}"
+                ),
+            }
+        return published
+
+    def _read_index_identity_state(
+        self,
+        info_file: Path,
+    ) -> Dict[str, Any]:
+        """Read only the replaceable identity fields from project metadata."""
+        try:
+            with open(info_file, encoding="utf-8") as handle:
+                project_info = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        return {
+            key: project_info[key]
+            for key in (
+                "index_identity_status",
+                "index_identity",
+                "index_identity_error",
+            )
+            if key in project_info
+        }
+
+    def _completed_index_metadata(
+        self,
+        pipeline_version: str,
+    ) -> Dict[str, Any]:
+        """Build provenance to publish with a coherent completed identity."""
+        profile_metadata = _active_synonym_profile_metadata()
+        return {
+            "pipeline_version": pipeline_version,
+            "synonym_profile": profile_metadata,
+        }
+
+    def _finalize_index_identity(
+        self,
+        project_path: Path,
+        info_file: Path,
+        start_identity: IndexIdentity,
+        *,
+        ready_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Atomically publish identity and metadata for a coherent index."""
+        try:
+            end_identity = self._capture_index_identity(project_path)
+            mismatch_fields = identity_mismatch_fields(
+                start_identity,
+                end_identity,
+            )
+            if mismatch_fields:
+                change_details = describe_identity_mismatches(
+                    start_identity,
+                    end_identity,
+                )
+                published: Dict[str, Any] = {
+                    "index_identity_status": "source_changed_during_index",
+                    "index_identity_error": (
+                        "Source changed during indexing ("
+                        f"{change_details}); rerun "
+                        "index_directory against a stable checkout."
+                    ),
+                }
+            else:
+                published = {
+                    **(ready_metadata or {}),
+                    "index_identity_status": "ready",
+                    "index_identity": end_identity.to_dict(),
+                }
+        except IdentityCaptureError as exc:
+            published = {
+                "index_identity_status": "error",
+                "index_identity_error": str(exc),
+            }
+
+        return self._persist_index_identity_state(info_file, published)
+
+    def _auto_reindex_with_identity(
+        self,
+        incremental_indexer: Any,
+        project_path: Path | str,
+        *,
+        max_age_minutes: float,
+        publish_pending: bool,
+    ) -> tuple[Any, bool, Dict[str, Any]]:
+        """Run search-time reindexing as one source-identity transaction."""
+        source_path = Path(project_path).resolve()
+        project_dir = self.get_project_storage_dir(
+            str(source_path),
+            provider=getattr(self, "_current_provider", None),
+        )
+        info_file = project_dir / "project_info.json"
+        previous_state = self._read_index_identity_state(info_file)
+
+        start_identity: Optional[IndexIdentity] = None
+        start_error: Optional[str] = None
+        try:
+            start_identity = self._capture_index_identity(source_path)
+        except IdentityCaptureError as exc:
+            start_error = str(exc)
+
+        if publish_pending:
+            pending: Dict[str, Any] = {
+                "index_identity_status": "pending",
+            }
+            if start_error:
+                pending["index_identity_error"] = (
+                    f"identity_capture_start_failed: {start_error}"
+                )
+            self._persist_index_identity_state(info_file, pending)
+
+        try:
+            result = incremental_indexer.auto_reindex_if_needed(
+                str(source_path),
+                max_age_minutes=max_age_minutes,
+            )
+        except Exception as exc:
+            self._persist_index_identity_state(
+                info_file,
+                {
+                    "index_identity_status": "error",
+                    "index_identity_error": (
+                        f"auto_reindex_exception: {exc}"
+                    ),
+                },
+            )
+            raise
+
+        def _count(field: str) -> int:
+            value = getattr(result, field, 0)
+            return value if isinstance(value, int) else 0
+
+        mutated = any(
+            _count(field) > 0
+            for field in (
+                "files_added",
+                "files_modified",
+                "files_removed",
+            )
+        )
+        disposition = getattr(result, "reindex_disposition", None)
+        completed_scan = (
+            disposition == "completed"
+            if isinstance(disposition, str)
+            else mutated
+        )
+        succeeded = bool(getattr(result, "success", True))
+        if not succeeded:
+            state = self._persist_index_identity_state(
+                info_file,
+                {
+                    "index_identity_status": "error",
+                    "index_identity_error": (
+                        "auto_reindex_failed: "
+                        f"{getattr(result, 'error', None) or 'unknown error'}"
+                    ),
+                },
+            )
+        elif not completed_scan:
+            if publish_pending:
+                self._persist_index_identity_state(
+                    info_file,
+                    previous_state,
+                )
+            state = previous_state or {
+                "index_identity_status": "legacy_missing",
+            }
+        elif start_identity is None:
+            state = self._persist_index_identity_state(
+                info_file,
+                {
+                    "index_identity_status": "error",
+                    "index_identity_error": (
+                        "identity_capture_start_failed: "
+                        f"{start_error or 'unknown error'}"
+                    ),
+                },
+            )
+        else:
+            state = self._finalize_index_identity(
+                source_path,
+                info_file,
+                start_identity,
+            )
+        return result, mutated, state
 
     def _warn_if_reranker_degraded(self) -> None:
         """Warn at startup when the configured reranker cannot run.
@@ -238,46 +635,22 @@ class CodeSearchServer:
         except Exception:  # pragma: no cover — preflight must never break startup
             logger.debug("reranker startup preflight failed", exc_info=True)
 
-    def _init_query_log(self) -> Optional[sqlite3.Connection]:
-        """Initialize query log database."""
-        try:
-            log_path = get_storage_dir() / "query_log.db"
-            db = sqlite3.connect(str(log_path), check_same_thread=False)
-            db.execute("PRAGMA journal_mode = WAL")
-            db.execute("""
-                CREATE TABLE IF NOT EXISTS query_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    query TEXT NOT NULL,
-                    project TEXT DEFAULT '',
-                    search_mode TEXT DEFAULT 'auto',
-                    result_count INTEGER DEFAULT 0,
-                    top_score REAL DEFAULT 0.0,
-                    latency_ms REAL DEFAULT 0.0,
-                    cache_hit INTEGER DEFAULT 0,
-                    timestamp REAL NOT NULL
-                )
-            """)
-            db.commit()
-            return db
-        except Exception:
-            return None
-
     def _log_query(self, query: str, project: str, mode: str,
                    result_count: int, top_score: float, latency_ms: float,
                    cache_hit: bool):
-        """Log a search query for offline analysis."""
-        if self._query_log_db is None:
+        """Record consent-appropriate query history without affecting search."""
+        history = getattr(self, "_query_history", None)
+        if history is None:
             return
-        try:
-            self._query_log_db.execute(
-                "INSERT INTO query_log (query, project, search_mode, result_count, "
-                "top_score, latency_ms, cache_hit, timestamp) VALUES (?,?,?,?,?,?,?,?)",
-                (query, project or "", mode, result_count, top_score,
-                 latency_ms, 1 if cache_hit else 0, time.time()),
-            )
-            self._query_log_db.commit()
-        except Exception:
-            pass
+        history.record(
+            query=query,
+            project=project or "",
+            search_mode=mode,
+            result_count=result_count,
+            top_score=top_score,
+            latency_ms=latency_ms,
+            cache_hit=cache_hit,
+        )
 
     def get_project_storage_dir(self, project_path: str, provider: str = None) -> Path:
         """Get or create project-specific storage directory.
@@ -686,14 +1059,28 @@ class CodeSearchServer:
                 ii = IncrementalIndexer(
                     indexer=index_manager, embedder=embedder, chunker=chunker
                 )
-                result = ii.auto_reindex_if_needed(
-                    project_path, max_age_minutes=max_age_minutes
+                result, mutated, identity_state = (
+                    self._auto_reindex_with_identity(
+                        ii,
+                        project_path,
+                        max_age_minutes=max_age_minutes,
+                        publish_pending=True,
+                    )
                 )
-                if result.files_modified > 0 or result.files_added > 0:
+                if mutated:
                     logger.info(
-                        f"[F2-bg] reindexed: +{result.files_added} ~{result.files_modified} "
+                        f"[F2-bg] reindexed: +{result.files_added} "
+                        f"~{result.files_modified} -{result.files_removed} "
                         f"in {result.time_taken:.1f}s"
                     )
+                    if (
+                        identity_state.get("index_identity_status")
+                        != "ready"
+                    ):
+                        logger.warning(
+                            "[F2-bg] reindex identity is not ready: %s",
+                            identity_state,
+                        )
                     if self._searcher:
                         try:
                             self._searcher.clear_cache()
@@ -749,12 +1136,18 @@ class CodeSearchServer:
         t_start = time.time()
         try:
             logger.info(
-                f"🔍 MCP REQUEST: search_code(query='{query}', k={k}, mode='{search_mode}', file_pattern={file_pattern}, chunk_type={chunk_type})"
+                "MCP REQUEST: search_code(query=%s, k=%s, mode=%r, "
+                "file_pattern=%r, chunk_type=%r)",
+                format_query_for_log(query),
+                k,
+                search_mode,
+                file_pattern,
+                chunk_type,
             )
 
             # If indexing is in progress, report that instead of returning empty
-            if self._indexing_job and self._indexing_job["status"] == "indexing":
-                job = self._indexing_job
+            job = self._indexing_job_snapshot()
+            if job and job["status"] == "indexing":
                 pct = (
                     round(100 * job["current"] / job["total"], 1)
                     if job["total"] > 0
@@ -822,14 +1215,34 @@ class CodeSearchServer:
                         indexer=index_manager, embedder=embedder, chunker=chunker
                     )
 
-                    reindex_result = incremental_indexer.auto_reindex_if_needed(
-                        self._current_project, max_age_minutes=max_age_minutes
+                    (
+                        reindex_result,
+                        reindex_mutated,
+                        reindex_identity_state,
+                    ) = self._auto_reindex_with_identity(
+                        incremental_indexer,
+                        self._current_project,
+                        max_age_minutes=max_age_minutes,
+                        publish_pending=True,
                     )
 
-                    if reindex_result.files_modified > 0 or reindex_result.files_added > 0:
+                    if reindex_mutated:
                         logger.info(
-                            f"Auto-reindexed: {reindex_result.files_added} added, {reindex_result.files_modified} modified, took {reindex_result.time_taken:.2f}s"
+                            f"Auto-reindexed: {reindex_result.files_added} "
+                            f"added, {reindex_result.files_modified} modified, "
+                            f"{reindex_result.files_removed} removed, took "
+                            f"{reindex_result.time_taken:.2f}s"
                         )
+                        if (
+                            reindex_identity_state.get(
+                                "index_identity_status"
+                            )
+                            != "ready"
+                        ):
+                            logger.warning(
+                                "Auto-reindex identity is not ready: %s",
+                                reindex_identity_state,
+                            )
                         # Clear query embedding cache before resetting searcher
                         if self._searcher:
                             self._searcher.clear_cache()
@@ -864,7 +1277,10 @@ class CodeSearchServer:
 
             context_depth = 1 if include_context else 0
             logger.info(
-                f"Calling searcher.search with query='{query}', k={k}, mode={search_mode}"
+                "Calling searcher.search with query=%s, k=%s, mode=%s",
+                format_query_for_log(query),
+                k,
+                search_mode,
             )
             results = searcher.search(
                 query=query,
@@ -931,6 +1347,15 @@ class CodeSearchServer:
             # latency_ms}`. Future PRs add freshness (Phase F2),
             # provenance/confidence (Plan 1).
             response_metadata: Dict[str, Any] = {}
+            try:
+                response_metadata["synonym_profile"] = (
+                    _active_synonym_profile_metadata()
+                )
+            except Exception as e:
+                logger.debug(
+                    "synonym profile metadata propagation failed: %s",
+                    type(e).__name__,
+                )
             try:
                 rerank_meta = getattr(searcher, "last_reranker_metadata", None)
                 if rerank_meta and isinstance(rerank_meta, dict):
@@ -1056,7 +1481,11 @@ class CodeSearchServer:
             return json.dumps(response, separators=(",", ":"))
         except Exception as e:
             error_msg = f"Search failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(
+                "Search failed: %s",
+                format_query_exception_for_log(e),
+                exc_info=query_text_logging_enabled(),
+            )
             return json.dumps({"error": error_msg})
 
     def _agentic_rerank(self, query: str, results: list, k: int) -> list:
@@ -1119,8 +1548,128 @@ class CodeSearchServer:
             return reranked
 
         except Exception as e:
-            logger.warning(f"Agentic rerank failed: {e}, using baseline")
+            logger.warning(
+                "Agentic rerank failed: %s, using baseline",
+                format_query_exception_for_log(e),
+                exc_info=query_text_logging_enabled(),
+            )
             return results
+
+    def _indexing_job_state_lock(self) -> Any:
+        """Return the lock guarding the process-global foreground job."""
+        job_lock = getattr(self, "_indexing_job_lock", None)
+        if job_lock is None:
+            # Some tests intentionally bypass __init__. Production instances
+            # always receive this lock in __init__.
+            job_lock = threading.RLock()
+            self._indexing_job_lock = job_lock
+        return job_lock
+
+    def _indexing_job_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return one coherent copy of the current foreground job."""
+        with self._indexing_job_state_lock():
+            if self._indexing_job is None:
+                return None
+            return dict(self._indexing_job)
+
+    def _update_indexing_job(
+        self,
+        job_id: str,
+        **updates: Any,
+    ) -> bool:
+        """Atomically update only the foreground job owned by ``job_id``."""
+        with self._indexing_job_state_lock():
+            if (
+                not self._indexing_job
+                or self._indexing_job.get("job_id") != job_id
+            ):
+                return False
+            self._indexing_job.update(updates)
+            return True
+
+    def _active_indexing_job_response(
+        self,
+        directory_path: str,
+        provider: Optional[str],
+    ) -> Optional[str]:
+        """Describe the active foreground job without starting another."""
+        active_job = self._indexing_job
+        if not active_job or active_job["status"] != "indexing":
+            return None
+
+        requested_directory = str(Path(directory_path).resolve())
+        active_directory = str(active_job.get("directory", ""))
+        active_provider_value = active_job.get("provider")
+        active_provider = (
+            active_provider_value.strip().lower()
+            if isinstance(active_provider_value, str)
+            and active_provider_value.strip()
+            else None
+        )
+        active_storage_target = str(
+            Path(
+                active_job.get("storage_target")
+                or _planned_index_storage_target(
+                    active_directory,
+                    active_provider,
+                )
+            ).resolve()
+        )
+        requested_storage_target = str(
+            _planned_index_storage_target(
+                requested_directory,
+                provider,
+            ).resolve()
+        )
+        directory_conflict = requested_directory != active_directory
+        provider_conflict = provider != active_provider
+        storage_target_conflict = requested_storage_target != active_storage_target
+        indexing_conflict = (
+            directory_conflict
+            or provider_conflict
+            or storage_target_conflict
+        )
+        active_project = str(
+            active_job.get("project_name")
+            or Path(active_directory).name
+            or "unknown"
+        )
+        requested_project = Path(requested_directory).name or "unknown"
+        if indexing_conflict:
+            message = (
+                f"Indexing job {active_job['job_id']} is already active "
+                f"for {active_project}; request for {requested_project} "
+                "did not start another job"
+            )
+        else:
+            message = (
+                f"Indexing already in progress for {active_project}; "
+                "reusing the active job"
+            )
+        response: Dict[str, Any] = {
+            "status": "indexing",
+            "index_ready": False,
+            "message": message,
+            "job_id": active_job["job_id"],
+            "phase": active_job.get("phase", "unknown"),
+            "chunks_done": active_job.get("current", 0),
+            "chunks_total": active_job.get("total", 0),
+            "directory": active_directory,
+            "project_name": active_project,
+            "provider": active_provider,
+            "storage_target": active_storage_target,
+            "requested_directory": requested_directory,
+            "requested_provider": provider,
+            "requested_storage_target": requested_storage_target,
+            "indexing_conflict": indexing_conflict,
+        }
+        if directory_conflict:
+            response["conflict_reason"] = "different_project_indexing"
+        elif provider_conflict:
+            response["conflict_reason"] = "different_provider_indexing"
+        elif storage_target_conflict:
+            response["conflict_reason"] = "different_storage_target_indexing"
+        return json.dumps(response)
 
     def index_directory(
         self,
@@ -1145,18 +1694,17 @@ class CodeSearchServer:
         import threading
         import uuid
 
-        # If already indexing, return current status
-        if self._indexing_job and self._indexing_job["status"] == "indexing":
-            return json.dumps(
-                {
-                    "status": "indexing",
-                    "message": "Indexing already in progress",
-                    "job_id": self._indexing_job["job_id"],
-                    "phase": self._indexing_job.get("phase", "unknown"),
-                    "chunks_done": self._indexing_job.get("current", 0),
-                    "chunks_total": self._indexing_job.get("total", 0),
-                }
+        provider = provider.strip().lower() if provider else None
+
+        job_lock = self._indexing_job_state_lock()
+
+        with job_lock:
+            active_response = self._active_indexing_job_response(
+                directory_path,
+                provider,
             )
+        if active_response is not None:
+            return active_response
 
         directory_path_obj = Path(directory_path).resolve()
         if not directory_path_obj.exists():
@@ -1183,27 +1731,90 @@ class CodeSearchServer:
 
         project_name = project_name or directory_path_obj.name
         job_id = uuid.uuid4().hex[:8]
+        with job_lock:
+            active_response = self._active_indexing_job_response(
+                str(directory_path_obj),
+                provider,
+            )
+            if active_response is not None:
+                return active_response
 
-        self._indexing_job = {
-            "job_id": job_id,
-            "status": "indexing",
-            "phase": "starting",
-            "current": 0,
-            "total": 0,
-            "errors": [],
-            "directory": str(directory_path_obj),
-            "project_name": project_name,
-            "result": None,
-            "cancel_requested": False,
+            identity_project_dir = self.get_project_storage_dir(
+                str(directory_path_obj),
+                provider=provider,
+            )
+            identity_info_file = identity_project_dir / "project_info.json"
+            self._indexing_job = {
+                "job_id": job_id,
+                "status": "indexing",
+                "phase": "preparing",
+                "current": 0,
+                "total": 0,
+                "errors": [],
+                "directory": str(directory_path_obj),
+                "project_name": project_name,
+                "provider": provider,
+                "storage_target": str(identity_project_dir.resolve()),
+                "result": None,
+                "cancel_requested": False,
+                "identity_start": None,
+                "identity_start_error": None,
+                "identity_info_file": identity_info_file,
+                "index_ready": False,
+            }
+
+        identity_start: Optional[IndexIdentity] = None
+        identity_start_error: Optional[str] = None
+        try:
+            identity_start = self._capture_index_identity(directory_path_obj)
+        except IdentityCaptureError as exc:
+            # Preserve legacy non-Git indexing, but never represent it as
+            # cross-engine ready. The terminal result persists this error.
+            identity_start_error = str(exc)
+        indexing_identity_state: Dict[str, Any] = {
+            "index_identity_status": "indexing",
         }
+        if identity_start_error:
+            indexing_identity_state["index_identity_error"] = (
+                f"identity_capture_start_failed: {identity_start_error}"
+            )
+        self._persist_index_identity_state(
+            identity_info_file,
+            indexing_identity_state,
+        )
+        self._update_indexing_job(
+            job_id,
+            phase="starting",
+            identity_start=identity_start,
+            identity_start_error=identity_start_error,
+        )
 
         def _progress_callback(phase, current, total):
-            if self._indexing_job and self._indexing_job["job_id"] == job_id:
-                self._indexing_job["phase"] = phase
-                self._indexing_job["current"] = current
-                self._indexing_job["total"] = total
-                if self._indexing_job.get("cancel_requested"):
-                    raise InterruptedError("Indexing cancelled by user")
+            with job_lock:
+                active_job = self._indexing_job
+                if not active_job or active_job.get("job_id") != job_id:
+                    return
+                active_job.update(
+                    {
+                        "phase": phase,
+                        "current": current,
+                        "total": total,
+                    }
+                )
+                cancel_requested = bool(
+                    active_job.get("cancel_requested")
+                )
+            if cancel_requested:
+                raise InterruptedError("Indexing cancelled by user")
+
+        def _cancel_requested() -> bool:
+            with job_lock:
+                active_job = self._indexing_job
+                return bool(
+                    active_job
+                    and active_job.get("job_id") == job_id
+                    and active_job.get("cancel_requested")
+                )
 
         def _run_indexing():
             try:
@@ -1263,11 +1874,7 @@ class CodeSearchServer:
                     chunker=chunker,
                     snapshot_manager=_snapshot_manager,
                     progress_fn=_progress_callback,
-                    cancel_check=lambda jid=job_id: bool(
-                        self._indexing_job
-                        and self._indexing_job.get("job_id") == jid
-                        and self._indexing_job.get("cancel_requested")
-                    ),
+                    cancel_check=_cancel_requested,
                 )
 
                 # Pipeline version check: force full reindex if pipeline changed
@@ -1311,22 +1918,84 @@ class CodeSearchServer:
 
                 stats = incremental_indexer.get_indexing_stats(str(directory_path_obj))
 
-                # Store pipeline version after successful indexing
-                if info_file.exists():
-                    try:
-                        with open(info_file, "r", encoding="utf-8") as f:
-                            info = json.load(f)
-                        info["pipeline_version"] = current_pipeline_version
-                        with open(info_file, "w", encoding="utf-8") as f:
-                            json.dump(info, f, indent=2)
-                    except Exception as ve:
-                        logger.warning(f"Failed to store pipeline version: {ve}")
+                effective_success = result.success
+                terminal_error = result.error
+                index_ready = False
+                if result.success:
+                    if identity_start is None:
+                        identity_state = self._persist_index_identity_state(
+                            identity_info_file,
+                            {
+                                "index_identity_status": "error",
+                                "index_identity_error": (
+                                    "identity_capture_start_failed: "
+                                    f"{identity_start_error or 'unknown error'}"
+                                ),
+                            },
+                        )
+                        effective_success = False
+                        terminal_error = (
+                            f"{identity_state.get('index_identity_status', 'error')}: "
+                            f"{identity_state.get('index_identity_error', 'index identity start capture failed')}"
+                        )
+                    else:
+                        try:
+                            completed_index_metadata = (
+                                self._completed_index_metadata(
+                                    current_pipeline_version,
+                                )
+                            )
+                        except Exception as metadata_exc:
+                            identity_state = (
+                                self._persist_index_identity_state(
+                                    identity_info_file,
+                                    {
+                                        "index_identity_status": "error",
+                                        "index_identity_error": (
+                                            "completed_metadata_failed: "
+                                            f"{metadata_exc}"
+                                        ),
+                                    },
+                                )
+                            )
+                            effective_success = False
+                            terminal_error = (
+                                f"{identity_state.get('index_identity_status', 'error')}: "
+                                f"{identity_state.get('index_identity_error', 'completed index metadata unavailable')}"
+                            )
+                        else:
+                            identity_state = self._finalize_index_identity(
+                                directory_path_obj,
+                                identity_info_file,
+                                identity_start,
+                                ready_metadata=completed_index_metadata,
+                            )
+                            index_ready = (
+                                identity_state.get("index_identity_status")
+                                == "ready"
+                            )
+                            if not index_ready:
+                                effective_success = False
+                                terminal_error = (
+                                    f"{identity_state.get('index_identity_status', 'error')}: "
+                                    f"{identity_state.get('index_identity_error', 'index identity is not coherent')}"
+                                )
+                else:
+                    identity_state = self._persist_index_identity_state(
+                        identity_info_file,
+                        {
+                            "index_identity_status": "error",
+                            "index_identity_error": (
+                                f"index_failed: {result.error or 'unknown error'}"
+                            ),
+                        },
+                    )
 
-                job_status, job_phase = _job_terminal_state(result.success)
-                self._indexing_job["status"] = job_status
-                self._indexing_job["phase"] = job_phase
-                self._indexing_job["result"] = {
-                    "success": result.success,
+                job_status, job_phase = _job_terminal_state(
+                    effective_success
+                )
+                terminal_result = {
+                    "success": effective_success,
                     "directory": str(directory_path_obj),
                     "project_name": project_name,
                     "files_added": result.files_added,
@@ -1336,29 +2005,75 @@ class CodeSearchServer:
                     "chunks_removed": result.chunks_removed,
                     "time_taken": round(result.time_taken, 2),
                     "index_stats": stats,
-                    "error": result.error,
+                    "error": terminal_error,
+                    "index_ready": index_ready,
+                    **identity_state,
                 }
-                if result.success:
+                self._update_indexing_job(
+                    job_id,
+                    status=job_status,
+                    phase=job_phase,
+                    index_ready=index_ready,
+                    result=terminal_result,
+                )
+                if effective_success:
                     logger.info(
                         f"Indexing completed. Added: {result.files_added}, Modified: {result.files_modified}, Time: {result.time_taken:.2f}s"
                     )
                 else:
                     logger.error(
-                        f"Indexing finished UNSUCCESSFULLY (job status=failed): {result.error}"
+                        f"Indexing finished UNSUCCESSFULLY (job status=failed): {terminal_error}"
                     )
                 # Clear query embedding cache after reindex
                 if self._searcher:
                     self._searcher.clear_cache()
             except InterruptedError:
                 logger.info("Indexing cancelled by user")
-                self._indexing_job["status"] = "cancelled"
-                self._indexing_job["phase"] = "cancelled"
-                self._indexing_job["result"] = {"cancelled": True, "message": "Indexing was cancelled by user"}
+                identity_state = self._persist_index_identity_state(
+                    identity_info_file,
+                    {
+                        "index_identity_status": "cancelled",
+                        "index_identity_error": (
+                            "index_cancelled: indexing was cancelled by user"
+                        ),
+                    },
+                )
+                terminal_result = {
+                    "cancelled": True,
+                    "message": "Indexing was cancelled by user",
+                    "index_ready": False,
+                    **identity_state,
+                }
+                self._update_indexing_job(
+                    job_id,
+                    status="cancelled",
+                    phase="cancelled",
+                    index_ready=False,
+                    result=terminal_result,
+                )
             except Exception as e:
                 logger.error(f"Background indexing failed: {e}", exc_info=True)
-                self._indexing_job["status"] = "failed"
-                self._indexing_job["phase"] = "error"
-                self._indexing_job["result"] = {"error": str(e)}
+                identity_state = self._persist_index_identity_state(
+                    identity_info_file,
+                    {
+                        "index_identity_status": "error",
+                        "index_identity_error": (
+                            f"index_exception: {e}"
+                        ),
+                    },
+                )
+                terminal_result = {
+                    "error": str(e),
+                    "index_ready": False,
+                    **identity_state,
+                }
+                self._update_indexing_job(
+                    job_id,
+                    status="failed",
+                    phase="error",
+                    index_ready=False,
+                    result=terminal_result,
+                )
 
         logger.info(
             f"Starting background indexing: {directory_path_obj} (incremental={incremental})"
@@ -1372,6 +2087,9 @@ class CodeSearchServer:
                 "job_id": job_id,
                 "directory": str(directory_path_obj),
                 "project_name": project_name,
+                "provider": provider,
+                "storage_target": str(identity_project_dir.resolve()),
+                "index_ready": False,
                 "message": "Indexing started in background. Use get_indexing_progress to check status.",
             }
         )
@@ -1395,12 +2113,14 @@ class CodeSearchServer:
           - "background_reindex_active": only F2's background thread runs
         """
         bg_active = bool(getattr(self, "_background_reindex_active", False))
+        job = self._indexing_job_snapshot()
 
-        if not self._indexing_job:
+        if not job:
             if bg_active:
                 # No foreground job, but background reindex IS running.
                 return json.dumps({
                     "status": "background_reindex_active",
+                    "index_ready": False,
                     "background_reindex_active": True,
                     "message": (
                         "Search-time background reindex in progress "
@@ -1412,18 +2132,21 @@ class CodeSearchServer:
                 })
             return json.dumps({
                 "status": "idle",
+                "index_ready": False,
                 "background_reindex_active": False,
                 "message": "No indexing job running",
             })
 
-        job = self._indexing_job
         response = {
             "job_id": job["job_id"],
             "status": job["status"],
             "phase": job["phase"],
             "directory": job.get("directory", ""),
             "project_name": job.get("project_name", ""),
+            "provider": job.get("provider"),
+            "storage_target": job.get("storage_target"),
             "background_reindex_active": bg_active,
+            "index_ready": bool(job.get("index_ready", False)),
         }
 
         if job["total"] > 0:
@@ -1448,8 +2171,20 @@ class CodeSearchServer:
             elif phase in ("embedding", "saving"):
                 response["unit"] = "chunks"
 
-        if job["status"] in ("completed", "failed") and job.get("result"):
-            response["result"] = job["result"]
+        if job["status"] in ("completed", "failed", "cancelled") and job.get(
+            "result"
+        ):
+            terminal_result = job["result"]
+            if isinstance(terminal_result, dict):
+                terminal_result = {
+                    **terminal_result,
+                    **{
+                        key: job[key]
+                        for key in ("provider", "storage_target")
+                        if key in job
+                    },
+                }
+            response["result"] = terminal_result
 
         return json.dumps(response)
 
@@ -1484,8 +2219,342 @@ class CodeSearchServer:
             logger.error(error_msg, exc_info=True)
             return json.dumps({"error": error_msg})
 
-    def get_index_status(self) -> str:
-        """Implementation of get_index_status tool."""
+    def _get_targeted_index_status(self, project_path: str) -> str:
+        """Inspect one project's index without changing the active project."""
+        source_path = Path(project_path).resolve()
+        if not source_path.exists():
+            return json.dumps(
+                {
+                    "error": f"Project path does not exist: {source_path}",
+                    "project_path": str(source_path),
+                    "index_ready": False,
+                    "index_identity_status": "not_found",
+                },
+                indent=2,
+            )
+        if not source_path.is_dir():
+            return json.dumps(
+                {
+                    "error": f"Project path is not a directory: {source_path}",
+                    "project_path": str(source_path),
+                    "index_ready": False,
+                    "index_identity_status": "not_found",
+                },
+                indent=2,
+            )
+
+        job = self._indexing_job_snapshot()
+        matching_job: Optional[Dict[str, Any]] = None
+        if job:
+            job_directory = job.get("directory")
+            if job_directory:
+                try:
+                    if Path(job_directory).resolve() == source_path:
+                        matching_job = job
+                except (OSError, TypeError, ValueError):
+                    pass
+
+        active_project = getattr(self, "_current_project", None)
+        active_provider = getattr(self, "_current_provider", None)
+        provider_hint = None
+        if matching_job:
+            provider_hint = matching_job.get("provider")
+        elif active_project:
+            try:
+                if Path(active_project).resolve() == source_path:
+                    provider_hint = active_provider
+            except (OSError, TypeError, ValueError):
+                pass
+
+        storage_target = (
+            matching_job.get("storage_target")
+            if matching_job
+            else None
+        )
+        if storage_target:
+            project_dir = Path(storage_target).resolve()
+            ambiguous_providers: list[str] = []
+        else:
+            (
+                project_dir,
+                ambiguous_providers,
+            ) = _resolve_targeted_index_storage(
+                source_path,
+                provider_hint,
+            )
+        if ambiguous_providers:
+            return json.dumps(
+                {
+                    "error": (
+                        "Project has multiple populated indexes; provider "
+                        "selection is ambiguous before switch_project"
+                    ),
+                    "project_path": str(source_path),
+                    "storage_directory": str(get_storage_dir()),
+                    "available_providers": ambiguous_providers,
+                    "index_ready": False,
+                    "index_identity_status": "ambiguous_index",
+                },
+                indent=2,
+            )
+        info_file = project_dir / "project_info.json"
+        index_dir = project_dir / "index"
+        index_artifact = index_dir / "code.index"
+
+        empty_stats = {
+            "total_chunks": 0,
+            "index_size": 0,
+            "embedding_dimension": 0,
+            "files_indexed": 0,
+        }
+        response: Dict[str, Any] = {
+            "project_path": str(source_path),
+            "storage_target": str(project_dir),
+            "storage_directory": str(get_storage_dir()),
+            "index_statistics": empty_stats,
+            "index_ready": False,
+        }
+        if matching_job:
+            job_payload = {
+                key: matching_job.get(key)
+                for key in (
+                    "job_id",
+                    "status",
+                    "phase",
+                    "current",
+                    "total",
+                    "index_ready",
+                    "provider",
+                    "storage_target",
+                )
+            }
+            terminal_result = matching_job.get("result")
+            if isinstance(terminal_result, dict):
+                job_payload["result"] = dict(terminal_result)
+            response["indexing_job"] = job_payload
+
+        if not info_file.exists():
+            if matching_job:
+                response["provider"] = provider_hint
+                response["index_identity_status"] = matching_job.get(
+                    "status",
+                    "indexing",
+                )
+                response["index_identity_error"] = (
+                    "project_info.json is not available for the active "
+                    "indexing job"
+                )
+            else:
+                response["provider"] = provider_hint
+                response["index_identity_status"] = "not_indexed"
+                response["error"] = f"Project not indexed: {source_path}"
+            return json.dumps(response, indent=2)
+
+        try:
+            with open(info_file, encoding="utf-8") as handle:
+                project_info = json.load(handle)
+            if not isinstance(project_info, dict):
+                raise ValueError("expected a JSON object")
+        except (OSError, TypeError, ValueError) as exc:
+            response["provider"] = provider_hint
+            response["index_identity_status"] = "error"
+            response["index_identity_error"] = (
+                f"project_info identity could not be read: {exc}"
+            )
+            return json.dumps(response, indent=2)
+
+        stored_path_value = project_info.get("project_path")
+        try:
+            stored_path = Path(stored_path_value).resolve()
+        except (OSError, TypeError, ValueError) as exc:
+            response["provider"] = provider_hint
+            response["index_identity_status"] = "error"
+            response["index_identity_error"] = (
+                f"project_info project_path is invalid: {exc}"
+            )
+            return json.dumps(response, indent=2)
+        if stored_path != source_path:
+            response["provider"] = provider_hint
+            response["index_identity_status"] = "error"
+            response["index_identity_error"] = (
+                "project_info project_path does not match requested project: "
+                f"{stored_path} != {source_path}"
+            )
+            return json.dumps(response, indent=2)
+
+        provider = (
+            project_info.get("embedding_provider")
+            or provider_hint
+            or os.environ.get("EMBEDDING_PROVIDER", "openai")
+        )
+        model_name = project_info.get("embedding_model")
+        if not model_name:
+            model_name = (
+                os.environ.get(
+                    "EMBEDDING_MODEL",
+                    "text-embedding-3-small",
+                )
+                if provider == "openai"
+                else os.environ.get(
+                    "LOCAL_EMBEDDING_MODEL",
+                    "all-MiniLM-L6-v2",
+                )
+            )
+        response["provider"] = provider
+        response["model_information"] = {
+            "provider": provider,
+            "model_name": model_name,
+            "status": "configured",
+        }
+
+        identity = project_info.get("index_identity")
+        response["index_identity_status"] = project_info.get(
+            "index_identity_status",
+            "ready" if identity else "legacy_missing",
+        )
+        if identity is not None:
+            response["index_identity"] = identity
+        identity_error = project_info.get("index_identity_error")
+        if identity_error:
+            response["index_identity_error"] = identity_error
+        profile_metadata = project_info.get("synonym_profile")
+        if isinstance(profile_metadata, dict):
+            response["synonym_profile"] = profile_metadata
+
+        current_identity: Optional[IndexIdentity] = None
+        try:
+            current_identity = self._capture_index_identity(source_path)
+        except IdentityCaptureError as exc:
+            response["source_identity_error"] = (
+                f"source_identity_capture_failed: {exc}"
+            )
+        else:
+            response["source_identity"] = current_identity.to_dict()
+
+        if index_artifact.exists():
+            stats_file = index_dir / "stats.json"
+            if stats_file.exists():
+                try:
+                    with open(stats_file, encoding="utf-8") as handle:
+                        stats = json.load(handle)
+                    if isinstance(stats, dict):
+                        response["index_statistics"] = stats
+                except (OSError, TypeError, ValueError, UnicodeDecodeError):
+                    # Match CodeIndexManager.get_stats(): corrupt derived
+                    # statistics degrade to empty defaults. Constructing a
+                    # manager here would initialize SQLite/FTS and violate
+                    # get_index_status's read-only MCP annotation.
+                    pass
+
+        if response["index_identity_status"] == "ready":
+            if not index_artifact.exists():
+                response["index_identity_status"] = "error"
+                response["index_identity_error"] = (
+                    "ready identity has no code.index artifact; "
+                    "rerun index_directory"
+                )
+            else:
+                try:
+                    persisted_identity = validate_index_identity_dict(identity)
+                except ValueError as exc:
+                    response["index_identity_status"] = "error"
+                    response["index_identity_error"] = (
+                        f"persisted index identity is invalid: {exc}; "
+                        "rerun index_directory"
+                    )
+                else:
+                    if current_identity is None:
+                        response["index_identity_status"] = "error"
+                        response["index_identity_error"] = response.get(
+                            "source_identity_error",
+                            "source identity is unavailable; "
+                            "rerun index_directory",
+                        )
+                    else:
+                        mismatch_fields = identity_mismatch_fields(
+                            persisted_identity,
+                            current_identity,
+                        )
+                        if mismatch_fields:
+                            response["index_identity_status"] = (
+                                "stale_source"
+                            )
+                            change_details = (
+                                describe_identity_mismatches(
+                                    persisted_identity,
+                                    current_identity,
+                                )
+                            )
+                            response["index_identity_error"] = (
+                                "source_changed_since_index: "
+                                f"{change_details}; rerun index_directory"
+                            )
+                        else:
+                            terminal_result = (
+                                matching_job.get("result")
+                                if matching_job
+                                else None
+                            )
+                            terminal_result_ready = (
+                                isinstance(terminal_result, dict)
+                                and terminal_result.get("success") is True
+                                and terminal_result.get("index_ready") is True
+                                and not terminal_result.get("error")
+                            )
+                            job_allows_ready = (
+                                matching_job is None
+                                or (
+                                    matching_job.get("status")
+                                    == "completed"
+                                    and matching_job.get("index_ready") is True
+                                    and terminal_result_ready
+                                )
+                            )
+                            if job_allows_ready:
+                                response["index_ready"] = True
+                            else:
+                                if (
+                                    matching_job.get("status")
+                                    == "completed"
+                                ):
+                                    response["index_identity_status"] = "error"
+                                    response["index_identity_error"] = (
+                                        "matching terminal result is not a "
+                                        "coherent success"
+                                    )
+                                else:
+                                    response["index_identity_status"] = (
+                                        matching_job.get(
+                                            "status",
+                                            "indexing",
+                                        )
+                                    )
+                                    response["index_identity_error"] = (
+                                        "matching foreground job has not "
+                                        "published a ready index"
+                                    )
+
+        return json.dumps(response, indent=2)
+
+    def get_index_status(
+        self,
+        project_path: Optional[str] = None,
+    ) -> str:
+        """Implementation of get_index_status tool.
+
+        Args:
+            project_path: Optional repository path to inspect without changing
+                the active search project. When omitted, reports the active or
+                auto-detected project for backward compatibility.
+        """
+        if project_path is not None:
+            try:
+                return self._get_targeted_index_status(project_path)
+            except Exception as e:
+                error_msg = f"Status check failed: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                return json.dumps({"error": error_msg})
+
         try:
             index_manager = self.get_index_manager()
             stats = index_manager.get_stats()
@@ -1506,7 +2575,88 @@ class CodeSearchServer:
                 "index_statistics": stats,
                 "model_information": model_info,
                 "storage_directory": str(get_storage_dir()),
+                "index_ready": False,
             }
+
+            if self._current_project:
+                project_dir = self.get_project_storage_dir(
+                    self._current_project,
+                    provider=self._current_provider,
+                )
+                info_file = project_dir / "project_info.json"
+                try:
+                    with open(info_file, encoding="utf-8") as handle:
+                        project_info = json.load(handle)
+                    identity = project_info.get("index_identity")
+                    response["index_identity_status"] = project_info.get(
+                        "index_identity_status",
+                        "ready" if identity else "legacy_missing",
+                    )
+                    if identity is not None:
+                        response["index_identity"] = identity
+                    identity_error = project_info.get("index_identity_error")
+                    if identity_error:
+                        response["index_identity_error"] = identity_error
+                    profile_metadata = project_info.get("synonym_profile")
+                    if isinstance(profile_metadata, dict):
+                        response["synonym_profile"] = profile_metadata
+                    if response["index_identity_status"] == "ready":
+                        try:
+                            persisted_identity = (
+                                validate_index_identity_dict(identity)
+                            )
+                        except ValueError as exc:
+                            response["index_identity_status"] = "error"
+                            response["index_identity_error"] = (
+                                f"persisted index identity is invalid: {exc}; "
+                                "rerun index_directory"
+                            )
+                        else:
+                            source_path = Path(
+                                project_info.get(
+                                    "project_path",
+                                    self._current_project,
+                                )
+                            ).resolve()
+                            try:
+                                current_identity = (
+                                    self._capture_index_identity(source_path)
+                                )
+                            except IdentityCaptureError as exc:
+                                response["index_identity_status"] = "error"
+                                response["index_identity_error"] = (
+                                    "source_identity_capture_failed: "
+                                    f"{exc}; rerun index_directory"
+                                )
+                            else:
+                                mismatch_fields = identity_mismatch_fields(
+                                    persisted_identity,
+                                    current_identity,
+                                )
+                                if mismatch_fields:
+                                    response["index_identity_status"] = (
+                                        "stale_source"
+                                    )
+                                    change_details = (
+                                        describe_identity_mismatches(
+                                            persisted_identity,
+                                            current_identity,
+                                        )
+                                    )
+                                    response["index_identity_error"] = (
+                                        "source_changed_since_index: "
+                                        f"{change_details}; "
+                                        "rerun index_directory"
+                                    )
+                                else:
+                                    response["index_ready"] = True
+                except (OSError, ValueError) as exc:
+                    response["index_identity_status"] = "error"
+                    response["index_identity_error"] = (
+                        f"project_info identity could not be read: {exc}"
+                    )
+            else:
+                response["index_identity_status"] = "no_active_project"
 
             return json.dumps(response, indent=2)
         except Exception as e:
@@ -1590,10 +2740,9 @@ class CodeSearchServer:
             exists from a crashed prior write).
         """
         try:
-            # Lazy import: scripts.cleanup_index_orphans is the single source
-            # of truth for the orphan-detection logic (PR #103). Reusing it
-            # here keeps the MCP tool and admin script in sync.
-            from scripts.cleanup_index_orphans import (
+            # The installable integrity module is the single source of truth
+            # shared by this MCP tool and the thin admin CLI wrapper.
+            from search.integrity_audit import (
                 find_fts5_orphans,
                 find_metadata_orphans,
                 load_chunk_ids,
@@ -2238,14 +3387,16 @@ class CodeSearchServer:
     def cancel_indexing(self) -> str:
         """Cancel the currently running indexing job."""
         try:
-            if not self._indexing_job or self._indexing_job["status"] != "indexing":
-                return json.dumps({
-                    "success": False,
-                    "error": "No active indexing job to cancel",
-                })
+            with self._indexing_job_state_lock():
+                job = self._indexing_job
+                if not job or job["status"] != "indexing":
+                    return json.dumps({
+                        "success": False,
+                        "error": "No active indexing job to cancel",
+                    })
 
-            self._indexing_job["cancel_requested"] = True
-            job_id = self._indexing_job["job_id"]
+                job["cancel_requested"] = True
+                job_id = job["job_id"]
             logger.info(f"Cancellation requested for indexing job {job_id}")
 
             return json.dumps({

@@ -34,6 +34,11 @@ import random
 import time
 from typing import Any, Sequence
 
+from search.logging_privacy import (
+    format_query_exception_for_log,
+    query_text_logging_enabled,
+)
+
 LOG = logging.getLogger(__name__)
 
 # Reuse the same reason vocabulary as the pointwise reranker for
@@ -272,13 +277,32 @@ def _validate_response(
         # Fallback: extract first balanced {...} block (handles CoT prefix)
         block = _extract_json_block(text)
         if block is None:
-            LOG.warning("[LISTWISE] no JSON block found; head=%r", raw_text[:200])
+            if query_text_logging_enabled():
+                LOG.warning(
+                    "[LISTWISE] no JSON block found; head=%r",
+                    raw_text[:200],
+                )
+            else:
+                LOG.warning(
+                    "[LISTWISE] no JSON block found; response text omitted"
+                )
             return None, REASON_PARSE_FAILED
         try:
             obj = json.loads(block)
         except (json.JSONDecodeError, ValueError) as e:
-            LOG.warning("[LISTWISE] JSON parse failed even after block extraction: %s; head=%r",
-                        e, raw_text[:200])
+            if query_text_logging_enabled():
+                LOG.warning(
+                    "[LISTWISE] JSON parse failed even after block "
+                    "extraction: %s; head=%r",
+                    e,
+                    raw_text[:200],
+                )
+            else:
+                LOG.warning(
+                    "[LISTWISE] JSON parse failed even after block "
+                    "extraction: %s; response text omitted",
+                    format_query_exception_for_log(e),
+                )
             return None, REASON_PARSE_FAILED
 
     if not isinstance(obj, dict):
@@ -389,12 +413,24 @@ def listwise_rerank_with_sonnet(
     except Exception as e:
         msg = str(e).lower()
         if "rate" in msg and "limit" in msg:
-            LOG.warning("[LISTWISE] rate-limited: %s; using hybrid order", e)
+            LOG.warning(
+                "[LISTWISE] rate-limited: %s; using hybrid order",
+                format_query_exception_for_log(e),
+                exc_info=query_text_logging_enabled(),
+            )
             return _emit(candidates[:top_k], False, REASON_RATE_LIMIT)
         if "timeout" in msg or "timed out" in msg:
-            LOG.warning("[LISTWISE] timeout: %s; using hybrid order", e)
+            LOG.warning(
+                "[LISTWISE] timeout: %s; using hybrid order",
+                format_query_exception_for_log(e),
+                exc_info=query_text_logging_enabled(),
+            )
             return _emit(candidates[:top_k], False, REASON_TIMEOUT)
-        LOG.warning("[LISTWISE] unexpected error: %s; using hybrid order", e)
+        LOG.warning(
+            "[LISTWISE] unexpected error: %s; using hybrid order",
+            format_query_exception_for_log(e),
+            exc_info=query_text_logging_enabled(),
+        )
         return _emit(candidates[:top_k], False, REASON_UNEXPECTED_ERROR)
 
     # Extract text from response (Anthropic API shape).
@@ -412,7 +448,11 @@ def listwise_rerank_with_sonnet(
                 text_parts.append(t)
         raw_text = "".join(text_parts)
     except Exception as e:
-        LOG.warning("[LISTWISE] response shape error: %s", e)
+        LOG.warning(
+            "[LISTWISE] response shape error: %s",
+            format_query_exception_for_log(e),
+            exc_info=query_text_logging_enabled(),
+        )
         return _emit(candidates[:top_k], False, REASON_UNEXPECTED_ERROR)
 
     if not raw_text:

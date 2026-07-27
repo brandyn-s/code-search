@@ -44,6 +44,12 @@ import os
 import time
 from typing import Any
 
+from search.logging_privacy import (
+    format_query_exception_for_log,
+    query_fingerprint,
+    query_text_logging_enabled,
+)
+
 LOG = logging.getLogger(__name__)
 
 MODEL = "claude-sonnet-4-6"
@@ -485,7 +491,10 @@ async def _score_one(client: Any, query: str, file_path: str, content: str,
         )
 
     if exc is not None:
-        LOG.debug(f"Sonnet score call failed: {exc}")
+        LOG.debug(
+            "Sonnet score call failed: %s",
+            format_query_exception_for_log(exc),
+        )
         return _classify_call_error(exc)
 
     try:
@@ -510,17 +519,18 @@ async def _score_one(client: Any, query: str, file_path: str, content: str,
         # hypothesized that pool-size sensitivity explains the harvested
         # corruption signal; this logging surfaces the data to verify.
         if os.environ.get("SONNET_RERANKER_LOG_PER_CANDIDATE_SCORE"):
-            import hashlib
-            q_hash = hashlib.sha1(query.encode("utf-8", errors="replace")
-                                  ).hexdigest()[:8]
+            query_hmac = query_fingerprint(query)[:16]
             LOG.info(
-                f"[SONNET_PER_CANDIDATE_SCORE] query_hash={q_hash} "
+                f"[SONNET_PER_CANDIDATE_SCORE] query_hmac_sha256={query_hmac} "
                 f"file_path={file_path or '(unknown)'} score={score} "
                 f"pool_size={_resolve_pool_size()}"
             )
         return score
     except Exception as e:
-        LOG.debug(f"Sonnet score parse failed: {e}")
+        LOG.debug(
+            "Sonnet score parse failed: %s",
+            format_query_exception_for_log(e),
+        )
         return _ERR_UNPARSEABLE
 
 
@@ -795,8 +805,16 @@ def rerank_with_sonnet(
             LOG.warning("Sonnet reranker called from async context; not yet supported, "
                         "using hybrid order")
             return _emit(candidates[:top_k], False, REASON_ASYNC_CONTEXT)
-        LOG.warning(f"Sonnet reranker runtime error: {e}; using hybrid order")
+        LOG.warning(
+            "Sonnet reranker runtime error: %s; using hybrid order",
+            format_query_exception_for_log(e),
+            exc_info=query_text_logging_enabled(),
+        )
         return _emit(candidates[:top_k], False, REASON_UNEXPECTED_ERROR)
     except Exception as e:
-        LOG.warning(f"Sonnet reranker unexpected error: {e}; using hybrid order")
+        LOG.warning(
+            "Sonnet reranker unexpected error: %s; using hybrid order",
+            format_query_exception_for_log(e),
+            exc_info=query_text_logging_enabled(),
+        )
         return _emit(candidates[:top_k], False, REASON_UNEXPECTED_ERROR)

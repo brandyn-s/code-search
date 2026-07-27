@@ -1,0 +1,28 @@
+{
+  "id": "generic-v1",
+  "name": "generic",
+  "version": 1,
+  "synonyms": {
+    "auth": ["authentication", "oauth", "jwt", "token", "credential", "login", "entra"],
+    "authentication": ["auth", "oauth", "jwt", "token", "credential", "login", "entra"],
+    "error": ["exception", "raise", "ToolError", "HTTPException", "error_handling"],
+    "retry": ["backoff", "retryable", "retry_delay", "429", "529"],
+    "rate": ["rate_limit", "throttle", "RPM", "TPM"],
+    "middleware": ["ASGI", "middleware", "intercept"],
+    "route": ["Route", "endpoint", "path", "handler", "Starlette"],
+    "network": ["networking", "interface", "vlan", "firewall", "nftables", "allowedTCPPorts"],
+    "service": ["systemd", "daemon", "enable", "wantedBy", "serviceConfig", "systemd.services", "mkEnableOption"],
+    "package": ["pkgs", "nix", "derivation", "buildInputs", "nativeBuildInputs", "stdenv", "mkDerivation", "fetchurl"],
+    "option": ["mkOption", "mkEnableOption", "types", "default", "description"],
+    "nix": ["nixos", "nixpkgs", "derivation", "flake", "overlay"],
+    "module": ["nixos-module", "imports", "options", "mkIf"],
+    "derivation": ["stdenv", "mkDerivation", "buildInputs", "nativeBuildInputs", "fetchurl"],
+    "flake": ["flake.nix", "inputs", "outputs", "nixpkgs"],
+    "enable": ["mkEnableOption", "mkIf", "cfg.enable"],
+    "firewall": ["nftables", "allowedTCPPorts", "allowedUDPPorts", "networking.firewall"],
+    "systemd": ["systemd.services", "serviceConfig", "wantedBy", "ExecStart"],
+    "boot": ["bootloader", "grub", "systemd-boot", "initrd", "kernelModules"],
+    "nixos": ["nix", "nixpkgs", "nix-module", "mkOption"],
+    "environment": ["systemPackages", "environment.systemPackages"]
+  }
+}

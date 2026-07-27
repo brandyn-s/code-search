@@ -41,5 +41,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Verify installed wheel contract
+        run: python tests/acceptance/wheel_contract.py
+
       - name: Run unit suite
         run: python -m pytest tests/unit/ -q
