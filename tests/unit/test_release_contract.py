@@ -38,6 +38,7 @@ def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:
     assert "attest:" in workflow
     assert "publish:" in workflow
     assert workflow.count("id-token: write") == 1
+    assert workflow.count("attestations: read") == 1
     assert workflow.count("attestations: write") == 1
     assert workflow.count("contents: write") == 1
     assert "actions/download-artifact@" in workflow
@@ -97,6 +98,7 @@ def test_sensitive_tokens_and_secrets_are_step_scoped() -> None:
     }
     assert release_jobs["publish"]["permissions"] == {
         "actions": "read",
+        "attestations": "read",
         "contents": "write",
     }
     assert all(
