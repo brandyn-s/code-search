@@ -1,7 +1,29 @@
 """Tests for cross-encoder reranker."""
 
+import pytest
 
-def test_reranker_reorders_by_cross_encoder_score():
+
+class _FakeCrossEncoder:
+    """Deterministic stand-in for the network-backed model."""
+
+    def predict(self, pairs):
+        return [
+            1.0 if "check_rate_limit" in content else 0.5
+            for _, content in pairs
+        ]
+
+
+@pytest.fixture
+def fake_cross_encoder(monkeypatch):
+    """Keep reranking unit tests independent of the Hugging Face network."""
+    from search import reranker
+
+    model = _FakeCrossEncoder()
+    monkeypatch.setattr(reranker, "_load_cross_encoder", lambda: model)
+    return model
+
+
+def test_reranker_reorders_by_cross_encoder_score(fake_cross_encoder):
     """Reranker should reorder results based on query-document relevance."""
     from search.reranker import rerank_results
 
@@ -40,7 +62,7 @@ def test_reranker_handles_empty():
     assert reranked == []
 
 
-def test_reranker_respects_top_k():
+def test_reranker_respects_top_k(fake_cross_encoder):
     """Reranker should only return top_k results."""
     from search.reranker import rerank_results
 
@@ -65,7 +87,7 @@ def test_reranker_env_var_controls_activation():
     assert os.environ.get("RERANKER", "off") == "off"
 
 
-def test_reranker_preserves_all_fields():
+def test_reranker_preserves_all_fields(fake_cross_encoder):
     """Reranker should preserve chunk_id and other fields through reranking."""
     from search.reranker import rerank_results
 
@@ -85,7 +107,7 @@ def test_reranker_preserves_all_fields():
     assert "rerank_score" in reranked[0]
 
 
-def test_reranker_single_result():
+def test_reranker_single_result(fake_cross_encoder):
     """Reranker should handle a single result without error."""
     from search.reranker import rerank_results
 

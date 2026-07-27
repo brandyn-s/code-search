@@ -45,4 +45,7 @@ jobs:
         run: python tests/acceptance/wheel_contract.py
 
       - name: Run unit suite
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
         run: python -m pytest tests/unit/ -q
