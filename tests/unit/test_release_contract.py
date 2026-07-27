@@ -58,8 +58,19 @@ def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:
     assert "gh attestation verify" in workflow
     assert "RELEASE_ID" in workflow
     assert '"repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"' in workflow
+    assert "gh release upload" not in workflow
+    assert "upload_asset() {" in workflow
+    assert '.upload_url | split("{")[0]' in workflow
+    assert '--input "$ASSET"' in workflow
+    assert '-f name="$ASSET_NAME"' in workflow
+    assert '-f label="$ASSET_LABEL"' in workflow
+    assert '"$UPLOAD_URL"' in workflow
     assert "-F draft=false" in workflow
     assert "trap cleanup EXIT" in workflow
+    assert "|| true" not in workflow
+    assert "Could not inspect unpublished tag" in workflow
+    assert "Refusing to delete unexpected unpublished tag" in workflow
+    assert "Unpublished tag cleanup failed" in workflow
     assert '"repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG"' in workflow
     assert '"repos/$GITHUB_REPOSITORY/git/tags/$TAG_SHA"' in workflow
     assert "gh release verify " in workflow

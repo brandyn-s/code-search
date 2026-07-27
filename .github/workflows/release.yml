@@ -273,20 +273,25 @@ jobs:
               fi
             fi
             if [ "$TAG_CREATED" -eq 1 ]; then
-              CURRENT_TAG_SHA="$(
+              if ! CURRENT_TAG_SHA="$(
                 gh api \
                   "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
-                  --jq '.object.sha' \
-                  2>/dev/null \
-                  || true
-              )"
-              if [ "$CURRENT_TAG_SHA" = "$GITHUB_SHA" ]; then
-                echo "Deleting unpublished tag $TAG" >&2
-                gh api \
-                  --method DELETE \
-                  "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
-                  --silent \
-                  || true
+                  --jq '.object.sha'
+              )"; then
+                echo "Could not inspect unpublished tag; manual cleanup required" >&2
+                return 1
+              fi
+              if [ "$CURRENT_TAG_SHA" != "$GITHUB_SHA" ]; then
+                echo "Refusing to delete unexpected unpublished tag; manual cleanup required" >&2
+                return 1
+              fi
+              echo "Deleting unpublished tag $TAG" >&2
+              if ! gh api \
+                --method DELETE \
+                "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+                --silent; then
+                echo "Unpublished tag cleanup failed; manual cleanup required" >&2
+                return 1
               fi
             fi
           }
@@ -305,7 +310,7 @@ jobs:
               --jq '[.object.type, .object.sha] | @tsv'
           )" = $'commit\t'"$GITHUB_SHA"
 
-          RELEASE_ID="$(
+          RELEASE_DETAILS="$(
             gh api \
               --method POST \
               -H "X-GitHub-Api-Version: 2026-03-10" \
@@ -315,20 +320,41 @@ jobs:
               -f name="$TAG" \
               -F draft=true \
               -F generate_release_notes=true \
-              --jq '.id'
+              --jq '[.id, (.upload_url | split("{")[0])] | @tsv'
           )"
+          IFS=$'\t' read -r RELEASE_ID UPLOAD_URL <<< "$RELEASE_DETAILS"
           case "$RELEASE_ID" in
             ''|*[!0-9]*)
               echo "GitHub did not return a numeric draft release ID" >&2
               exit 1
               ;;
           esac
+          case "$UPLOAD_URL" in
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets")
+              ;;
+            *)
+              echo "GitHub returned an unexpected release upload URL" >&2
+              exit 1
+              ;;
+          esac
 
-          gh release upload "$TAG" \
-            "$WHEEL#Python wheel" \
-            "dist/SHA256SUMS#SHA-256 checksums" \
-            "$BUNDLE#Offline build provenance" \
-            --repo "$GITHUB_REPOSITORY"
+          upload_asset() {
+            local ASSET="$1"
+            local ASSET_LABEL="$2"
+            local ASSET_NAME
+            ASSET_NAME="$(basename "$ASSET")"
+            gh api \
+              --method POST \
+              -H "Content-Type: application/octet-stream" \
+              --input "$ASSET" \
+              -f name="$ASSET_NAME" \
+              -f label="$ASSET_LABEL" \
+              "$UPLOAD_URL" \
+              --silent
+          }
+          upload_asset "$WHEEL" "Python wheel"
+          upload_asset "dist/SHA256SUMS" "SHA-256 checksums"
+          upload_asset "$BUNDLE" "Offline build provenance"
 
           test "$(
             gh api \
