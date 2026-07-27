@@ -15,7 +15,11 @@ import numpy as np
 import pytest
 
 from embeddings import embedder as embedder_module
-from embeddings.embedder import CodeEmbedder, register_provider
+from embeddings.embedder import (
+    CodeEmbedder,
+    EffectiveEmbeddingConfig,
+    register_provider,
+)
 
 
 class _FakeModel:
@@ -25,9 +29,11 @@ class _FakeModel:
         self._model_name = model_name
         self._vector = vector.astype(np.float32)
         self.encode_calls = 0
+        self.last_encode_kwargs = {}
 
     def encode(self, texts, **kwargs):
         self.encode_calls += 1
+        self.last_encode_kwargs = kwargs
         return np.stack([self._vector] * len(texts))
 
     def get_embedding_dimension(self):
@@ -79,6 +85,21 @@ def fake_providers(monkeypatch):
     yield models
     embedder_module._PROVIDER_REGISTRY.pop("fake-prov-a", None)
     embedder_module._PROVIDER_REGISTRY.pop("fake-prov-b", None)
+
+
+@pytest.fixture
+def fake_voyage_provider():
+    models = []
+    original_factory = embedder_module._PROVIDER_REGISTRY["voyage"]
+
+    @register_provider("voyage")
+    def _factory(model_name, cache_dir, device):
+        model = _FakeModel(model_name, np.full(1024, 1.0))
+        models.append(model)
+        return model
+
+    yield models
+    embedder_module._PROVIDER_REGISTRY["voyage"] = original_factory
 
 
 def _make_embedder(monkeypatch, provider: str, tmp_path) -> CodeEmbedder:
@@ -164,3 +185,44 @@ def test_cache_namespace_uses_instance_identity_not_env(
     assert emb_a._cache_namespace().startswith("fake-prov-a::")
     out = emb_a.embed_query("rate limiter")
     assert out.shape == (8,)
+
+
+def test_input_type_is_frozen_and_namespaces_query_caches(
+    isolated_caches,
+    fake_voyage_provider,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    base = {
+        "provider": "voyage",
+        "model_name": "voyage-4-large",
+        "content_mode": "code",
+        "output_dimension": 1024,
+    }
+    disabled = CodeEmbedder(
+        cache_dir=str(tmp_path / "models"),
+        configuration=EffectiveEmbeddingConfig(
+            **base,
+            input_type_enabled=False,
+        ),
+    )
+    disabled.embed_query("same query")
+    assert "input_type" not in fake_voyage_provider[-1].last_encode_kwargs
+
+    CodeEmbedder._query_cache.clear()
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "off")
+    enabled = CodeEmbedder(
+        cache_dir=str(tmp_path / "models"),
+        configuration=EffectiveEmbeddingConfig(
+            **base,
+            input_type_enabled=True,
+        ),
+    )
+    enabled.embed_query("same query")
+
+    assert fake_voyage_provider[-1].encode_calls == 1
+    assert fake_voyage_provider[-1].last_encode_kwargs["input_type"] == "query"
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "on")
+    assert disabled._doc_encode_kwargs().get("input_type") is None
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "off")
+    assert enabled._doc_encode_kwargs()["input_type"] == "document"

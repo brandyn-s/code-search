@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "fixture": "frozen-v1",
+  "files": {
+    "corpus/auth/session_tokens.py": {
+      "sha256": "2af2297f40f1eb8140e2cb02f5d46cf899bb349fa3314cc9f399ad8fcc4f5edd"
+    },
+    "corpus/billing/invoice_totals.py": {
+      "sha256": "5f3c75cc4823a44b9486e9b898feee5706ffd594ccd721b818d401a4973ee94b"
+    },
+    "corpus/cache/lru_cache.py": {
+      "sha256": "b0d1a13e65e31f880a8b6e69d5978dd9742d8157ae41458bfa0e1e54d71bb709"
+    },
+    "corpus/config/feature_flags.py": {
+      "sha256": "bd4c82e4ed753c694d87ff1bc481751ff2bb4d88328791bcff173312827deefe"
+    },
+    "corpus/network/retry_policy.py": {
+      "sha256": "db89856d7fd83bc4a2a9289c7f296b92de79de6e120051a29362fc5265bb1a5b"
+    },
+    "corpus/parser/csv_reader.py": {
+      "sha256": "d4bb9e3fc701ab2d092ec1a5be041abf191055d9cec80eb8f36e26e0ac365024"
+    },
+    "corpus/reports/daily_summary.py": {
+      "sha256": "1f6634121bcff05ad5ca33787388a13d6fffca005a1e2cc3502e211ded8092a0"
+    },
+    "corpus/scheduler/cron_jobs.py": {
+      "sha256": "bb248a52bcf4f097a0fd290cf234925f94491ab68046139a8cc28ffceebb2e87"
+    },
+    "corpus/storage/audit_repository.py": {
+      "sha256": "d8aaff8fb7561b68488cdd3bffb36b846894061e30c44a047229b5fd1d9b8f09"
+    },
+    "corpus/telemetry/metrics.py": {
+      "sha256": "8c37a986fd27b065dfed83179d458fd996aae92565d8a842378d6e024bb48f22"
+    },
+    "gold.json": {
+      "sha256": "51a6cbe6be72bb4a3648948a8dd256537e46391be5b20a8d914b2ab0d4896ee5"
+    }
+  }
+}

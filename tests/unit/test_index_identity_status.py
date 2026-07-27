@@ -603,6 +603,7 @@ def test_background_worker_hashes_constructed_config_without_env_mutation(
         model_name="voyage-4-large",
         content_mode="code",
         output_dimension=1024,
+        input_type_enabled=True,
     )
 
     def build_embedder(*_args, **kwargs):
@@ -667,6 +668,10 @@ def test_background_worker_hashes_constructed_config_without_env_mutation(
         == configuration.output_dimension
     )
     assert persisted["content_mode"] == configuration.content_mode
+    assert (
+        persisted["embedding_input_type_enabled"]
+        is configuration.input_type_enabled
+    )
 
 
 def test_background_worker_publishes_ready_identity(

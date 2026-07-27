@@ -1055,6 +1055,9 @@ class CodeIndexManager:
         self._embedder_provider = configuration.provider
         self._embedder_model = configuration.model_name
         self._embedder_dimension = dimension
+        self._embedder_input_type_enabled = (
+            configuration.input_type_enabled
+        )
         self._pipeline_version = pipeline_version
 
     def _init_fts5(self):
@@ -2104,6 +2107,13 @@ class CodeIndexManager:
                 )
             ),
             pipeline_version=getattr(self, "_pipeline_version", "") or "",
+            input_type_enabled=bool(
+                getattr(
+                    self,
+                    "_embedder_input_type_enabled",
+                    False,
+                )
+            ),
         )
 
     def _restore_last_published_generation(self) -> None:
@@ -2376,6 +2386,14 @@ class CodeIndexManager:
                 )
             self._embedder_provider = identity.get("provider", "") or ""
             self._embedder_model = identity.get("model", "") or ""
+            manifest_input_type = identity.get("input_type_enabled")
+            if not isinstance(manifest_input_type, bool):
+                raise IndexPublicationRefused(
+                    "Cannot publish cleanup state because the verified "
+                    "manifest input_type_enabled identity is missing or "
+                    "invalid"
+                )
+            self._embedder_input_type_enabled = manifest_input_type
             self._pipeline_version = (
                 identity.get("pipeline_version", "") or ""
             )

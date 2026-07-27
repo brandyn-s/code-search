@@ -115,23 +115,56 @@ def _assert_wheel_contents(wheel: Path) -> None:
     assert "sys.path.insert" not in implementation_source
 
 
-def _assert_fresh_install(wheel: Path, work_dir: Path) -> None:
+def _wheel_install_command(
+    python: Path,
+    wheel: Path,
+    *,
+    install_dependencies: bool,
+) -> list[str]:
+    command = [str(python), "-m", "pip", "install"]
+    if not install_dependencies:
+        command.append("--no-deps")
+    command.append(str(wheel))
+    return command
+
+
+def _pip_check_command(python: Path) -> list[str]:
+    return [str(python), "-m", "pip", "check"]
+
+
+def _venv_executable(
+    environment_dir: Path,
+    name: str,
+    *,
+    platform_name: str | None = None,
+) -> Path:
+    active_platform = os.name if platform_name is None else platform_name
+    if active_platform == "nt":
+        executable_name = name if name.lower().endswith(".exe") else f"{name}.exe"
+        return environment_dir / "Scripts" / executable_name
+    return environment_dir / "bin" / name
+
+
+def _assert_fresh_install(
+    wheel: Path,
+    work_dir: Path,
+    *,
+    install_dependencies: bool,
+) -> None:
     environment_dir = work_dir / "wheel-venv"
     venv.EnvBuilder(with_pip=True).create(environment_dir)
-    python = environment_dir / "bin" / "python"
-    entrypoint = environment_dir / "bin" / "code-search-mcp"
+    python = _venv_executable(environment_dir, "python")
+    entrypoint = _venv_executable(environment_dir, "code-search-mcp")
 
     _run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--no-deps",
-            str(wheel),
-        ],
+        _wheel_install_command(
+            python,
+            wheel,
+            install_dependencies=install_dependencies,
+        ),
         cwd=work_dir,
     )
+    _run(_pip_check_command(python), cwd=work_dir)
 
     isolated_env = os.environ.copy()
     isolated_env.pop("PYTHONPATH", None)
@@ -180,6 +213,15 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Validate this exact pre-built wheel instead of building from source",
     )
+    parser.add_argument(
+        "--install-dependencies",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Install the wheel with its declared runtime dependencies "
+            "(default: enabled)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     _assert_pytest_contract()
@@ -190,7 +232,11 @@ def main(argv: list[str] | None = None) -> int:
         if not wheel.is_file() or wheel.suffix != ".whl":
             parser.error(f"--wheel must identify an existing .whl file: {wheel}")
         _assert_wheel_contents(wheel)
-        _assert_fresh_install(wheel, work_dir)
+        _assert_fresh_install(
+            wheel,
+            work_dir,
+            install_dependencies=args.install_dependencies,
+        )
     print("wheel contract: PASS")
     return 0
 

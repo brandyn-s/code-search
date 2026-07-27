@@ -32,7 +32,43 @@ named. Floors are set ≈2-3 pp below the 2026-05-14 baseline (golden MRR
 0.640, HR@1 0.529, harvested MRR 0.752, HR@1 0.672) so the gate fires
 only on real regression, not bootstrap noise.
 
-### Index-and-eval mode (CI / smoke)
+### Frozen offline merge gate
+
+From the repository root, this literal invocation builds the tiny
+deterministic model, verifies every committed fixture checksum, creates an
+index in empty temporary storage, switches to that successful index, and
+evaluates five objective queries independently through the production
+semantic/vector and keyword/BM25 search paths:
+
+```bash
+FROZEN_TMP="$(mktemp -d)"
+trap 'rm -rf "$FROZEN_TMP"' EXIT
+python3 bench/eval/build_frozen_model.py --output "$FROZEN_TMP/model"
+CODE_SEARCH_STORAGE="$FROZEN_TMP/storage" \
+PYTHONHASHSEED=0 \
+HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 \
+python3 bench/eval/check_retrieval_floor.py \
+    --mode index-and-eval \
+    --project bench/eval/fixtures/frozen-v1/corpus \
+    --gold bench/eval/fixtures/frozen-v1/gold.json \
+    --manifest bench/eval/fixtures/frozen-v1/manifest.json \
+    --provider local \
+    --model "$FROZEN_TMP/model" \
+    --floor-semantic-mrr 0.80 \
+    --floor-semantic-hr1 0.80 \
+    --floor-keyword-mrr 0.80 \
+    --floor-keyword-hr1 0.80 \
+    --rerank off
+```
+
+The local provider, BoW model, float32 index, disabled reranker, disabled
+query expansion, fixed hash seed, and Hugging Face offline settings make this
+a keyless catastrophic-regression check. It intentionally exercises real
+chunking, `CodeEmbedder`, FAISS, FTS5/BM25, server indexing, project switching,
+and search. Each production retrieval arm must independently clear its floor.
+
+### Index-and-eval mode (manual / external provider)
 
 Same script can index a target project fresh and run a small gold file:
 
@@ -41,6 +77,7 @@ Same script can index a target project fresh and run a small gold file:
     --mode index-and-eval \
     --project /path/to/some-repo \
     --gold /path/to/gold.json \
+    --provider voyage \
     --floor-mrr 0.50 \
     --floor-hr1 0.40 \
     --rerank off
@@ -64,10 +101,9 @@ suffix-only).
 PSM is read-only and ≈50K files; cloning + indexing in CI costs
 ≈30 min wall + ≈$1 in Voyage embedding charges per run. Per the Phase α
 falsifier in `knowledge-base/plans/2026-05-14-code-search-consolidation-roadmap.md`,
-the gate is scoped to local-PSM pre-commit; CI tests the gate script
-itself so the local workflow stays trustworthy. To extend to CI-eval,
-either (a) commit a small frozen-PSM snapshot index, or (b) build a
-synthetic self-fixture (open work).
+the live PSM gate remains a local pre-commit measurement. CI instead builds
+the small checked-in synthetic fixture above from source on every run; it is
+a catastrophic floor, not a replacement for the PSM quality benchmark.
 
 ## Holdout lock
 

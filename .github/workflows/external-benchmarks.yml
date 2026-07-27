@@ -7,9 +7,8 @@ name: external-benchmarks
 # is not comparable to any leaderboard (docs/EXTERNAL_BENCHMARKS.md). Runs
 # voyage-4-large vs voyage-code-3 head-to-head.
 #
-# Needs the VOYAGE_API_KEY repo secret. Without it the eval cleanly skips (the
-# keyless adapter half still runs, proving the pipeline end-to-end). CoIR data
-# is pulled from the HF datasets-server (no key).
+# Needs the VOYAGE_API_KEY repo secret and fails before evaluation when it is
+# unavailable. CoIR data is pulled from the HF datasets-server (no key).
 
 on:
   workflow_dispatch:
@@ -64,12 +63,26 @@ jobs:
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
         run: |
           if [ -z "$VOYAGE_API_KEY" ]; then
-            echo "VOYAGE_API_KEY not set — skipping the embedding eval (adapter ran above)."
-            echo "VOYAGE_SKIP=1" >> "$GITHUB_ENV"
+            echo "::error::VOYAGE_API_KEY is required for external evaluation."
+            exit 1
           fi
 
+      - name: Seal adapted corpus source identity
+        run: |
+          CORPUS="$RUNNER_TEMP/coir_task/corpus"
+          git -C "$CORPUS" init --quiet
+          git -C "$CORPUS" config user.name "Code Search Benchmark"
+          git -C "$CORPUS" config user.email "benchmark@invalid.example"
+          git -C "$CORPUS" add --all
+          GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" \
+          GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
+            git -C "$CORPUS" commit --quiet \
+              -m "Seal adapted CoIR corpus"
+          SOURCE_REVISION="$(git -C "$CORPUS" rev-parse HEAD)"
+          test -n "$SOURCE_REVISION"
+          test -z "$(git -C "$CORPUS" status --porcelain)"
+
       - name: Eval voyage-4-large vs voyage-code-3 (rerank off)
-        if: env.VOYAGE_SKIP != '1'
         env:
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
         run: |
@@ -79,7 +92,7 @@ jobs:
           for M in voyage-4-large voyage-code-3; do
             echo "=== $M ==="
             CFG="{\"name\":\"$M\",\"provider\":\"voyage\",\"model\":\"$M\",\"use_input_type\":true,\"use_reranker\":false,\"needs_reindex\":true}"
-            EMBEDDING_PROVIDER=voyage EMBEDDING_MODEL="$M" VOYAGE_INPUT_TYPE=on RERANKER=off \
+            EMBEDDING_PROVIDER=voyage EMBEDDING_MODEL="$M" VOYAGE_INPUT_TYPE=on RERANKER=off USE_VOYAGE_RERANKER=off \
               python benchmarks/_eval_worker.py "$CFG" "$CORPUS" "$GOLDEN" "$RUNNER_TEMP/idx_$M" \
               --k 10 \
               --qrels "$QRELS" \
@@ -87,6 +100,17 @@ jobs:
               --unique-documents \
               | tee "$RUNNER_TEMP/metrics_$M.txt"
           done
+
+      - name: Validate benchmark outputs
+        run: |
+          for M in voyage-4-large voyage-code-3; do
+            test -s "$RUNNER_TEMP/metrics_$M.txt"
+            test -s "$RUNNER_TEMP/results_$M.json"
+          done
+          python bench/research/validate_external_benchmark.py \
+            --golden "$RUNNER_TEMP/coir_task/golden.json" \
+            --qrels "$RUNNER_TEMP/coir_task/qrels_graded.json" \
+            --results-dir "$RUNNER_TEMP"
 
       - name: Upload metrics and ranked runs
         if: always()

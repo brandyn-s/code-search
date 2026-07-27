@@ -124,6 +124,7 @@ def build_manifest(
     vector_dim: int = 0,
     quantization: str = "",
     pipeline_version: str = "",
+    input_type_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Compute the manifest dict for a snapshot of the artifacts.
 
@@ -172,6 +173,7 @@ def build_manifest(
         "vector_dim": vector_dim,
         "quantization": quantization,
         "pipeline_version": pipeline_version,
+        "input_type_enabled": input_type_enabled,
         "artifacts": artifacts_dict,
         "consistency": consistency,
     }

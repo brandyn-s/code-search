@@ -228,12 +228,13 @@ def test_switch_project_auto_resolves_provider_from_legacy_info(
     )
 
 
-def test_switch_project_without_info_falls_back_to_legacy(
+def test_switch_project_without_info_or_manifest_fails_closed(
     server, tmp_path, monkeypatch
 ):
-    """When no legacy project_info.json exists, switch_project(path) uses
-    the legacy hash directly. Preserves backward-compat for old indexes
-    that pre-date provider-aware hashing.
+    """An identity-less legacy index cannot select an ambient provider.
+
+    Old indexes without project_info must be reindexed unless a verified
+    manifest can reconstruct their exact embedding identity.
     """
     from mcp_server import code_search_server as mod
 
@@ -254,10 +255,10 @@ def test_switch_project_without_info_falls_back_to_legacy(
     (legacy_dir / "index" / "code.index").write_bytes(b"\x00" * 128)
 
     result = json.loads(server.switch_project(str(repo)))
-    assert result.get("success") is True, f"switch failed: {result}"
-    assert server._current_provider is None, (
-        "no provider info => stay on legacy hash (backward-compat)"
-    )
+    assert "error" in result
+    assert "verified index manifest" in result["error"]
+    assert server._current_project is None
+    assert server._current_provider is None
 
 
 def test_switch_project_auto_resolve_skips_when_provider_dir_missing(

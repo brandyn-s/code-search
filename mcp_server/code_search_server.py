@@ -138,6 +138,7 @@ def get_pipeline_version(
         f"model={configuration.model_name}",
         f"content_mode={configuration.content_mode}",
         f"output_dimension={output_dimension}",
+        f"input_type_enabled={configuration.input_type_enabled}",
         f"grammars={_grammar_fingerprint()}",
     ]
     return hashlib.md5("|".join(sorted(components)).encode()).hexdigest()[:16]
@@ -502,6 +503,9 @@ class CodeSearchServer:
             "embedding_provider": configuration.provider,
             "embedding_model": configuration.model_name,
             "embedding_dimension": configuration.output_dimension,
+            "embedding_input_type_enabled": (
+                configuration.input_type_enabled
+            ),
             "content_mode": configuration.content_mode,
         }
 
@@ -711,7 +715,13 @@ class CodeSearchServer:
             cache_hit=cache_hit,
         )
 
-    def get_project_storage_dir(self, project_path: str, provider: str = None) -> Path:
+    def get_project_storage_dir(
+        self,
+        project_path: str,
+        provider: str | None = None,
+        *,
+        create_project_info: bool = True,
+    ) -> Path:
         """Get or create project-specific storage directory.
 
         Args:
@@ -720,6 +730,9 @@ class CodeSearchServer:
                 included in the directory hash so multiple providers can coexist
                 for the same path (dual-model indexing). When None, falls back
                 to the legacy path-only hash for backward compatibility.
+            create_project_info: Persist new project metadata when it is absent.
+                Read paths disable this so missing metadata cannot be silently
+                replaced from ambient process configuration.
         """
         base_dir = get_storage_dir()
         project_path_obj = Path(project_path).resolve()
@@ -819,7 +832,7 @@ class CodeSearchServer:
 
         # Store project info
         project_info_file = project_dir / "project_info.json"
-        if not project_info_file.exists():
+        if create_project_info and not project_info_file.exists():
             configuration = resolve_embedding_config(provider=provider)
             project_info = {
                 "project_name": project_name,
@@ -829,6 +842,9 @@ class CodeSearchServer:
                 "embedding_provider": configuration.provider,
                 "embedding_model": configuration.model_name,
                 "embedding_dimension": configuration.output_dimension,
+                "embedding_input_type_enabled": (
+                    configuration.input_type_enabled
+                ),
                 "content_mode": configuration.content_mode,
             }
             with open(project_info_file, "w", encoding="utf-8") as f:
@@ -899,8 +915,6 @@ class CodeSearchServer:
             and not isinstance(stored_dimension, bool)
             and stored_dimension > 0
         )
-        if stored_complete:
-            return stored_config
 
         try:
             from search.epoch_manifest import read_with_fallback
@@ -911,6 +925,28 @@ class CodeSearchServer:
             return stored_config
         if not isinstance(manifest, dict):
             return stored_config
+
+        repaired = dict(stored_config)
+        manifest_input_type = manifest.get("input_type_enabled")
+        if not isinstance(manifest_input_type, bool):
+            raise ValueError(
+                "verified index manifest input_type_enabled is missing or "
+                "invalid; reindex required"
+            )
+        stored_input_type = stored_config.get(
+            "embedding_input_type_enabled"
+        )
+        if (
+            "embedding_input_type_enabled" in stored_config
+            and stored_input_type != manifest_input_type
+        ):
+            raise ValueError(
+                "project_info input type disagrees with verified manifest; "
+                "reindex required"
+            )
+        repaired["embedding_input_type_enabled"] = manifest_input_type
+        if stored_complete:
+            return repaired
 
         manifest_provider = str(manifest.get("provider") or "").strip()
         manifest_model = str(manifest.get("model") or "").strip()
@@ -924,7 +960,6 @@ class CodeSearchServer:
         ):
             return stored_config
 
-        repaired = dict(stored_config)
         # Treat provider/model/dimension as one identity tuple. Mixing a
         # surviving legacy provider with a manifest model can create another
         # valid-looking but false configuration.
@@ -937,6 +972,74 @@ class CodeSearchServer:
         )
         repaired.setdefault("content_mode", "code")
         return repaired
+
+    @staticmethod
+    def _embedding_configuration_from_verified_manifest(
+        project_dir: Path,
+        requested_provider: str | None = None,
+    ) -> EffectiveEmbeddingConfig:
+        """Reconstruct missing metadata without consulting ambient config."""
+        from search.epoch_manifest import read_with_fallback
+
+        publication = read_with_fallback(project_dir / "index")
+        manifest = publication.manifest
+        if not isinstance(manifest, dict):
+            raise TypeError(
+                "project_info is missing or invalid and no verified index "
+                "manifest is available; reindex required"
+            )
+
+        manifest_provider = manifest.get("provider")
+        manifest_model = manifest.get("model")
+        manifest_dimension = manifest.get("vector_dim")
+        manifest_input_type = manifest.get("input_type_enabled")
+        manifest_pipeline = manifest.get("pipeline_version")
+        if (
+            not isinstance(manifest_provider, str)
+            or not manifest_provider.strip()
+            or not isinstance(manifest_model, str)
+            or not manifest_model.strip()
+            or isinstance(manifest_dimension, bool)
+            or not isinstance(manifest_dimension, int)
+            or manifest_dimension <= 0
+            or not isinstance(manifest_input_type, bool)
+            or not isinstance(manifest_pipeline, str)
+            or not manifest_pipeline.strip()
+        ):
+            raise ValueError(
+                "project_info is missing or invalid and the verified index "
+                "manifest embedding identity is incomplete; reindex required"
+            )
+
+        normalized_provider = manifest_provider.strip().lower()
+        normalized_requested = (requested_provider or "").strip().lower()
+        if (
+            normalized_requested
+            and normalized_requested != normalized_provider
+        ):
+            raise ValueError(
+                "requested embedding provider disagrees with the verified "
+                "index manifest; reindex required"
+            )
+
+        candidates = []
+        for content_mode in ("code", "docs"):
+            configuration = resolve_embedding_config(
+                provider=normalized_provider,
+                model_name=manifest_model.strip(),
+                content_mode=content_mode,
+                output_dimension=manifest_dimension,
+                input_type_enabled=manifest_input_type,
+            )
+            if get_pipeline_version(configuration) == manifest_pipeline:
+                candidates.append(configuration)
+        if len(candidates) != 1:
+            raise ValueError(
+                "project_info is missing or invalid and content mode cannot "
+                "be reconstructed from the verified index manifest; "
+                "reindex required"
+            )
+        return candidates[0]
 
     def embedder(self, project_path: str = None, provider: str = None) -> CodeEmbedder:
         """Get embedder for a project, using its stored model config if available.
@@ -955,14 +1058,27 @@ class CodeSearchServer:
 
         # Read the project's stored config, then resolve the caller override
         # without mutating process-global environment variables.
+        configuration: EffectiveEmbeddingConfig | None = None
         stored_config: Dict[str, Any] = {}
         if project_path:
-            project_dir = self.get_project_storage_dir(project_path, provider=provider)
+            project_dir = self.get_project_storage_dir(
+                project_path,
+                provider=provider,
+                create_project_info=False,
+            )
             info_file = project_dir / "project_info.json"
             if info_file.exists():
                 try:
                     with open(info_file, "r", encoding="utf-8") as f:
                         info = json.load(f)
+                except Exception:
+                    configuration = (
+                        self._embedding_configuration_from_verified_manifest(
+                            project_dir,
+                            requested_provider=provider,
+                        )
+                    )
+                else:
                     if isinstance(info, dict):
                         stored_config = (
                             self._prefer_verified_manifest_embedding_identity(
@@ -970,12 +1086,25 @@ class CodeSearchServer:
                                 info,
                             )
                         )
-                except Exception:
-                    pass
-        configuration = resolve_embedding_config(
-            provider=provider,
-            stored=stored_config,
-        )
+                    else:
+                        configuration = (
+                            self._embedding_configuration_from_verified_manifest(
+                                project_dir,
+                                requested_provider=provider,
+                            )
+                        )
+            else:
+                configuration = (
+                    self._embedding_configuration_from_verified_manifest(
+                        project_dir,
+                        requested_provider=provider,
+                    )
+                )
+        if configuration is None:
+            configuration = resolve_embedding_config(
+                provider=provider,
+                stored=stored_config,
+            )
         embedder = CodeEmbedder(
             cache_dir=str(cache_dir),
             configuration=configuration,
@@ -3320,7 +3449,9 @@ class CodeSearchServer:
                 # Fall back to the canonical resolver (which may create a new
                 # dir if none exists yet).
                 project_dir = self.get_project_storage_dir(
-                    str(project_path), provider=effective_provider
+                    str(project_path),
+                    provider=effective_provider,
+                    create_project_info=False,
                 )
             index_dir = project_dir / "index"
 
@@ -3342,6 +3473,40 @@ class CodeSearchServer:
                     }
                 )
 
+            info_file = project_dir / "project_info.json"
+            try:
+                with open(info_file, encoding="utf-8") as f:
+                    project_info = json.load(f)
+                if not isinstance(project_info, dict):
+                    raise TypeError(
+                        "project_info root must be a JSON object"
+                    )
+            except (OSError, ValueError, TypeError):
+                configuration = (
+                    self._embedding_configuration_from_verified_manifest(
+                        project_dir,
+                        requested_provider=effective_provider,
+                    )
+                )
+                effective_provider = configuration.provider
+                project_info = {
+                    "project_name": project_path.name,
+                    "project_path": str(project_path),
+                    "embedding_provider": configuration.provider,
+                    "embedding_model": configuration.model_name,
+                    "embedding_dimension": (
+                        configuration.output_dimension
+                    ),
+                    "embedding_input_type_enabled": (
+                        configuration.input_type_enabled
+                    ),
+                    "content_mode": configuration.content_mode,
+                    "metadata_source": "verified_index_manifest",
+                }
+
+            # Commit the switch only after target metadata has been read or
+            # reconstructed successfully. A malformed target must not leave
+            # the prior active project half-replaced.
             self._current_project = str(project_path)
             # Persist the active provider so subsequent search_code /
             # find_similar_code calls resolve to the same storage dir
@@ -3350,12 +3515,6 @@ class CodeSearchServer:
             self._current_provider = effective_provider
             self._index_manager = None
             self._searcher = None
-
-            info_file = project_dir / "project_info.json"
-            project_info = {}
-            if info_file.exists():
-                with open(info_file, encoding="utf-8") as f:
-                    project_info = json.load(f)
 
             logger.info(
                 f"Switched to project: {project_path.name}"

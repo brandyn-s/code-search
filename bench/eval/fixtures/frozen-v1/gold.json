@@ -1,0 +1,22 @@
+[
+  {
+    "query": "validate bearer token signature claims",
+    "expected_files": ["auth/session_tokens.py"]
+  },
+  {
+    "query": "calculate invoice total discount tax",
+    "expected_files": ["billing/invoice_totals.py"]
+  },
+  {
+    "query": "load feature flag configuration environment",
+    "expected_files": ["config/feature_flags.py"]
+  },
+  {
+    "query": "exponential retry backoff network timeout",
+    "expected_files": ["network/retry_policy.py"]
+  },
+  {
+    "query": "persist immutable audit record storage",
+    "expected_files": ["storage/audit_repository.py"]
+  }
+]

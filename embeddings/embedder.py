@@ -28,6 +28,7 @@ class EffectiveEmbeddingConfig:
     model_name: str
     content_mode: str
     output_dimension: Optional[int] = None
+    input_type_enabled: bool = False
 
 
 _DEFAULT_EMBEDDING_MODELS = {
@@ -41,6 +42,9 @@ _DEFAULT_EMBEDDING_MODELS = {
     "gemma": "google/embeddinggemma-300m",
 }
 _LOCAL_MODEL_PROVIDERS = frozenset(("gemma", "jina", "jina-code", "local"))
+_VOYAGE_INPUT_TYPE_PROVIDERS = frozenset(
+    ("voyage", "voyage-code-3", "voyage-context")
+)
 _KNOWN_OUTPUT_DIMENSIONS = {
     "google/embeddinggemma-300m": 768,
     "jinaai/jina-code-embeddings-0.5b": 896,
@@ -149,6 +153,7 @@ def resolve_embedding_config(
     model_name: Optional[str] = None,
     content_mode: Optional[str] = None,
     output_dimension: Optional[int] = None,
+    input_type_enabled: Optional[bool] = None,
     stored: Optional[Mapping[str, Any]] = None,
 ) -> EffectiveEmbeddingConfig:
     """Resolve explicit, stored, and ambient configuration by precedence."""
@@ -236,6 +241,36 @@ def resolve_embedding_config(
         dimension_value,
         source=dimension_source,
     )
+    if input_type_enabled is not None and not isinstance(
+        input_type_enabled,
+        bool,
+    ):
+        raise ValueError("input_type_enabled must be a boolean")
+    stored_input_type = stored.get("embedding_input_type_enabled")
+    stored_identity_matches = (
+        effective_provider == stored_provider
+        and effective_model_name == stored_model
+    )
+    if input_type_enabled is not None:
+        effective_input_type_enabled = input_type_enabled
+    elif stored_identity_matches and stored_input_type is not None:
+        if not isinstance(stored_input_type, bool):
+            raise ValueError(
+                "stored embedding_input_type_enabled must be a boolean"
+            )
+        effective_input_type_enabled = stored_input_type
+    else:
+        effective_input_type_enabled = (
+            os.environ.get("VOYAGE_INPUT_TYPE", "off").strip().lower()
+            == "on"
+        )
+    if effective_provider == "voyage-context":
+        # The contextualized endpoint always receives document/query modes:
+        # encode_grouped sends "document" and encode defaults to "query".
+        # A false identity would describe behavior this provider cannot have.
+        effective_input_type_enabled = True
+    elif effective_provider not in _VOYAGE_INPUT_TYPE_PROVIDERS:
+        effective_input_type_enabled = False
 
     available_providers = sorted(_PROVIDER_REGISTRY)
     allowed_models = _BUILTIN_PROVIDER_MODELS.get(effective_provider)
@@ -297,6 +332,7 @@ def resolve_embedding_config(
         model_name=effective_model_name,
         content_mode=effective_content_mode,
         output_dimension=requested_dimension,
+        input_type_enabled=effective_input_type_enabled,
     )
     return replace(
         configuration,
@@ -534,6 +570,16 @@ class CodeEmbedder:
         effective_config = configuration or resolve_embedding_config(
             model_name=model_name or None,
         )
+        if effective_config.provider == "voyage-context":
+            effective_config = replace(
+                effective_config,
+                input_type_enabled=True,
+            )
+        elif effective_config.provider not in _VOYAGE_INPUT_TYPE_PROVIDERS:
+            effective_config = replace(
+                effective_config,
+                input_type_enabled=False,
+            )
         provider = effective_config.provider
         factory = _PROVIDER_REGISTRY.get(provider)
         if factory is None:
@@ -570,11 +616,11 @@ class CodeEmbedder:
         )
         # Resolved (provider, model) pair namespaces the query-embedding
         # caches. The server constructs one CodeEmbedder per project and
-        # projects can use different providers/models ("dual-model
-        # workflows"); a cache keyed on query text alone returned another
-        # model's vector after a project switch — a loud dim-mismatch when
-        # dimensions differ, silently wrong similarities when they match
-        # (voyage-4-large and voyage-code-3 are both 1024-d).
+    # projects can use different providers/models/input-type modes
+    # ("dual-model workflows"); a cache keyed on query text alone returned
+    # another model's vector after a project switch — a loud dim-mismatch
+    # when dimensions differ, silently wrong similarities when they match
+    # (voyage-4-large and voyage-code-3 are both 1024-d).
         self._resolved_model_name = resolved_model_name
         self._logger.info(
             f"Embedding provider: {provider}, model: {resolved_model_name}"
@@ -820,7 +866,7 @@ class CodeEmbedder:
             "prompt_name": "Retrieval-document",
             "show_progress_bar": False,
         }
-        if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on":
+        if self._configuration.input_type_enabled:
             encode_kwargs["input_type"] = "document"
         return encode_kwargs
 
@@ -828,7 +874,7 @@ class CodeEmbedder:
         """Cache-key component mirroring _doc_encode_kwargs' input_type."""
         return (
             "document+it"
-            if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on"
+            if self._configuration.input_type_enabled
             else "document"
         )
 
@@ -1120,7 +1166,8 @@ class CodeEmbedder:
     # The in-memory cache is deliberately class-level so it survives the
     # per-project CodeEmbedder reconstruction the MCP server does on every
     # switch_project. Sharing is safe ONLY because keys are namespaced by
-    # the instance's resolved (provider, model) — see _cache_namespace.
+    # the instance's resolved (provider, model, input type) — see
+    # _cache_namespace.
     # Pre-fix, the key was the bare query text, so switching between
     # projects with different providers returned the previous model's
     # embedding (cross-provider cache poisoning).
@@ -1129,23 +1176,36 @@ class CodeEmbedder:
     _disk_cache_db = None
 
     def _cache_namespace(self) -> str:
-        """Provider+model namespace for query-embedding cache keys.
+        """Provider, model, and input-type namespace for query cache keys.
 
         Uses the instance's resolved identity, NOT os.environ at call time:
         the server's env-var override during construction is restored before
         the first query, so the env no longer reflects this instance.
         """
-        return f"{self._provider}::{self._resolved_model_name}"
+        input_mode = (
+            "query+it"
+            if self._configuration.input_type_enabled
+            else "query"
+        )
+        return (
+            f"{self._provider}::{self._resolved_model_name}::{input_mode}"
+        )
+
+    def _query_cache_input_mode(self) -> str:
+        return (
+            "query+it"
+            if self._configuration.input_type_enabled
+            else "query"
+        )
 
     def _get_disk_cache(self):
         """Lazy-init SQLite persistent query cache.
 
-        Schema note: query_embeddings_v2 keys on (query_key, provider,
-        model). The v1 table keyed on query_key alone, so two projects
-        using different providers overwrote each other's rows and — worse —
-        the same-dimension case returned the wrong model's vector. The v1
-        table is dropped on first open; it's a cache, so the only cost is
-        re-warming.
+        Schema note: query_embeddings_v3 keys on (query_key, provider,
+        model, input_mode). Earlier tables omitted at least input mode, so
+        the same-dimension case could return a vector produced with different
+        provider semantics. Obsolete tables are dropped on first open; this
+        is a cache, so the only cost is re-warming.
         """
         if self._disk_cache_db is not None:
             return self._disk_cache_db
@@ -1155,14 +1215,15 @@ class CodeEmbedder:
             db = sqlite3.connect(str(cache_path), check_same_thread=False)
             db.execute("PRAGMA journal_mode = WAL")
             db.execute("""
-                CREATE TABLE IF NOT EXISTS query_embeddings_v2 (
+                CREATE TABLE IF NOT EXISTS query_embeddings_v3 (
                     query_key TEXT,
                     provider TEXT,
                     model TEXT,
+                    input_mode TEXT,
                     embedding BLOB,
                     dim INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (query_key, provider, model)
+                    PRIMARY KEY (query_key, provider, model, input_mode)
                 )
             """)
             # P4 (2026-06-10 roadmap): content-hash-keyed DOCUMENT embedding
@@ -1185,6 +1246,7 @@ class CodeEmbedder:
                 )
             """)
             db.execute("DROP TABLE IF EXISTS query_embeddings")
+            db.execute("DROP TABLE IF EXISTS query_embeddings_v2")
             db.commit()
             self._disk_cache_db = db
             return db
@@ -1200,8 +1262,9 @@ class CodeEmbedder:
         2. SQLite on disk (survives restarts, eliminates Jina cold-start)
         3. Model encode (slowest, only on cache miss)
 
-        Both cache layers are keyed by (provider, model, normalized query)
-        so per-project provider switches never cross-contaminate.
+        Both cache layers are keyed by
+        (provider, model, input type, normalized query) so per-project
+        provider switches never cross-contaminate.
 
         Args:
             query: Search query text
@@ -1229,9 +1292,15 @@ class CodeEmbedder:
         if db is not None:
             try:
                 row = db.execute(
-                    "SELECT embedding, dim FROM query_embeddings_v2 "
-                    "WHERE query_key = ? AND provider = ? AND model = ?",
-                    (query_key, self._provider, self._resolved_model_name),
+                    "SELECT embedding, dim FROM query_embeddings_v3 "
+                    "WHERE query_key = ? AND provider = ? AND model = ? "
+                    "AND input_mode = ?",
+                    (
+                        query_key,
+                        self._provider,
+                        self._resolved_model_name,
+                        self._query_cache_input_mode(),
+                    ),
                 ).fetchone()
                 if row:
                     embedding = np.frombuffer(row[0], dtype=np.float32).copy()
@@ -1250,7 +1319,7 @@ class CodeEmbedder:
             "show_progress_bar": False,
         }
         # Voyage input_type optimization: "query" for search
-        if os.environ.get("VOYAGE_INPUT_TYPE", "off") == "on":
+        if self._configuration.input_type_enabled:
             encode_kwargs["input_type"] = "query"
         embedding = self._model.encode(
             [query], **encode_kwargs
@@ -1268,10 +1337,17 @@ class CodeEmbedder:
         if db is not None:
             try:
                 db.execute(
-                    "INSERT OR REPLACE INTO query_embeddings_v2 "
-                    "(query_key, provider, model, embedding, dim) VALUES (?, ?, ?, ?, ?)",
-                    (query_key, self._provider, self._resolved_model_name,
-                     embedding.tobytes(), embedding.shape[0]),
+                    "INSERT OR REPLACE INTO query_embeddings_v3 "
+                    "(query_key, provider, model, input_mode, embedding, dim) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        query_key,
+                        self._provider,
+                        self._resolved_model_name,
+                        self._query_cache_input_mode(),
+                        embedding.tobytes(),
+                        embedding.shape[0],
+                    ),
                 )
                 db.commit()
             except Exception:
@@ -1285,7 +1361,7 @@ class CodeEmbedder:
         db = self._get_disk_cache()
         if db is not None:
             try:
-                db.execute("DELETE FROM query_embeddings_v2")
+                db.execute("DELETE FROM query_embeddings_v3")
                 db.commit()
             except Exception:
                 pass

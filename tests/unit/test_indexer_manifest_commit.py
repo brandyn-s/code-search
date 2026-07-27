@@ -119,6 +119,7 @@ def test_save_index_commits_bound_effective_embedding_identity():
             model_name="text-embedding-custom",
             content_mode="code",
             output_dimension=7,
+            input_type_enabled=True,
         )
         mgr.bind_embedding_configuration(
             configuration,
@@ -141,6 +142,7 @@ def test_save_index_commits_bound_effective_embedding_identity():
         assert manifest["provider"] == "openai"
         assert manifest["model"] == "text-embedding-custom"
         assert manifest["vector_dim"] == 7
+        assert manifest["input_type_enabled"] is True
         assert (
             manifest["pipeline_version"]
             == "effective-pipeline-version"

@@ -6,9 +6,11 @@ from pathlib import Path
 
 import yaml
 
+from tests.acceptance import wheel_contract
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
+UNIT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 EXTERNAL_WORKFLOW = (
     REPO_ROOT / ".github" / "workflows" / "external-benchmarks.yml"
 )
@@ -29,6 +31,176 @@ def test_wheel_contract_can_validate_an_existing_artifact() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "--wheel" in result.stdout
+    assert "--install-dependencies" in result.stdout
+
+
+def test_wheel_install_mode_controls_no_deps_flag() -> None:
+    python = Path("/venv/python")
+    wheel = Path("/dist/package.whl")
+
+    dependency_aware = wheel_contract._wheel_install_command(
+        python,
+        wheel,
+        install_dependencies=True,
+    )
+    metadata_only = wheel_contract._wheel_install_command(
+        python,
+        wheel,
+        install_dependencies=False,
+    )
+
+    assert "--no-deps" not in dependency_aware
+    assert "--no-deps" in metadata_only
+
+
+def test_wheel_contract_resolves_platform_specific_venv_executables() -> None:
+    environment = Path("/tmp/wheel-venv")
+
+    assert wheel_contract._venv_executable(
+        environment,
+        "python",
+        platform_name="posix",
+    ) == environment / "bin" / "python"
+    assert wheel_contract._venv_executable(
+        environment,
+        "python",
+        platform_name="nt",
+    ) == environment / "Scripts" / "python.exe"
+    assert wheel_contract._venv_executable(
+        environment,
+        "code-search-mcp",
+        platform_name="nt",
+    ) == environment / "Scripts" / "code-search-mcp.exe"
+
+
+def test_wheel_contract_checks_installed_dependency_consistency() -> None:
+    python = Path("/venv/python")
+
+    assert wheel_contract._pip_check_command(python) == [
+        str(python),
+        "-m",
+        "pip",
+        "check",
+    ]
+
+
+def test_merge_workflow_builds_once_and_gates_every_required_lane() -> None:
+    workflow = yaml.safe_load(UNIT_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+    required_jobs = {
+        "build-wheel",
+        "unit-tests",
+        "frozen-retrieval",
+        "wheel-smoke",
+        "merge-gate",
+    }
+
+    assert workflow["permissions"] == {"contents": "read"}
+    assert required_jobs <= jobs.keys()
+
+    build_source = "\n".join(
+        step.get("run", "") for step in jobs["build-wheel"]["steps"]
+    )
+    non_build_source = "\n".join(
+        step.get("run", "")
+        for job_name, job in jobs.items()
+        if job_name != "build-wheel"
+        for step in job.get("steps", [])
+    )
+    assert build_source.count("pip wheel") == 1
+    assert "py3-none-any.whl" in build_source
+    assert "pip wheel" not in non_build_source
+
+    wheel_smoke = jobs["wheel-smoke"]
+    assert wheel_smoke["needs"] == "build-wheel"
+    assert set(wheel_smoke["strategy"]["matrix"]["os"]) == {
+        "ubuntu-24.04",
+        "macos-14",
+        "windows-2022",
+    }
+    assert set(wheel_smoke["strategy"]["matrix"]["python-version"]) == {
+        "3.12",
+        "3.13",
+    }
+    wheel_smoke_source = "\n".join(
+        step.get("run", "") for step in wheel_smoke["steps"]
+    )
+    assert "tests/acceptance/wheel_contract.py" in wheel_smoke_source
+    assert "--wheel" in wheel_smoke_source
+    assert "--install-dependencies" in wheel_smoke_source
+
+    frozen_source = "\n".join(
+        step.get("run", "") for step in jobs["frozen-retrieval"]["steps"]
+    )
+    assert "bench/eval/build_frozen_model.py" in frozen_source
+    assert "bench/eval/check_retrieval_floor.py" in frozen_source
+    assert "--mode index-and-eval" in frozen_source
+    assert "--provider local" in frozen_source
+    assert "--floor-semantic-mrr" in frozen_source
+    assert "--floor-semantic-hr1" in frozen_source
+    assert "--floor-keyword-mrr" in frozen_source
+    assert "--floor-keyword-hr1" in frozen_source
+    assert "requirements-dev.txt" in frozen_source
+    assert (
+        "tests/integration/test_frozen_retrieval_contract.py"
+        in frozen_source
+    )
+    assert "test_frozen_retrieval_contract.py::" not in frozen_source
+
+    gate = jobs["merge-gate"]
+    assert gate["name"] == "merge-gate"
+    assert gate["if"] == "always()"
+    assert set(gate["needs"]) == required_jobs - {"merge-gate"}
+
+
+def test_external_benchmark_fails_closed_and_validates_both_ranked_runs() -> None:
+    workflow = yaml.safe_load(EXTERNAL_WORKFLOW.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["external-eval"]
+    steps = {step["name"]: step for step in job["steps"] if "name" in step}
+
+    assert workflow["permissions"] == {"contents": "read"}
+
+    preflight = steps["Check VOYAGE_API_KEY"]["run"]
+    assert "exit 1" in preflight
+    assert "VOYAGE_SKIP" not in EXTERNAL_WORKFLOW.read_text(encoding="utf-8")
+
+    evaluation = steps[
+        "Eval voyage-4-large vs voyage-code-3 (rerank off)"
+    ]
+    assert "if" not in evaluation
+    source_identity = steps["Seal adapted corpus source identity"]["run"]
+    assert 'git -C "$CORPUS" init --quiet' in source_identity
+    assert 'git -C "$CORPUS" add --all' in source_identity
+    assert 'git -C "$CORPUS" commit --quiet' in source_identity
+    assert 'test -n "$SOURCE_REVISION"' in source_identity
+    assert 'test -z "$(git -C "$CORPUS" status --porcelain)"' in (
+        source_identity
+    )
+    step_names = [
+        step["name"] for step in job["steps"] if "name" in step
+    ]
+    assert step_names.index("Seal adapted corpus source identity") < (
+        step_names.index(
+            "Eval voyage-4-large vs voyage-code-3 (rerank off)"
+        )
+    )
+
+    validation = steps["Validate benchmark outputs"]["run"]
+    assert "voyage-4-large voyage-code-3" in validation
+    assert 'test -s "$RUNNER_TEMP/metrics_$M.txt"' in validation
+    assert 'test -s "$RUNNER_TEMP/results_$M.json"' in validation
+    assert (
+        "python bench/research/validate_external_benchmark.py"
+        in validation
+    )
+    assert '--golden "$RUNNER_TEMP/coir_task/golden.json"' in validation
+    assert '--qrels "$RUNNER_TEMP/coir_task/qrels_graded.json"' in validation
+    assert '--results-dir "$RUNNER_TEMP"' in validation
+    assert "python -" not in validation
+
+    upload = steps["Upload metrics and ranked runs"]
+    assert upload["if"] == "always()"
+    assert upload["with"]["if-no-files-found"] == "error"
 
 
 def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:

@@ -2,19 +2,20 @@
 
 import io
 import json
-from pathlib import Path
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
 from bench.research import coir_adapter
 from bench.research.coir_adapter import convert
 from bench.research.ndcg import score_ranked_run
-from benchmarks._eval_worker import run_eval
-
+from benchmarks._eval_worker import _parse_results_full, run_eval
+from search.epoch_manifest import ArtifactSpec, build_manifest, commit_manifest
+from search.index_identity import derive_index_generation
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -536,6 +537,70 @@ def test_score_ranked_run_emits_graded_ndcg_and_recall() -> None:
     assert scored["per_query"][0]["qrels_key"] == "q1"
 
 
+def test_eval_worker_import_has_no_cli_bootstrap_side_effects() -> None:
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import os
+import socket
+import sys
+
+sentinel = "/tmp/original-code-search-storage"
+os.environ["CODE_SEARCH_STORAGE"] = sentinel
+original_getaddrinfo = socket.getaddrinfo
+sys.argv = [
+    "python",
+    "config",
+    "corpus",
+    "gold",
+    "/tmp/argv-controlled-storage",
+]
+import benchmarks._eval_worker
+
+assert os.environ["CODE_SEARCH_STORAGE"] == sentinel
+assert socket.getaddrinfo is original_getaddrinfo
+""",
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
+def test_eval_worker_preserves_real_search_result_evidence_schema() -> None:
+    raw = json.dumps(
+        {
+            "results": [
+                {
+                    "file": "src/auth.py",
+                    "lines": "10-20",
+                    "kind": "function",
+                    "score": 0.42,
+                    "chunk_id": "src/auth.py:10-20:function:login",
+                    "name": "login",
+                    "snippet": "def login(...):",
+                }
+            ]
+        }
+    )
+
+    assert _parse_results_full(raw) == [
+        {
+            "file": "src/auth.py",
+            "lines": "10-20",
+            "kind": "function",
+            "score": 0.42,
+            "chunk_id": "src/auth.py:10-20:function:login",
+            "name": "login",
+        }
+    ]
+
+
 def test_eval_worker_emits_unique_ranked_documents_and_query_ids() -> None:
     golden = [
         {
@@ -600,6 +665,127 @@ def test_eval_worker_surfaces_underfilled_document_rankings() -> None:
     assert metrics["per_query"][0]["ranking_underfilled"] is True
 
 
+def _write_effective_identity_fixture(tmp_path: Path) -> tuple[Path, dict]:
+    storage_target = tmp_path / "stored-project"
+    index_dir = storage_target / "index"
+    index_dir.mkdir(parents=True)
+    artifact = index_dir / "identity-fixture.bin"
+    artifact.write_bytes(b"verified index artifact")
+    manifest = build_manifest(
+        index_dir,
+        [ArtifactSpec("identity-fixture.bin", artifact)],
+        provider="voyage",
+        model="voyage-4-large",
+        vector_dim=1024,
+        quantization="float32",
+        pipeline_version="pipeline-voyage-4",
+        input_type_enabled=True,
+    )
+    commit_manifest(index_dir, manifest)
+
+    repository_id = "a" * 64
+    source_revision = "b" * 40
+    index_generation = derive_index_generation(
+        repository_id=repository_id,
+        source_revision=source_revision,
+        dirty_fingerprint="clean",
+    )
+    terminal_result = {
+        "success": True,
+        "index_ready": True,
+        "index_identity_status": "ready",
+        "embedding_provider": "voyage",
+        "embedding_model": "voyage-4-large",
+        "embedding_dimension": 1024,
+        "embedding_input_type_enabled": True,
+        "content_mode": "code",
+        "pipeline_version": "pipeline-voyage-4",
+        "index_identity": {
+            "schema_version": 1,
+            "repository_id": repository_id,
+            "checkout_id": "c" * 64,
+            "source_revision": source_revision,
+            "dirty_fingerprint": "clean",
+            "index_generation": index_generation,
+            "captured_at": "2026-07-27T12:00:00+00:00",
+        },
+    }
+    return storage_target, terminal_result
+
+
+def test_eval_worker_builds_identity_from_verified_effective_index(
+    tmp_path: Path,
+) -> None:
+    from benchmarks._eval_worker import _build_effective_identity
+
+    storage_target, terminal_result = _write_effective_identity_fixture(
+        tmp_path
+    )
+
+    identity = _build_effective_identity(
+        storage_target=storage_target,
+        terminal_result=terminal_result,
+        production_reranker_mode="off",
+        manual_voyage_reranker_enabled=False,
+    )
+
+    assert identity == {
+        "embedding_provider": "voyage",
+        "embedding_model": "voyage-4-large",
+        "embedding_dimension": 1024,
+        "content_mode": "code",
+        "input_type_enabled": True,
+        "pipeline_version": "pipeline-voyage-4",
+        "index_identity_status": "ready",
+        "source_identity": {
+            "repository_id": "a" * 64,
+            "source_revision": "b" * 40,
+            "dirty_fingerprint": "clean",
+            "index_generation": terminal_result["index_identity"][
+                "index_generation"
+            ],
+        },
+        "index_epoch_id": identity["index_epoch_id"],
+        "manifest_freshness": "fresh",
+        "production_reranker_mode": "off",
+        "manual_voyage_reranker_enabled": False,
+    }
+    assert identity["index_epoch_id"]
+    assert "storage_target" not in identity
+    assert "api_key" not in json.dumps(identity).lower()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("embedding_provider", "openai"),
+        ("embedding_model", "voyage-code-3"),
+        ("embedding_dimension", 512),
+        ("embedding_input_type_enabled", False),
+        ("pipeline_version", "different-pipeline"),
+    ],
+)
+def test_eval_worker_rejects_terminal_manifest_identity_disagreement(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    from benchmarks._eval_worker import _build_effective_identity
+
+    storage_target, terminal_result = _write_effective_identity_fixture(
+        tmp_path
+    )
+    terminal_result[field] = value
+
+    with pytest.raises(RuntimeError, match="manifest"):
+        _build_effective_identity(
+            storage_target=storage_target,
+            terminal_result=terminal_result,
+            production_reranker_mode="off",
+            manual_voyage_reranker_enabled=False,
+        )
+
+
 def test_eval_worker_documents_public_benchmark_output_contract() -> None:
     result = subprocess.run(
         [
@@ -634,3 +820,10 @@ def test_external_benchmark_workflow_persists_scored_rankings() -> None:
     assert "${{ runner.temp }}/coir_task/golden.json" in workflow
     assert "${{ runner.temp }}/coir_task/qrels_graded.json" in workflow
     assert "if-no-files-found: error" in workflow
+    assert 'git -C "$CORPUS" init --quiet' in workflow
+    assert 'git -C "$CORPUS" add --all' in workflow
+    assert 'git -C "$CORPUS" commit --quiet' in workflow
+    assert 'git -C "$CORPUS" status --porcelain' in workflow
+    assert workflow.index('git -C "$CORPUS" commit --quiet') < workflow.index(
+        "for M in voyage-4-large voyage-code-3"
+    )

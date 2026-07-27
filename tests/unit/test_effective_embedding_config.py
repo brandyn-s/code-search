@@ -42,6 +42,7 @@ from embeddings.embedder import (
                 model_name="voyage-context-3",
                 content_mode="docs",
                 output_dimension=1024,
+                input_type_enabled=True,
             ),
         ),
         (
@@ -92,6 +93,74 @@ def test_resolves_ambient_embedding_configuration(
     assert resolve_embedding_config() == expected
 
 
+def test_resolves_input_type_into_frozen_effective_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "voyage")
+    monkeypatch.setenv("EMBEDDING_MODEL", "voyage-4-large")
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "on")
+
+    configuration = resolve_embedding_config()
+
+    assert configuration.input_type_enabled is True
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "off")
+    assert configuration.input_type_enabled is True
+
+
+def test_local_provider_canonicalizes_voyage_input_type_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "on")
+
+    configuration = resolve_embedding_config(
+        provider="local",
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        input_type_enabled=True,
+    )
+
+    assert configuration.input_type_enabled is False
+
+
+def test_voyage_context_canonicalizes_input_type_on() -> None:
+    configuration = resolve_embedding_config(
+        provider="voyage-context",
+        model_name="voyage-context-3",
+        input_type_enabled=False,
+    )
+
+    assert configuration.input_type_enabled is True
+
+
+def test_voyage_context_constructor_canonicalizes_input_type_on(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from embeddings import embedder as embedder_module
+
+    class _ContextModel:
+        _model_name = "voyage-context-3"
+
+    monkeypatch.setitem(
+        embedder_module._PROVIDER_REGISTRY,
+        "voyage-context",
+        lambda *_args: _ContextModel(),
+    )
+    requested = EffectiveEmbeddingConfig(
+        provider="voyage-context",
+        model_name="voyage-context-3",
+        content_mode="docs",
+        output_dimension=1024,
+        input_type_enabled=False,
+    )
+
+    embedder = CodeEmbedder(
+        cache_dir=str(tmp_path),
+        configuration=requested,
+    )
+
+    assert embedder.configuration.input_type_enabled is True
+
+
 @pytest.mark.parametrize(
     ("stored", "overrides", "expected"),
     [
@@ -107,6 +176,7 @@ def test_resolves_ambient_embedding_configuration(
                 model_name="voyage-context-3",
                 content_mode="docs",
                 output_dimension=1024,
+                input_type_enabled=True,
             ),
         ),
         (
@@ -667,6 +737,299 @@ def test_incomplete_legacy_project_config_uses_verified_manifest_model(
         manager._fts_conn.close()
 
 
+def test_missing_project_info_reconstructs_only_from_verified_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import hashlib
+
+    from mcp_server import code_search_server as server_module
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        build_manifest,
+        commit_manifest,
+    )
+
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    source = (tmp_path / "source").resolve()
+    source.mkdir()
+    provider_hash = hashlib.md5(
+        f"{source}:voyage".encode()
+    ).hexdigest()[:8]
+    project_dir = storage / "projects" / f"{source.name}_{provider_hash}"
+    index_dir = project_dir / "index"
+    index_dir.mkdir(parents=True)
+    artifact_path = index_dir / "identity.marker"
+    artifact_path.write_text("verified", encoding="utf-8")
+    expected = EffectiveEmbeddingConfig(
+        provider="voyage",
+        model_name="voyage-code-3",
+        content_mode="code",
+        output_dimension=1024,
+        input_type_enabled=True,
+    )
+    manifest = build_manifest(
+        index_dir,
+        [ArtifactSpec("identity.marker", artifact_path)],
+        provider=expected.provider,
+        model=expected.model_name,
+        vector_dim=expected.output_dimension,
+        pipeline_version=server_module.get_pipeline_version(expected),
+        input_type_enabled=expected.input_type_enabled,
+    )
+    commit_manifest(index_dir, manifest)
+    captured: dict[str, EffectiveEmbeddingConfig] = {}
+
+    class _ConfiguredEmbedder:
+        def __init__(
+            self,
+            *,
+            cache_dir: str,
+            configuration: EffectiveEmbeddingConfig,
+        ) -> None:
+            del cache_dir
+            captured["configuration"] = configuration
+            self.configuration = configuration
+
+    monkeypatch.setenv("CODE_SEARCH_STORAGE", str(storage))
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "local")
+    monkeypatch.setenv("EMBEDDING_MODEL", "voyage-4-large")
+    monkeypatch.setenv("CONTENT_MODE", "docs")
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "off")
+    monkeypatch.setattr(server_module, "CodeEmbedder", _ConfiguredEmbedder)
+    server_module.get_storage_dir.cache_clear()
+    server = server_module.CodeSearchServer.__new__(
+        server_module.CodeSearchServer
+    )
+
+    restored = server.embedder(str(source), provider="voyage")
+
+    assert restored.configuration == expected
+    assert captured["configuration"] == expected
+    assert not (project_dir / "project_info.json").exists()
+
+
+def test_complete_project_config_uses_verified_manifest_input_type(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import json
+
+    from mcp_server import code_search_server as server_module
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        build_manifest,
+        commit_manifest,
+    )
+
+    source = tmp_path / "source"
+    source.mkdir()
+    project_dir = tmp_path / "project-index"
+    project_dir.mkdir()
+    (project_dir / "project_info.json").write_text(
+        json.dumps(
+            {
+                "project_path": str(source),
+                "embedding_provider": "voyage",
+                "embedding_model": "voyage-4-large",
+                "embedding_dimension": 1024,
+                "content_mode": "code",
+            }
+        ),
+        encoding="utf-8",
+    )
+    index_dir = project_dir / "index"
+    index_dir.mkdir()
+    artifact_path = index_dir / "identity.marker"
+    artifact_path.write_text("verified", encoding="utf-8")
+    manifest = build_manifest(
+        index_dir,
+        [ArtifactSpec("identity.marker", artifact_path)],
+        provider="voyage",
+        model="voyage-4-large",
+        vector_dim=1024,
+        pipeline_version="verified-pipeline",
+        input_type_enabled=False,
+    )
+    commit_manifest(index_dir, manifest)
+    captured: dict[str, EffectiveEmbeddingConfig] = {}
+
+    class _ConfiguredEmbedder:
+        def __init__(
+            self,
+            *,
+            cache_dir: str,
+            configuration: EffectiveEmbeddingConfig,
+        ) -> None:
+            del cache_dir
+            captured["configuration"] = configuration
+            self.configuration = configuration
+
+    server = server_module.CodeSearchServer.__new__(
+        server_module.CodeSearchServer
+    )
+    monkeypatch.setattr(
+        server,
+        "get_project_storage_dir",
+        lambda *_args, **_kwargs: project_dir,
+    )
+    monkeypatch.setattr(server_module, "get_storage_dir", lambda: tmp_path)
+    monkeypatch.setattr(server_module, "CodeEmbedder", _ConfiguredEmbedder)
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "on")
+
+    restored = server.embedder(str(source))
+
+    assert restored.configuration.input_type_enabled is False
+    assert captured["configuration"].input_type_enabled is False
+
+
+def test_legacy_manifest_without_input_type_requires_reindex(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import json
+
+    from mcp_server import code_search_server as server_module
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        build_manifest,
+        commit_manifest,
+    )
+
+    source = tmp_path / "source"
+    source.mkdir()
+    project_dir = tmp_path / "project-index"
+    project_dir.mkdir()
+    (project_dir / "project_info.json").write_text(
+        json.dumps(
+            {
+                "project_path": str(source),
+                "embedding_provider": "voyage",
+                "embedding_model": "voyage-4-large",
+                "embedding_dimension": 1024,
+                "content_mode": "code",
+            }
+        ),
+        encoding="utf-8",
+    )
+    index_dir = project_dir / "index"
+    index_dir.mkdir()
+    artifact_path = index_dir / "identity.marker"
+    artifact_path.write_text("verified", encoding="utf-8")
+    manifest = build_manifest(
+        index_dir,
+        [ArtifactSpec("identity.marker", artifact_path)],
+        provider="voyage",
+        model="voyage-4-large",
+        vector_dim=1024,
+        pipeline_version="legacy-pipeline",
+    )
+    manifest.pop("input_type_enabled")
+    commit_manifest(index_dir, manifest)
+
+    class _ConfiguredEmbedder:
+        def __init__(
+            self,
+            *,
+            cache_dir: str,
+            configuration: EffectiveEmbeddingConfig,
+        ) -> None:
+            del cache_dir
+            self.configuration = configuration
+
+    server = server_module.CodeSearchServer.__new__(
+        server_module.CodeSearchServer
+    )
+    monkeypatch.setattr(
+        server,
+        "get_project_storage_dir",
+        lambda *_args, **_kwargs: project_dir,
+    )
+    monkeypatch.setattr(server_module, "get_storage_dir", lambda: tmp_path)
+    monkeypatch.setattr(server_module, "CodeEmbedder", _ConfiguredEmbedder)
+    monkeypatch.setenv("VOYAGE_INPUT_TYPE", "on")
+
+    with pytest.raises(
+        ValueError,
+        match=r"input_type_enabled.*reindex required",
+    ):
+        server.embedder(str(source))
+
+
+def test_project_input_type_disagreement_with_manifest_requires_reindex(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import json
+
+    from mcp_server import code_search_server as server_module
+    from search.epoch_manifest import (
+        ArtifactSpec,
+        build_manifest,
+        commit_manifest,
+    )
+
+    source = tmp_path / "source"
+    source.mkdir()
+    project_dir = tmp_path / "project-index"
+    project_dir.mkdir()
+    (project_dir / "project_info.json").write_text(
+        json.dumps(
+            {
+                "project_path": str(source),
+                "embedding_provider": "voyage",
+                "embedding_model": "voyage-4-large",
+                "embedding_dimension": 1024,
+                "embedding_input_type_enabled": True,
+                "content_mode": "code",
+            }
+        ),
+        encoding="utf-8",
+    )
+    index_dir = project_dir / "index"
+    index_dir.mkdir()
+    artifact_path = index_dir / "identity.marker"
+    artifact_path.write_text("verified", encoding="utf-8")
+    manifest = build_manifest(
+        index_dir,
+        [ArtifactSpec("identity.marker", artifact_path)],
+        provider="voyage",
+        model="voyage-4-large",
+        vector_dim=1024,
+        pipeline_version="verified-pipeline",
+        input_type_enabled=False,
+    )
+    commit_manifest(index_dir, manifest)
+
+    class _ConfiguredEmbedder:
+        def __init__(
+            self,
+            *,
+            cache_dir: str,
+            configuration: EffectiveEmbeddingConfig,
+        ) -> None:
+            del cache_dir
+            self.configuration = configuration
+
+    server = server_module.CodeSearchServer.__new__(
+        server_module.CodeSearchServer
+    )
+    monkeypatch.setattr(
+        server,
+        "get_project_storage_dir",
+        lambda *_args, **_kwargs: project_dir,
+    )
+    monkeypatch.setattr(server_module, "get_storage_dir", lambda: tmp_path)
+    monkeypatch.setattr(server_module, "CodeEmbedder", _ConfiguredEmbedder)
+
+    with pytest.raises(
+        ValueError,
+        match=r"project_info.*input type.*manifest.*reindex required",
+    ):
+        server.embedder(str(source))
+
+
 def test_server_builds_embedder_from_stored_config_without_mutating_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -734,6 +1097,7 @@ def test_server_builds_embedder_from_stored_config_without_mutating_environment(
         model_name="voyage-context-3",
         content_mode="docs",
         output_dimension=1024,
+        input_type_enabled=True,
     )
     assert os.environ["EMBEDDING_PROVIDER"] == "local"
     assert (

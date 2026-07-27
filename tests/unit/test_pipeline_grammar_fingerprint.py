@@ -154,6 +154,25 @@ def test_pipeline_version_includes_effective_output_dimension() -> None:
     )
 
 
+def test_pipeline_version_includes_effective_input_type_mode() -> None:
+    disabled = EffectiveEmbeddingConfig(
+        provider="voyage",
+        model_name="voyage-4-large",
+        content_mode="code",
+        output_dimension=1024,
+        input_type_enabled=False,
+    )
+    enabled = EffectiveEmbeddingConfig(
+        provider=disabled.provider,
+        model_name=disabled.model_name,
+        content_mode=disabled.content_mode,
+        output_dimension=disabled.output_dimension,
+        input_type_enabled=True,
+    )
+
+    assert get_pipeline_version(disabled) != get_pipeline_version(enabled)
+
+
 def test_ambient_pipeline_hash_uses_resolved_local_fallback(
     monkeypatch,
 ) -> None:

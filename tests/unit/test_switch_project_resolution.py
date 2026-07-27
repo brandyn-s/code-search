@@ -132,3 +132,46 @@ def test_switch_project_skips_stub_dir_for_populated_peer(monkeypatch):
             f"switch_project picked stub over populated peer: {result}"
         )
         assert result["project_info"]["project_hash"] == provider_hash
+
+
+def test_switch_project_failure_preserves_active_project_state(
+    monkeypatch,
+    tmp_path,
+):
+    """Invalid target metadata must not partially activate the target."""
+    from common_utils import get_storage_dir
+    from mcp_server.code_search_server import CodeSearchServer
+
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    monkeypatch.setenv("CODE_SEARCH_STORAGE", str(storage))
+    get_storage_dir.cache_clear()
+
+    target = (tmp_path / "target").resolve()
+    target.mkdir()
+    provider_hash = _hash(f"{target}:voyage")
+    provider_dir = storage / "projects" / f"{target.name}_{provider_hash}"
+    (provider_dir / "index").mkdir(parents=True)
+    (provider_dir / "index" / "code.index").write_bytes(b"fake")
+    (provider_dir / "project_info.json").write_text(
+        "{not-json",
+        encoding="utf-8",
+    )
+
+    server = CodeSearchServer()
+    old_manager = object()
+    old_searcher = object()
+    server._current_project = "/already/active"
+    server._current_provider = "local"
+    server._index_manager = old_manager
+    server._searcher = old_searcher
+
+    result = json.loads(
+        server.switch_project(str(target), provider="voyage")
+    )
+
+    assert "error" in result
+    assert server._current_project == "/already/active"
+    assert server._current_provider == "local"
+    assert server._index_manager is old_manager
+    assert server._searcher is old_searcher

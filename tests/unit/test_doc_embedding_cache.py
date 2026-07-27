@@ -113,6 +113,23 @@ def grouped_provider(monkeypatch):
     embedder_module._PROVIDER_REGISTRY.pop("fake-doc-grouped", None)
 
 
+@pytest.fixture
+def voyage_flat_provider(monkeypatch):
+    models = []
+    original_factory = embedder_module._PROVIDER_REGISTRY["voyage"]
+
+    @register_provider("voyage")
+    def _factory(model_name, cache_dir, device):
+        m = _CountingModel(model_name, dim=1024)
+        models.append(m)
+        return m
+
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "voyage")
+    monkeypatch.setenv("EMBEDDING_MODEL", "voyage-4-large")
+    yield models
+    embedder_module._PROVIDER_REGISTRY["voyage"] = original_factory
+
+
 def test_second_index_run_serves_all_from_cache(isolated_caches, flat_provider, tmp_path):
     chunks = [_make_chunk(f"f{i}", f"def f{i}():\n    return {i}") for i in range(5)]
 
@@ -177,14 +194,19 @@ def test_provider_and_model_isolation(isolated_caches, flat_provider, monkeypatc
         embedder_module._PROVIDER_REGISTRY.pop("fake-doc-flat-b", None)
 
 
-def test_input_type_mode_is_part_of_the_key(isolated_caches, flat_provider, monkeypatch, tmp_path):
+def test_input_type_mode_is_part_of_the_key(
+    isolated_caches,
+    voyage_flat_provider,
+    monkeypatch,
+    tmp_path,
+):
     chunk = _make_chunk("f", "def f():\n    return 1")
     CodeEmbedder(cache_dir=str(tmp_path / "m")).embed_chunks([chunk])
 
     monkeypatch.setenv("VOYAGE_INPUT_TYPE", "on")
     emb2 = CodeEmbedder(cache_dir=str(tmp_path / "m"))
     emb2.embed_chunks([chunk])
-    assert flat_provider[-1].encode_calls == 1, (
+    assert voyage_flat_provider[-1].encode_calls == 1, (
         "input_type=on must re-encode — same content embeds differently "
         "with input_type set"
     )

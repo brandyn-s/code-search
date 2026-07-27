@@ -167,6 +167,7 @@ def test_commit_post_cleanup_manifest_preserves_verified_index_identity(
         model="voyage-code-3",
         vector_dim=4,
         pipeline_version="pipeline-v7",
+        input_type_enabled=True,
     )
     commit_manifest(idx, initial)
 
@@ -177,6 +178,7 @@ def test_commit_post_cleanup_manifest_preserves_verified_index_identity(
     assert current["model"] == "voyage-code-3"
     assert current["vector_dim"] == 4
     assert current["pipeline_version"] == "pipeline-v7"
+    assert current["input_type_enabled"] is True
 
 
 def test_commit_post_cleanup_manifest_rejects_identity_dimension_mismatch(
@@ -197,6 +199,30 @@ def test_commit_post_cleanup_manifest_rejects_identity_dimension_mismatch(
     assert commit_post_cleanup_manifest(idx, chunk_ids) is None
     current = read_current(idx)
     assert current["epoch_id"] == initial["epoch_id"]
+    assert verify_manifest(idx, current) is None
+
+
+def test_commit_post_cleanup_manifest_rejects_missing_input_mode_identity(
+    tmp_path,
+):
+    idx = tmp_path / "index"
+    chunk_ids = _seed_artifacts(idx, chunk_count=2)
+    initial = build_manifest(
+        idx,
+        _manifest_artifacts(idx, 2),
+        provider="voyage",
+        model="voyage-code-3",
+        vector_dim=4,
+        pipeline_version="pipeline-v7",
+        input_type_enabled=True,
+    )
+    initial.pop("input_type_enabled")
+    commit_manifest(idx, initial)
+
+    assert commit_post_cleanup_manifest(idx, chunk_ids) is None
+    current = read_current(idx)
+    assert current["epoch_id"] == initial["epoch_id"]
+    assert "input_type_enabled" not in current
     assert verify_manifest(idx, current) is None
 
 
