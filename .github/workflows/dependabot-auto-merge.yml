@@ -9,7 +9,7 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: ${{ (github.event.pull_request.user.login == 'dependabot[bot]') && (github.repository_owner != 'redacted-brandyn') }}
+    if: ${{ (github.event.pull_request.user.login == 'dependabot[bot]') && (github.repository_owner_id != '186206138') }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0

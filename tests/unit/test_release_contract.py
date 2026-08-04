@@ -321,7 +321,7 @@ def test_active_project_metadata_has_no_retired_organization_references() -> Non
     assert "github.com/redacted-org/code-graph" in active_text
     assert (
         REPO_ROOT / ".github" / "CODEOWNERS"
-    ).read_text(encoding="utf-8").strip().endswith("* @redacted-brandyn")
+    ).read_text(encoding="utf-8").strip().endswith("* @brandyn-s")
 
 
 def test_readme_installs_the_verified_versioned_release() -> None:

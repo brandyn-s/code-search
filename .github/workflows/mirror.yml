@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   mirror:
-    if: github.repository_owner != 'redacted-brandyn'
+    if: github.repository_owner_id != '186206138'
     runs-on: ubuntu-latest
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -37,12 +37,12 @@ jobs:
       - name: Push branches and tags to personal account
         env:
           MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
-          DEST_REPO: redacted-brandyn/${{ github.event.repository.name }}
+          DEST_REPO: brandyn-s/${{ github.event.repository.name }}
         run: |
           if [ -z "$MIRROR_TOKEN" ]; then
             echo "::error::MIRROR_TOKEN secret not set. Generate a fine-grained PAT at"
             echo "::error::  https://github.com/settings/personal-access-tokens/new"
-            echo "::error::with Contents:Write permission on redacted-brandyn/* repos, then"
+            echo "::error::with Contents:Write permission on brandyn-s/* repos, then"
             echo "::error::set it as MIRROR_TOKEN secret on this repo."
             exit 1
           fi
