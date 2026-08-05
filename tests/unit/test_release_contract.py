@@ -215,8 +215,22 @@ def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:
     assert workflow.count("contents: write") == 1
     assert "actions/download-artifact@" in workflow
     assert "actions/upload-artifact@" in workflow
+    # These two assertions pin the SHA that release.yml ALSO pins, so they are a
+    # change-DETECTOR, not an invariant-CHECKER: the test cannot independently know
+    # the correct SHA, and any legitimate action bump (dependabot, a security
+    # advisory) must edit BOTH sides in lockstep or CI goes red. That is by design
+    # here — a supply-chain pin should not be silently movable — but it means the
+    # red is EXPECTED on every bump and is not a defect in the bumping PR.
+    #
+    # What the pair genuinely protects: a pin cannot drift to a MUTABLE ref (a tag
+    # or branch) without a human editing this literal. What it does NOT protect:
+    # that the SHA corresponds to the version the trailing comment claims — nothing
+    # here verifies 508db95... IS v4.2.1. Verifying that needs a registry lookup,
+    # which a unit test deliberately does not do.
+    #
+    # attest bumped v4.2.0 -> v4.2.1 in the github_actions group (2026-08-04).
     assert (
-        "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6"
+        "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
         in workflow
     )
     assert (
