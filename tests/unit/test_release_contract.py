@@ -265,6 +265,21 @@ def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:
     assert "group: code-search-release" in workflow
 
 
+def test_release_preflight_does_not_duplicate_runtime_dependencies() -> None:
+    workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+    steps = {
+        step["name"]: step
+        for step in workflow["jobs"]["preflight-build"]["steps"]
+        if "name" in step
+    }
+    install = steps["Install build and acceptance dependencies"]["run"]
+
+    assert "setuptools>=68.0" in install
+    assert "wheel pytest PyYAML" in install
+    assert "requirements.txt" not in install
+    assert "requirements-dev.txt" not in install
+
+
 def test_dispatch_inputs_are_never_interpolated_into_shell_source() -> None:
     for workflow_path in (RELEASE_WORKFLOW, EXTERNAL_WORKFLOW):
         workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))

@@ -85,7 +85,10 @@ jobs:
       - name: Install build and acceptance dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-dev.txt wheel
+          # The wheel contract installs the declared runtime dependencies into
+          # its own fresh venv. Installing them here as well duplicates the
+          # Linux ML stack and can exhaust the hosted runner before acceptance.
+          python -m pip install "setuptools>=68.0" wheel pytest PyYAML
 
       - name: Build and validate the exact wheel
         id: artifact
