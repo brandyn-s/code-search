@@ -126,3 +126,13 @@ print("Module level code")
         # Should create a module chunk since no functions/classes
         assert len(chunks) == 1, "Module-only file should produce one chunk"
         assert chunks[0].node_type == 'module', "Chunk should be of type module"
+
+    def test_module_chunk_does_not_count_terminal_newline_as_source_line(self):
+        """Evidence coordinates must not extend one line past EOF."""
+        code = 'import os\n\nSETTING = os.environ.get("SETTING")\n'
+
+        chunks = self.chunker.chunk_code(code)
+
+        assert len(chunks) == 1
+        assert chunks[0].start_line == 1
+        assert chunks[0].end_line == 3

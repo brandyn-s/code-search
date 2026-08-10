@@ -168,7 +168,7 @@ class LanguageChunker(ABC):
             chunks.append(TreeSitterChunk(
                 content=source_code,
                 start_line=1,
-                end_line=len(source_code.split('\n')),
+                end_line=len(source_code.splitlines()),
                 node_type='module',
                 language=self.language_name,
                 metadata={'type': 'module'}

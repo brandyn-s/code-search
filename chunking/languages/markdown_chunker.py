@@ -90,7 +90,7 @@ class MarkdownChunker(LanguageChunker):
                 chunks.append(TreeSitterChunk(
                     content=source_code,
                     start_line=1,
-                    end_line=len(source_code.split('\n')),
+                    end_line=len(source_code.splitlines()),
                     node_type='document',
                     language=self.language_name,
                     metadata={'type': 'document', 'name': 'Document'}
@@ -98,7 +98,7 @@ class MarkdownChunker(LanguageChunker):
             return chunks
 
         # Create sections from headings
-        lines = source_code.split('\n')
+        lines = source_code.splitlines()
 
         for i, heading_node in enumerate(headings):
             start_line, _ = self.get_line_numbers(heading_node)
