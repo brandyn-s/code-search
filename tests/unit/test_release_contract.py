@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -355,11 +356,16 @@ def test_active_project_metadata_has_no_retired_organization_references() -> Non
 
 def test_readme_installs_the_verified_versioned_release() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    project = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    version = project["project"]["version"]
 
-    assert 'TAG="v0.2.1"' in readme
-    assert 'WHEEL="redacted_code_search-0.2.1-py3-none-any.whl"' in readme
+    assert f'Install the verified v{version} release' in readme
+    assert f'TAG="v{version}"' in readme
+    assert f'WHEEL="redacted_code_search-{version}-py3-none-any.whl"' in readme
     assert (
-        'BUNDLE="redacted_code_search-0.2.1-provenance.jsonl"'
+        f'BUNDLE="redacted_code_search-{version}-provenance.jsonl"'
         in readme
     )
     assert 'gh release download "$TAG"' in readme

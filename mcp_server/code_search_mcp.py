@@ -75,9 +75,12 @@ class CodeSearchMCP(FastMCP):
         self.tool(
             description=(
                 "Search code using the normal retrieval pipeline and attach "
-                "canonical generation-bound evidence_ref and symbol_ref "
-                "objects when the live index identity is ready. Use for "
-                "evidence-backed FIND or PROVE workflows."
+                "canonical generation-bound evidence_candidates for exact "
+                "nonblank source lines when the live index identity is ready. "
+                "Result chunk ranges are retrieval context only; select an "
+                "immutable evidence_ref.id from a candidate instead of "
+                "inventing or widening a range. Use for evidence-backed FIND "
+                "or PROVE workflows."
             ),
             annotations=TOOL_ANNOTATIONS["search_code_evidence"],
         )(self.search_code_evidence)

@@ -84,6 +84,18 @@ Queries run through two parallel search paths:
 
 5. **Query expansion**: Domain-specific synonym maps expand query terms before BM25 search. "auth" expands to include "authentication", "oauth", "jwt", "token", "credential", "login". This bridges the vocabulary gap between how developers *ask* about code and how code *names* things.
 
+### Verifiable evidence
+
+`search_code_evidence` uses the same retrieval pipeline, but keeps retrieval
+context separate from claim evidence. A result's broad chunk range is labeled
+`retrieval_context`; it is never issued as selectable evidence. Instead, the
+backend returns `evidence_candidates` for exact nonblank source lines from the
+same generation-bound indexed chunk. Each candidate carries an immutable
+`evidence_ref.id`, source coordinate, and preview. Consumers select those IDs
+rather than constructing or widening source ranges themselves. If the indexed
+content cannot be bound to the result and stable index identity, evidence
+emission fails closed while ordinary retrieval remains available.
+
 ### Incremental Indexing (Merkle Trees)
 
 After initial indexing, only changed files are re-embedded. A Merkle DAG (directed acyclic graph) tracks content hashes for every file and directory. On re-index, the tree is diffed against the stored snapshot — only files whose hashes changed get re-chunked and re-embedded. For a 3,000-chunk repo where 5 files changed, this means re-embedding ~20 chunks instead of 3,000, completing in seconds instead of minutes.
@@ -270,7 +282,7 @@ This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, c
 
 ## Installation
 
-### 1. Install the verified v0.2.1 release
+### 1. Install the verified v0.3.2 release
 
 The release contains a wheel, its checksum manifest, and a signed GitHub
 artifact-attestation bundle. The commands below download and verify all three
@@ -278,12 +290,12 @@ before installing the wheel:
 
 ```bash
 REPO="redacted-org/code-search"
-TAG="v0.2.1"
-WHEEL="redacted_code_search-0.2.1-py3-none-any.whl"
-BUNDLE="redacted_code_search-0.2.1-provenance.jsonl"
+TAG="v0.3.2"
+WHEEL="redacted_code_search-0.3.2-py3-none-any.whl"
+BUNDLE="redacted_code_search-0.3.2-provenance.jsonl"
 
-mkdir code-search-v0.2.1
-cd code-search-v0.2.1
+mkdir code-search-v0.3.2
+cd code-search-v0.3.2
 gh release download "$TAG" --repo "$REPO"
 
 # Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)
