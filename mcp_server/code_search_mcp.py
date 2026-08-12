@@ -23,6 +23,7 @@ TOOL_ANNOTATIONS = {
     "find_similar_code": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "get_index_status": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "list_projects": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "search_all_projects": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
     "switch_project": ToolAnnotations(readOnlyHint=False),
     "index_test_project": ToolAnnotations(readOnlyHint=False),
     "clear_index": ToolAnnotations(readOnlyHint=False, destructiveHint=True),

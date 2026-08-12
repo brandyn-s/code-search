@@ -135,13 +135,14 @@ These recorded results used golden test sets — hand-verified query-to-expected
 - **Cross-language search**: Same query works across Python, Rust, TypeScript, Nix — the embedding model understands all of them
 - **API documentation search**: Index API docs as markdown and search them semantically (see below)
 - **Large monorepos**: Handles 3,000+ chunk repos with incremental re-indexing. FAISS int8 quantization keeps indexes small.
-- **Multi-project workflows**: Switch between indexed projects instantly. A developer working across 5 repos can search any of them without re-indexing.
+- **Multi-project workflows**: Switch instantly, or use bounded project-balanced discovery across up to 25 isolated indexes without changing the active project.
 
 ## What It's Not Good For
 
 - **Exact string matching**: If you know the exact function name `validate_jwt_token_v2`, use grep. Semantic search adds latency for literal lookups (though BM25 hybrid mode handles this reasonably well).
 - **Structural queries**: "What functions call `authenticate()`?" is a graph question, not a search question. Use [code-graph](https://github.com/redacted-org/code-graph) for call chain analysis, dead code detection, and dependency tracing.
 - **Real-time editing feedback**: The index updates on re-index, not on every keystroke. For IDE-style "as you type" search, use your editor's built-in search.
+- **Organization-wide federation**: Cross-project discovery queries isolated local indexes. Scores are not comparable across projects, and there is no organization ACL model or continuously managed indexing fleet.
 - **Binary files, images, PDFs**: Only text-based source files are indexed.
 
 ## The API Documentation Pipeline
@@ -282,7 +283,7 @@ This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, c
 
 ## Installation
 
-### 1. Install the verified v0.3.4 release
+### 1. Install the verified v0.3.5 release
 
 The release contains a wheel, its checksum manifest, and a signed GitHub
 artifact-attestation bundle. The commands below download and verify all three
@@ -290,12 +291,12 @@ before installing the wheel:
 
 ```bash
 REPO="redacted-org/code-search"
-TAG="v0.3.4"
-WHEEL="redacted_code_search-0.3.4-py3-none-any.whl"
-BUNDLE="redacted_code_search-0.3.4-provenance.jsonl"
+TAG="v0.3.5"
+WHEEL="redacted_code_search-0.3.5-py3-none-any.whl"
+BUNDLE="redacted_code_search-0.3.5-provenance.jsonl"
 
-mkdir code-search-v0.3.4
-cd code-search-v0.3.4
+mkdir code-search-v0.3.5
+cd code-search-v0.3.5
 gh release download "$TAG" --repo "$REPO"
 
 # Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)
@@ -378,6 +379,7 @@ mcp__code-search__search_code(query="authentication middleware")
 | Tool | Purpose |
 |------|---------|
 | `search_code` | Semantic + keyword hybrid search across the active project |
+| `search_all_projects` | Read-only, project-balanced discovery across up to 25 isolated indexes; returns per-project scores and never treats them as globally comparable |
 | `find_similar_code` | Find chunks structurally similar to a given search result |
 | `index_directory` | Index a directory in the background (with progress polling) |
 | `get_indexing_progress` | Poll the status of a background indexing job |
@@ -488,11 +490,18 @@ The evaluation harness runs each golden query, checks whether the expected file 
 |------|-----------|-------------|-----------------------------------|
 | **grep / ripgrep** | Instant, exact, no indexing needed, regex support | No understanding of meaning — "auth" won't find "credential validation" | You know the exact string. Literal lookups. |
 | **GitHub Code Search** | Searches all of GitHub, regex, symbol-aware | Cloud-only, no private GHES support, no custom embeddings | Searching across public repos you don't have locally. |
-| **Sourcegraph** | Enterprise-grade, cross-repo, code intelligence | Requires deployment infrastructure, no local-first option | Large org with 100+ repos needing unified search. |
+| **Sourcegraph** | Enterprise-grade search language, cross-repo code intelligence, history, ACLs, and managed indexing | Requires deployment infrastructure; a broader product surface than this local-first tool | Large organizations needing unified governed search and history. |
 | **IDE search (VS Code, JetBrains)** | Real-time, integrated in editor, symbol navigation | Single-repo, no semantic understanding, no cross-project | Navigating within a single file or project you have open. |
 | **code-graph** | Structural queries — call graphs, dead code, blast radius | No semantic/meaning-based search | "What calls this?" not "Where is the auth code?" |
 
 **code-search is best when**: You need to find code by meaning across a codebase, especially when you don't know the exact names. It's designed for AI assistants that need to quickly locate relevant code with minimal token waste.
+
+`search_all_projects` is deliberately a discovery boundary, not score
+federation. It opens one exact provider-specific index per requested project,
+keeps the server's active project and provider state unchanged, ranks within
+each project, and interleaves results project-first. Use the returned project
+identity for a follow-up search or proof; do not compare a score from one index
+with a score from another.
 
 ## How code-search and code-graph Work Together
 

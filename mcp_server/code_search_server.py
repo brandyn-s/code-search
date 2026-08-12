@@ -3254,74 +3254,170 @@ class CodeSearchServer:
             logger.error(f"verify_index_integrity failed: {e}", exc_info=True)
             return json.dumps({"error": f"verify_index_integrity failed: {e}"})
 
-    def search_all_projects(self, query: str, k: int = 3) -> str:
-        """Search across ALL indexed projects, returning results tagged by project.
+    def search_all_projects(
+        self,
+        query: str,
+        k: int = 3,
+        projects: Optional[List[str]] = None,
+        top_k: int = 25,
+    ) -> str:
+        """Search isolated project indexes without mutating active state.
 
-        Useful for cross-version comparison, monorepo-wide discovery, and
-        finding code across multiple sub-projects without manual switching.
-
-        Args:
-            query: Natural language search query
-            k: Results per project (default 3)
-
-        Returns:
-            JSON with results grouped by project name
+        Results retain their canonical index identity and are merged with a
+        deterministic project-balanced policy. Scores from separately built
+        indexes are deliberately not compared as though they shared a single
+        calibration distribution.
         """
+        query = query.strip()
+        if not query:
+            return json.dumps({"error": "query must be a non-empty string"})
+        k = max(1, min(int(k), 20))
+        top_k = max(1, min(int(top_k), 100))
+        requested = set(projects or [])
+
         try:
-            base_dir = get_storage_dir()
-            projects_dir = base_dir / "projects"
-
+            projects_dir = get_storage_dir() / "projects"
             if not projects_dir.exists():
-                return json.dumps({"error": "No projects indexed", "results_by_project": {}})
+                return json.dumps(
+                    {"error": "No projects indexed", "results_by_project": {}}
+                )
 
-            all_results = {}
-            original_project = self._current_project
-
-            for project_dir in projects_dir.iterdir():
-                if not project_dir.is_dir():
-                    continue
+            # One entry per exact project-path/provider index. Sorting by the
+            # canonical on-disk index ID makes selection and output stable.
+            discovered = []
+            seen_indexes = set()
+            for project_dir in sorted(projects_dir.iterdir(), key=lambda item: item.name):
                 info_file = project_dir / "project_info.json"
-                if not info_file.exists():
+                if (
+                    not project_dir.is_dir()
+                    or not info_file.is_file()
+                    or not (project_dir / "index" / "code.index").is_file()
+                ):
                     continue
-
                 try:
-                    with open(info_file, encoding="utf-8") as f:
-                        info = json.load(f)
-                    project_path = info.get("project_path", "")
-                    project_name = info.get("project_name", project_dir.name)
-
-                    if not project_path:
+                    with open(info_file, encoding="utf-8") as handle:
+                        info = json.load(handle)
+                    project_path = str(Path(info.get("project_path", "")).resolve())
+                    if not info.get("project_path"):
                         continue
-
-                    # Switch to this project and search
-                    self.switch_project(project_path)
-                    raw = self.search_code(query=query, k=k, auto_reindex=False)
-                    results = json.loads(raw)
-
-                    if results.get("results"):
-                        all_results[project_name] = {
+                    provider = info.get("embedding_provider")
+                    identity = (project_path, provider or "")
+                    if identity in seen_indexes:
+                        continue
+                    seen_indexes.add(identity)
+                    discovered.append(
+                        {
+                            "project_id": project_dir.name,
+                            "project_name": info.get("project_name", project_dir.name),
                             "project_path": project_path,
-                            "results": results["results"][:k],
+                            "provider": provider,
                         }
-                except Exception as e:
-                    logger.warning(f"Search failed for {project_dir.name}: {e}")
-                    continue
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    logger.warning("Skipping invalid project index %s: %s", project_dir, exc)
 
-            # Restore original project
-            if original_project:
+            available_ids = [item["project_id"] for item in discovered]
+            unknown = sorted(requested.difference(available_ids))
+            if unknown:
+                return json.dumps(
+                    {
+                        "error": "Unknown project index IDs",
+                        "unknown_projects": unknown,
+                        "available_projects": available_ids,
+                    }
+                )
+            selected = [
+                item
+                for item in discovered
+                if not requested or item["project_id"] in requested
+            ]
+            projects_truncated = len(selected) > 25
+            selected = selected[:25]
+
+            # A dedicated worker owns all temporary switches, so this tool
+            # never changes this server's active project, provider, manager,
+            # or searcher. This also makes failures isolated per project.
+            worker = CodeSearchServer()
+            grouped = {}
+            project_errors = {}
+            for item in selected:
+                project_id = item["project_id"]
                 try:
-                    self.switch_project(original_project)
-                except Exception:
-                    pass
+                    switched = json.loads(
+                        worker.switch_project(
+                            item["project_path"], provider=item["provider"]
+                        )
+                    )
+                    if not switched.get("success"):
+                        project_errors[project_id] = switched.get(
+                            "error", "project switch failed"
+                        )
+                        continue
+                    search_response = json.loads(
+                        worker.search_code(query=query, k=k, auto_reindex=False)
+                    )
+                    if search_response.get("error"):
+                        project_errors[project_id] = search_response["error"]
+                        continue
+                    tagged = []
+                    for rank, result in enumerate(
+                        search_response.get("results", [])[:k], start=1
+                    ):
+                        tagged_result = dict(result)
+                        tagged_result.update(item)
+                        tagged_result["project_rank"] = rank
+                        tagged.append(tagged_result)
+                    grouped[project_id] = {
+                        **item,
+                        "results": tagged,
+                        "metadata": search_response.get("_metadata"),
+                    }
+                except Exception as exc:
+                    logger.warning("Search failed for %s: %s", project_id, exc)
+                    project_errors[project_id] = str(exc)
 
-            return json.dumps({
-                "query": query,
-                "projects_searched": len(all_results),
-                "results_by_project": all_results,
-            }, indent=2)
-        except Exception as e:
-            logger.error(f"Cross-project search failed: {e}")
-            return json.dumps({"error": str(e)})
+            # Round-robin across project-local ranks prevents one index's
+            # uncalibrated score distribution from monopolizing the result.
+            merged = []
+            for project_rank in range(1, k + 1):
+                for project_id in sorted(grouped):
+                    results = grouped[project_id]["results"]
+                    if len(results) < project_rank:
+                        continue
+                    result = dict(results[project_rank - 1])
+                    result["global_rank"] = len(merged) + 1
+                    merged.append(result)
+                    if len(merged) == top_k:
+                        break
+                if len(merged) == top_k:
+                    break
+
+            projects_with_matches = sum(
+                bool(group["results"]) for group in grouped.values()
+            )
+            return json.dumps(
+                {
+                    "query": query,
+                    "indexes_discovered": len(discovered),
+                    "projects_attempted": len(selected),
+                    "projects_searched": len(selected),
+                    "projects_with_matches": projects_with_matches,
+                    "projects_truncated": projects_truncated,
+                    "ranking_policy": "project_balanced_round_robin",
+                    "cross_project_score_comparable": False,
+                    "result_scope": (
+                        "discovery_only; verify claims with project-bound "
+                        "search_code_evidence or graph relationship evidence"
+                    ),
+                    "results": merged,
+                    "results_by_project": grouped,
+                    "project_errors": project_errors,
+                },
+                indent=2,
+            )
+        except Exception as exc:
+            logger.error("Cross-project search failed: %s", exc, exc_info=True)
+            return json.dumps({"error": str(exc)})
 
     def switch_project(self, project_path: str, provider: str = None) -> str:
         """Implementation of switch_project tool.
