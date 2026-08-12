@@ -226,12 +226,13 @@ def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:
     # What the pair genuinely protects: a pin cannot drift to a MUTABLE ref (a tag
     # or branch) without a human editing this literal. What it does NOT protect:
     # that the SHA corresponds to the version the trailing comment claims — nothing
-    # here verifies 508db95... IS v4.2.1. Verifying that needs a registry lookup,
+    # here verifies 1e69f48... IS v4.2.2. Verifying that needs a registry lookup,
     # which a unit test deliberately does not do.
     #
-    # attest bumped v4.2.0 -> v4.2.1 in the github_actions group (2026-08-04).
+    # attest bumped v4.2.0 -> v4.2.1 in the github_actions group (2026-08-04),
+    # then v4.2.1 -> v4.2.2 in the same group (2026-08-12).
     assert (
-        "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d"
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
         in workflow
     )
     assert (
