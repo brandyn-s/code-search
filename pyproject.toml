@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "redacted-code-search"
-version = "0.3.3"
+version = "0.3.4"
 description = "Hybrid semantic + keyword code search MCP server. FAISS vector + FTS5 BM25 with Voyage AI, Jina, or local embeddings."
 readme = "README.md"
 requires-python = ">=3.12"

@@ -78,7 +78,7 @@ Queries run through two parallel search paths:
 
 2. **BM25 keyword search**: SQLite FTS5 full-text search finds exact keyword matches. This handles cases where you know the exact name — `validate_jwt_token` — and want direct string matching.
 
-3. **Reciprocal Rank Fusion (RRF)**: Both result lists are fused using content-specific weights: code 65/35, docs 70/30, all 50/50 (vector/BM25). RRF combines the *rankings* from both systems rather than raw scores, which is robust to score scale differences between vector similarity and BM25 TF-IDF.
+3. **Reciprocal Rank Fusion (RRF)**: Both result lists are fused using content-specific weights: code 65/35, docs 70/30, all 50/50 (vector/BM25). For issue-style queries containing explicit code identifiers, qualified members, acronyms, or source paths, the searcher first extracts those signals, widens retrieval to at most 200 candidates, and uses a bounded 35/65 vector/BM25 blend. Exact signal matches are promoted before rank-only fusion discards score magnitude. Plain-language queries retain the established weights and candidate depth.
 
 4. **Chunk type boosting**: After fusion, results are boosted by type — functions and methods get 1.3x in code mode, sections and documents get 1.3x in docs mode. This ensures that searching for "authentication" surfaces the `authenticate()` function over the `# Authentication` markdown section when searching code.
 
@@ -282,7 +282,7 @@ This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, c
 
 ## Installation
 
-### 1. Install the verified v0.3.3 release
+### 1. Install the verified v0.3.4 release
 
 The release contains a wheel, its checksum manifest, and a signed GitHub
 artifact-attestation bundle. The commands below download and verify all three
@@ -290,12 +290,12 @@ before installing the wheel:
 
 ```bash
 REPO="redacted-org/code-search"
-TAG="v0.3.3"
-WHEEL="redacted_code_search-0.3.3-py3-none-any.whl"
-BUNDLE="redacted_code_search-0.3.3-provenance.jsonl"
+TAG="v0.3.4"
+WHEEL="redacted_code_search-0.3.4-py3-none-any.whl"
+BUNDLE="redacted_code_search-0.3.4-provenance.jsonl"
 
-mkdir code-search-v0.3.3
-cd code-search-v0.3.3
+mkdir code-search-v0.3.4
+cd code-search-v0.3.4
 gh release download "$TAG" --repo "$REPO"
 
 # Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)

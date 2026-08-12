@@ -8,6 +8,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from search.query_signals import (
+    build_lexical_query,
+    calculate_signal_boost,
+    extract_query_signals,
+)
 from search.result_models import SearchResult
 
 
@@ -17,6 +22,34 @@ class HybridRetrieval:
 
     candidates: list[SearchResult]
     metadata_lookup: dict[str, dict[str, Any]]
+
+
+def rerank_raw_with_query_signals(
+    raw_results: list[tuple[str, float, dict[str, Any]]],
+    signals: Any,
+) -> list[tuple[str, float, dict[str, Any]]]:
+    """Promote exact code signals before rank-only fusion discards magnitude."""
+
+    if not signals.explicit:
+        return raw_results
+
+    def adjusted(item: tuple[str, float, dict[str, Any]]) -> tuple[float, str]:
+        chunk_id, score, metadata = item
+        boost = calculate_signal_boost(
+            signals,
+            relative_path=str(metadata.get("relative_path") or ""),
+            name=metadata.get("name"),
+            parent_name=metadata.get("parent_name"),
+            full_content=str(
+                metadata.get("full_content")
+                or metadata.get("content")
+                or metadata.get("content_preview")
+                or ""
+            ),
+        )
+        return (-abs(float(score)) * boost, chunk_id)
+
+    return sorted(raw_results, key=adjusted)
 
 
 def retrieve_hybrid_candidates(
@@ -34,8 +67,16 @@ def retrieve_hybrid_candidates(
     """Retrieve, fuse, materialize, boost, and sort hybrid candidates."""
     from search.config import resolve_hybrid_weights
 
-    candidate_k = 50
+    signals = extract_query_signals(query)
+    candidate_k = min(200, max(50, k * 4 if signals.explicit else 50))
     vector_weight, bm25_weight = resolve_hybrid_weights(config)
+    if (
+        signals.explicit
+        and config.vector_weight == 0
+        and config.bm25_weight == 0
+        and config.content_mode == "code"
+    ):
+        vector_weight, bm25_weight = (0.35, 0.65)
 
     optimized_query = searcher._optimize_query(query)
     query_embedding = searcher._get_query_embedding(optimized_query)
@@ -44,6 +85,7 @@ def retrieve_hybrid_candidates(
         candidate_k,
         filters,
     )
+    vector_raw = rerank_raw_with_query_signals(vector_raw, signals)
     vector_pairs = [
         (chunk_id, similarity)
         for chunk_id, similarity, _metadata in vector_raw
@@ -51,7 +93,7 @@ def retrieve_hybrid_candidates(
 
     # Preserve the established order: optional LLM rewrite first, static
     # expansion second, then BM25 retrieval.
-    bm25_query = query
+    bm25_query = build_lexical_query(query)
     if config.bm25_rewrite:
         from search.query_rewriter import rewrite_query_for_bm25
 
@@ -63,6 +105,7 @@ def retrieve_hybrid_candidates(
         k=candidate_k,
         filters=filters,
     )
+    bm25_raw = rerank_raw_with_query_signals(bm25_raw, signals)
     bm25_pairs = [
         (chunk_id, rank)
         for chunk_id, rank, _metadata in bm25_raw
@@ -132,6 +175,20 @@ def retrieve_hybrid_candidates(
         if path_boost > 1.0:
             path_boost = 1.0 + (path_boost - 1.0) * 3.0
         result.similarity_score *= path_boost
+
+        metadata = metadata_lookup.get(result.chunk_id, {}) or {}
+        result.similarity_score *= calculate_signal_boost(
+            signals,
+            relative_path=result.relative_path,
+            name=result.name,
+            parent_name=result.parent_name,
+            full_content=str(
+                metadata.get("full_content")
+                or metadata.get("content")
+                or result.content_preview
+                or ""
+            ),
+        )
 
     candidates.sort(key=lambda result: result.similarity_score, reverse=True)
     return HybridRetrieval(

@@ -139,6 +139,35 @@ def test_hybrid_pipeline_preserves_call_order_scores_and_metadata(monkeypatch):
     }
 
 
+def test_explicit_code_signals_widen_and_lexically_weight_retrieval(monkeypatch):
+    _set_pipeline_defaults(monkeypatch)
+    monkeypatch.setenv("BM25_REWRITE", "off")
+    monkeypatch.setenv("QUERY_EXPANSION", "off")
+    get_search_config.cache_clear()
+    events = []
+    manager = _RecordingIndexManager(events)
+    searcher = IntelligentSearcher(manager, _RecordingEmbedder(events))
+
+    results = searcher._hybrid_search(
+        "Flow.validate_parameters regression",
+        k=50,
+        context_depth=0,
+    )
+
+    assert ("vector", 200, None) in events
+    assert (
+        "bm25",
+        "Flow validate_parameters regression",
+        200,
+        None,
+    ) in events
+    assert [result.chunk_id for result in results] == [
+        "both",
+        "keyword",
+        "vector",
+    ]
+
+
 def test_off_mode_keeps_optional_reranker_imports_lazy(monkeypatch):
     _set_pipeline_defaults(monkeypatch)
     guarded_modules = {
