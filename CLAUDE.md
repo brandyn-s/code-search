@@ -75,7 +75,7 @@ per-cohort prompt/threshold overrides, latency-diag logging, `LLM_CONTEXT_PATH`,
 | `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set) | `voyage` (voyage-4-large, recommended), `voyage-code-3` (TS-optimized, regresses on Nix), `voyage-context` (legacy), `openai`, `jina` (local), `local` |
 | `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; known built-in models derive this automatically |
 | `VOYAGE_API_KEY` | – | Voyage AI API key |
-| `CONTENT_MODE` | `code` | `code` or `docs` — affects search weights and provider auto-select |
+| `CONTENT_MODE` | `code` | `code`, `docs`, or `all` — affects search weights and, only when no provider is explicit or stored, selects `voyage-context` for docs and `voyage` for other modes |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend `# From <path>` context headers before embedding |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
 | `CODE_SYNONYM_PROFILE` | `corsair` | Built-in synonym profile: `corsair`, `generic`, or `off`. Keep `corsair` as the default until comparative measurement supports a switch. |

@@ -1,12 +1,21 @@
 # External benchmark runbook — CoIR & CodeRAG-Bench
 
-**Status (2026-07-26): HARNESS READY; OUTCOME BLOCKED ON MEASUREMENT.**
-code-search has not yet produced a scored run on a public code-retrieval
-benchmark. Every headline number (MRR 0.828 golden / 0.670 PSM-multitarget) is
-internal and not comparable to any leaderboard. The manual workflow now emits
-query-ID-stable document rankings plus graded nDCG@10 and Recall@10 artifacts.
-It still needs a credentialed run before any provider-quality conclusion is
-supportable (see
+**Status (2026-08-12): ONE PUBLIC FILE-LOCALIZATION ENDPOINT MEASURED; EXTERNAL
+PROVIDER COMPARISON STILL BLOCKED.** The released v0.3.5 server has now produced
+a scored public result on a frozen, balanced LocBench n=80 endpoint: Acc@1
+0.375, Acc@10 0.788, and MRR@10 0.503. Against the Sourcegraph public endpoint,
+the paired Acc@1 comparison was 22 wins, 4 losses, and 54 ties (p=0.00053).
+That establishes narrow superiority on this revision-pinned file-localization
+endpoint only; it is not a general code-search or platform-superiority claim.
+See the README's **Public release evidence** section for the complete scope.
+
+The CoIR/CodeRAG-Bench provider experiment in this document remains unrun.
+Internal provider numbers (including MRR 0.828 golden / 0.670
+PSM-multitarget) are not comparable to a public leaderboard, and the LocBench
+result does not compare voyage-4-large with voyage-code-3. The manual workflow
+emits query-ID-stable document rankings plus graded nDCG@10 and Recall@10
+artifacts. It still needs a credentialed run before any external
+provider-quality conclusion is supportable (see
 `docs/findings/2026-05-24-r9-extension-session-synthesis.md` and
 `docs/findings/2026-05-30-embedding-model-string-confirmation.md`).
 
@@ -15,8 +24,9 @@ supportable (see
 1. The internal golden labels may be engine-biased (a sub-0.06-MRR delta may be
    noise — quantify the floor first with the **out-of-engine** harness below).
 2. "voyage-4-large beats voyage-code-3 on code retrieval" is a surprising claim
-   that currently rests *only* on the internal corpus. CoIR is the standard
-   place to check it.
+   that still rests *only* on the internal corpus. The public LocBench result
+   evaluates the released product, not this provider ablation; CoIR is the
+   standard place to check it.
 
 ## Step 0 — De-bias the internal metric first (cheap, no API key)
 
@@ -104,7 +114,7 @@ measurement.
 `bench/research/ndcg.py` remains dependency-free and self-tested:
 `python bench/research/ndcg.py`.
 
-## Step 5 — Close per ship-discipline rule 10
+## Step 5 — Close the remaining provider question per ship-discipline rule 10
 
 Record, in a dated `docs/findings/` doc, one of:
 - `"Measurement on CoIR nDCG@10 shows voyage-4-large {beats|ties|trails}

@@ -49,7 +49,7 @@ Source files are parsed into Abstract Syntax Trees using tree-sitter, then split
 
 ### 2. Embedding (Voyage AI)
 
-Each chunk is converted to a high-dimensional vector using [Voyage AI](https://voyageai.com)'s `voyage-4-large` model (MoE architecture, SOTA retrieval quality). The vectors are stored in a FAISS index with int8 quantization (4x smaller than float32, negligible quality loss on normalized vectors).
+Each chunk is converted to a high-dimensional vector using [Voyage AI](https://voyageai.com)'s `voyage-4-large` model, the current cloud default. The vectors are stored in a FAISS index with int8 quantization (4x smaller than float32, negligible quality loss on normalized vectors).
 
 Four embedding providers are available:
 
