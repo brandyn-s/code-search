@@ -2706,6 +2706,8 @@ class CodeIndexManager:
     @_with_storage_lock
     def get_index_size(self) -> int:
         """Get the number of chunks in the index."""
+        if self._index is None and self.index_path.exists():
+            self._load_index()
         return len(self._chunk_ids)
 
     @_with_storage_lock

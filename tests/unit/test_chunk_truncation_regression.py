@@ -117,6 +117,21 @@ def test_fresh_manager_remove_file_chunks_loads_existing_index():
         _close(mgr2)
 
 
+def test_fresh_manager_get_index_size_loads_existing_index():
+    """A fresh manager must report the persisted size before an
+    incremental-index eligibility check decides the index is empty."""
+    with tempfile.TemporaryDirectory() as tmp:
+        seed = _seed_30(tmp)
+        _close(seed)
+
+        mgr2 = CodeIndexManager(tmp)
+        assert mgr2._index is None
+        assert mgr2._chunk_ids == []
+
+        assert mgr2.get_index_size() == 30
+        _close(mgr2)
+
+
 def test_save_index_refuses_clobber_without_force():
     """save_index refuses when in-memory is dramatically smaller than
     on-disk pkl, unless force=True is passed."""
