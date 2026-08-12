@@ -282,7 +282,7 @@ This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, c
 
 ## Installation
 
-### 1. Install the verified v0.3.2 release
+### 1. Install the verified v0.3.3 release
 
 The release contains a wheel, its checksum manifest, and a signed GitHub
 artifact-attestation bundle. The commands below download and verify all three
@@ -290,12 +290,12 @@ before installing the wheel:
 
 ```bash
 REPO="redacted-org/code-search"
-TAG="v0.3.2"
-WHEEL="redacted_code_search-0.3.2-py3-none-any.whl"
-BUNDLE="redacted_code_search-0.3.2-provenance.jsonl"
+TAG="v0.3.3"
+WHEEL="redacted_code_search-0.3.3-py3-none-any.whl"
+BUNDLE="redacted_code_search-0.3.3-provenance.jsonl"
 
-mkdir code-search-v0.3.2
-cd code-search-v0.3.2
+mkdir code-search-v0.3.3
+cd code-search-v0.3.3
 gh release download "$TAG" --repo "$REPO"
 
 # Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)
