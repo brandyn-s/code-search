@@ -64,7 +64,7 @@ Four embedding providers are available:
 
 MRR (Mean Reciprocal Rank) was measured on 102 golden queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo. MRR aggregates reciprocal rank across queries; it does not by itself determine top-result accuracy, a typical rank, or the probability that any one query succeeds.
 
-> **Historical baseline (2026-04-26)**: The 0.828 Voyage-only MRR below comes from the original 102-query golden set and its recorded configuration. These are historical evaluation results, not current production guarantees. Current-stack retrieval quality is **BLOCKED ON MEASUREMENT** until that evaluation is rerun against the current code and configuration.
+> **Historical baseline (2026-04-26)**: The 0.828 Voyage-only MRR below comes from the original 102-query golden set and its recorded configuration. These are historical evaluation results, not current production guarantees. A separate public released-binary result is reported under **Public release evidence** below; the two corpora, models, and metrics are not interchangeable.
 
 **Why offer Voyage and local models?** The historical evaluations below measured higher aggregate reciprocal-rank performance for Voyage than for the local sentence-transformer baseline. Treat that as dated comparative evidence, not a current top-result probability or token-savings guarantee.
 
@@ -471,6 +471,41 @@ code-search/
 ```
 
 The evaluation harness runs each golden query, checks whether the expected file appears in the top-K results, and computes MRR per language. Results are saved as timestamped JSON for A/B comparison between configurations.
+
+## Public release evidence
+
+On the frozen balanced public LocBench n=80 endpoint, code-search v0.3.5
+reached Acc@1 0.375 (95% Wilson interval 0.277–0.485), Acc@3 0.613,
+Acc@10 0.788, and MRR@10 0.503. The Sourcegraph public endpoint reached
+0.150/0.175/0.188/0.165, respectively, with zero request failures. The paired
+Acc@1 comparison produced 22 wins, 4 losses, and 54 ties; the exact two-sided
+sign test yielded p=0.00053. This establishes narrow superiority for this
+frozen file-localization endpoint, not general platform superiority.
+
+This is a zero-LLM file-localization measurement of the released v0.3.5
+server through the code-intelligence plugin's frozen runner. The 80 cases are
+balanced across bug, feature, performance, and security categories and selected
+from a pinned LocBench n=200 set. Expected files require independent agreement
+between LocBench and immutable merged GitHub pull-request evidence at the exact
+historical revision. Twelve cases were excluded before retrieval because that
+second source did not expose every required terminal symbol.
+
+The result supports only the stated public file-localization endpoint. It is
+not evidence of general platform superiority, editor or review quality,
+organization operations, or performance against Cursor, Augment, or Greptile,
+whose revision-pinned callable interfaces were unavailable. Sourcegraph uses a
+public network endpoint with at most three identical attempts; failures remain
+misses and network latency is not directly comparable with local process
+latency.
+
+The same released search server also completed a 39,222,246-line LLVM checkout:
+search indexed 183,663 chunks in 609.3 seconds with 3.65 GB peak RSS, persisted
+4.98 GB (126.9 bytes per source line), and answered the five warm queries at
+3.77 seconds p50 / 3.84 seconds p95. This demonstrates very-large-repository
+operation on one host and also shows that resource efficiency is not yet
+class-leading. The revision-pinned checkout contained 160,123 tracked files;
+the zero-LLM result file is bound by SHA-256
+`831068ace4d0daff59d6e1409dcdf42f2627691bc4e7ea7103b696d5327cf9c8`.
 
 ## Troubleshooting
 

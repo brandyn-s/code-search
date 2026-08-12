@@ -61,7 +61,10 @@ def test_historical_mrr_is_not_misrepresented_as_current_top_rank_accuracy() -> 
         "any one query succeeds."
     ) in README
     assert "These are historical evaluation results, not current production guarantees." in README
-    assert "Current-stack retrieval quality is **BLOCKED ON MEASUREMENT**" in README
+    assert "frozen balanced public LocBench n=80 endpoint" in README
+    assert "This establishes narrow superiority for this" in README
+    assert "frozen file-localization endpoint, not general platform superiority." in README
+    assert "Current-stack retrieval quality is **BLOCKED ON MEASUREMENT**" not in README
 
     forbidden_claims = (
         "A score of 0.828 means the correct answer is almost always the #1 result.",
