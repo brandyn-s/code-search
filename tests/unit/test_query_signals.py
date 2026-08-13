@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from search.query_signals import (
+    calculate_artifact_role_boost,
     build_lexical_query,
     calculate_signal_boost,
     extract_query_signals,
 )
-from search.retrieval import rerank_raw_with_query_signals
+from search.retrieval import dedupe_candidates_by_file, rerank_raw_with_query_signals
 
 
 def test_build_lexical_query_preserves_plain_language_queries():
@@ -105,3 +106,53 @@ def test_signal_reranking_happens_before_rank_fusion():
         "exact-owner",
         "semantic-neighbor",
     ]
+
+
+def test_code_mode_prefers_implementation_over_supporting_artifacts():
+    query = "Improve OmegaConfigLoader performance when interpolations are involved"
+
+    assert calculate_artifact_role_boost(
+        query,
+        relative_path="kedro/config/omegaconf_config.py",
+        content_mode="code",
+    ) == 1.0
+    assert calculate_artifact_role_boost(
+        query,
+        relative_path="tests/config/test_omegaconf_config.py",
+        content_mode="code",
+    ) < 1.0
+    assert calculate_artifact_role_boost(
+        query,
+        relative_path="docs/configuration.md",
+        content_mode="code",
+    ) < 1.0
+
+
+def test_explicit_supporting_artifact_query_disables_source_prior():
+    assert calculate_artifact_role_boost(
+        "Find tests for OmegaConfigLoader interpolation",
+        relative_path="tests/config/test_omegaconf_config.py",
+        content_mode="code",
+    ) == 1.0
+
+
+def test_hybrid_candidates_are_diversified_by_file_before_truncation():
+    from types import SimpleNamespace
+
+    candidates = [
+        SimpleNamespace(relative_path="src/decoy.py", similarity_score=0.9),
+        SimpleNamespace(relative_path="src/decoy.py", similarity_score=0.8),
+        SimpleNamespace(relative_path="src/answer.py", similarity_score=0.7),
+    ]
+
+    diversified = dedupe_candidates_by_file(candidates)
+
+    assert [candidate.relative_path for candidate in diversified] == [
+        "src/decoy.py",
+        "src/answer.py",
+    ]
+    assert calculate_artifact_role_boost(
+        "Update the documentation for OmegaConfigLoader",
+        relative_path="docs/configuration.md",
+        content_mode="code",
+    ) == 1.0

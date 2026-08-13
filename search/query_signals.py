@@ -74,6 +74,13 @@ _KNOWN_FILE_SUFFIXES = frozenset(
         "yml",
     }
 )
+_TEST_PATH_PARTS = frozenset({"test", "tests"})
+_DOC_PATH_PARTS = frozenset({"doc", "docs", "documentation"})
+_TEST_INTENT = re.compile(r"\b(?:test|tests|testing|spec|specs)\b", re.IGNORECASE)
+_DOC_INTENT = re.compile(
+    r"\b(?:doc|docs|documentation|readme|guide|tutorial)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -187,6 +194,40 @@ def build_lexical_query(query: str) -> str:
     if not signals.explicit or not signals.lexical_terms:
         return query
     return " ".join(signals.lexical_terms)
+
+
+def calculate_artifact_role_boost(
+    query: str,
+    *,
+    relative_path: str,
+    content_mode: str,
+) -> float:
+    """Apply a bounded source-role prior for issue-style code queries.
+
+    Tests and documentation often repeat the same symbols and prose as the
+    implementation. In code mode they are supporting evidence unless the
+    query title explicitly asks for that artifact type. The title-only check
+    avoids treating an issue body's test plan or documentation links as the
+    user's retrieval target.
+    """
+
+    if content_mode != "code":
+        return 1.0
+
+    title = query.splitlines()[0] if query else ""
+    path = PurePosixPath(relative_path.replace("\\", "/").casefold())
+    parts = set(path.parts)
+    basename = path.name
+    is_test = bool(parts & _TEST_PATH_PARTS) or basename.startswith("test_") or bool(
+        re.search(r"(?:_test\.py|\.(?:test|spec)\.[^.]+)$", basename)
+    )
+    is_doc = bool(parts & _DOC_PATH_PARTS) or path.suffix in {".md", ".rst"}
+
+    if is_test and not _TEST_INTENT.search(title):
+        return 0.82
+    if is_doc and not _DOC_INTENT.search(title):
+        return 0.82
+    return 1.0
 
 
 def _contains(value: str, token: str) -> bool:

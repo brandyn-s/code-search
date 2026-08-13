@@ -283,7 +283,7 @@ This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, c
 
 ## Installation
 
-### 1. Install the verified v0.3.5 release
+### 1. Install the verified v0.3.6 release
 
 The release contains a wheel, its checksum manifest, and a signed GitHub
 artifact-attestation bundle. The commands below download and verify all three
@@ -291,12 +291,12 @@ before installing the wheel:
 
 ```bash
 REPO="redacted-org/code-search"
-TAG="v0.3.5"
-WHEEL="redacted_code_search-0.3.5-py3-none-any.whl"
-BUNDLE="redacted_code_search-0.3.5-provenance.jsonl"
+TAG="v0.3.6"
+WHEEL="redacted_code_search-0.3.6-py3-none-any.whl"
+BUNDLE="redacted_code_search-0.3.6-provenance.jsonl"
 
-mkdir code-search-v0.3.5
-cd code-search-v0.3.5
+mkdir code-search-v0.3.6
+cd code-search-v0.3.6
 gh release download "$TAG" --repo "$REPO"
 
 # Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)
@@ -498,6 +498,15 @@ public network endpoint with at most three identical attempts; failures remain
 misses and network latency is not directly comparable with local process
 latency.
 
+Release v0.3.6 adds a bounded source-role prior and file diversification for
+code-mode queries. In a separate paired replay of the same frozen 80 cases,
+the candidate improved the then-current main baseline from Acc@1 0.3625 to
+0.3875, Acc@3 0.6125 to 0.6250, Acc@10 0.7625 to 0.7750, and MRR@10 0.49147
+to 0.51608, with 13 cases improved and none regressed. This replay is not a
+replacement for the released-v0.3.5 comparison above; its exact controls and
+boundary are recorded in
+[`docs/findings/2026-08-12-public-n80-source-role-prior.md`](docs/findings/2026-08-12-public-n80-source-role-prior.md).
+
 The same released search server also completed a 39,222,246-line LLVM checkout:
 search indexed 183,663 chunks in 609.3 seconds with 3.65 GB peak RSS, persisted
 4.98 GB (126.9 bytes per source line), and answered the five warm queries at
@@ -506,6 +515,14 @@ operation on one host and also shows that resource efficiency is not yet
 class-leading. The revision-pinned checkout contained 160,123 tracked files;
 the zero-LLM result file is bound by SHA-256
 `831068ace4d0daff59d6e1409dcdf42f2627691bc4e7ea7103b696d5327cf9c8`.
+
+Release v0.3.6 also publishes mutable root compatibility mirrors with APFS
+copy-on-write clones when available. A controlled copy of the same
+282,106,413-byte index allocated 282,017,792 new bytes with an ordinary copy
+and 446,464 bytes with a clone, while retaining distinct inodes and independent
+writes. Non-macOS and unsupported filesystems keep the portable byte-copy
+behavior; existing indexes are not retroactively compacted. See
+[`docs/findings/2026-08-12-copy-on-write-publication.md`](docs/findings/2026-08-12-copy-on-write-publication.md).
 
 ## Troubleshooting
 

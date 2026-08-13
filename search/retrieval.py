@@ -10,6 +10,7 @@ from typing import Any
 
 from search.query_signals import (
     build_lexical_query,
+    calculate_artifact_role_boost,
     calculate_signal_boost,
     extract_query_signals,
 )
@@ -22,6 +23,20 @@ class HybridRetrieval:
 
     candidates: list[SearchResult]
     metadata_lookup: dict[str, dict[str, Any]]
+
+
+def dedupe_candidates_by_file(candidates: list[SearchResult]) -> list[SearchResult]:
+    """Keep the highest-ranked chunk for each file without reordering files."""
+
+    seen: set[str] = set()
+    diversified: list[SearchResult] = []
+    for candidate in candidates:
+        path = candidate.relative_path or candidate.file_path
+        if path in seen:
+            continue
+        seen.add(path)
+        diversified.append(candidate)
+    return diversified
 
 
 def rerank_raw_with_query_signals(
@@ -189,8 +204,14 @@ def retrieve_hybrid_candidates(
                 or ""
             ),
         )
+        result.similarity_score *= calculate_artifact_role_boost(
+            query,
+            relative_path=result.relative_path,
+            content_mode=config.content_mode,
+        )
 
     candidates.sort(key=lambda result: result.similarity_score, reverse=True)
+    candidates = dedupe_candidates_by_file(candidates)
     return HybridRetrieval(
         candidates=candidates,
         metadata_lookup=metadata_lookup,

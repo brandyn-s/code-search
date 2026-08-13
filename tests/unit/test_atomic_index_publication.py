@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import pickle
@@ -60,6 +61,59 @@ def _close(manager: CodeIndexManager) -> None:
     if manager._fts_conn is not None:
         manager._fts_conn.close()
         manager._fts_conn = None
+
+
+def test_copy_for_publication_prefers_clonefile_and_preserves_independence(
+    tmp_path,
+):
+    if sys.platform != "darwin":
+        pytest.skip("clonefile is a macOS filesystem primitive")
+
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "destination.bin"
+    source.write_bytes(b"immutable-generation")
+
+    assert CodeIndexManager._copy_for_publication(source, destination)
+    assert destination.read_bytes() == source.read_bytes()
+    assert destination.stat().st_ino != source.stat().st_ino
+
+    destination.write_bytes(b"mutable-root-mirror")
+    assert source.read_bytes() == b"immutable-generation"
+
+
+def test_copy_for_publication_falls_back_when_clonefile_is_unsupported(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "destination.bin"
+    source.write_bytes(b"portable-copy")
+
+    monkeypatch.setattr(
+        ctypes,
+        "CDLL",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no libc")),
+    )
+    assert not CodeIndexManager._copy_for_publication(source, destination)
+    assert destination.read_bytes() == b"portable-copy"
+
+
+def test_published_root_mirrors_are_copy_on_write_clones(tmp_path):
+    if sys.platform != "darwin":
+        pytest.skip("clonefile is a macOS filesystem primitive")
+
+    manager = CodeIndexManager(str(tmp_path))
+    manager.add_embeddings([_embedding("clone-backed")])
+    manager.save_index()
+    manifest = read_current(tmp_path)
+
+    for artifact_name, entry in manifest["artifacts"].items():
+        generation = tmp_path / entry["path"]
+        root = tmp_path / artifact_name
+        assert root.read_bytes() == generation.read_bytes()
+        assert root.stat().st_ino != generation.stat().st_ino
+
+    _close(manager)
 
 
 def test_failed_faiss_writes_preserve_committed_generation(

@@ -1,15 +1,17 @@
 """Vector index management with FAISS and metadata storage."""
 
-import fnmatch
+import ctypes
 import errno
-import hashlib
-import os
-import json
-import pickle
-import logging
+import fnmatch
 import functools
+import hashlib
+import json
+import logging
+import os
+import pickle
 import secrets
 import shutil
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -640,6 +642,53 @@ class CodeIndexManager:
             os.close(descriptor)
 
     @staticmethod
+    def _copy_for_publication(source: Path, destination: Path) -> bool:
+        """Copy an artifact, preferring a safe copy-on-write clone.
+
+        clonefile creates a distinct inode whose unchanged blocks share
+        physical storage with the immutable generation. SQLite and FAISS may
+        then mutate the root mirror without modifying the recovery snapshot.
+        Unsupported filesystems and non-macOS hosts retain the existing
+        byte-copy behavior. Returns whether clonefile was used.
+        """
+        cloned = False
+        if sys.platform == "darwin":
+            try:
+                libc = ctypes.CDLL(None, use_errno=True)
+                clonefile = libc.clonefile
+            except (AttributeError, OSError):
+                clonefile = None
+            if clonefile is not None:
+                clonefile.argtypes = [
+                    ctypes.c_char_p,
+                    ctypes.c_char_p,
+                    ctypes.c_int,
+                ]
+                clonefile.restype = ctypes.c_int
+                result = clonefile(
+                    os.fsencode(source),
+                    os.fsencode(destination),
+                    0,
+                )
+                if result == 0:
+                    cloned = True
+                else:
+                    error_number = ctypes.get_errno()
+                    if error_number not in {
+                        errno.ENOTSUP,
+                        errno.EXDEV,
+                        errno.EINVAL,
+                    }:
+                        raise OSError(
+                            error_number,
+                            os.strerror(error_number),
+                            destination,
+                        )
+        if not cloned:
+            shutil.copy2(source, destination)
+        return cloned
+
+    @staticmethod
     def _sqlite_integrity_check(path: Path) -> None:
         """Raise if a staged SQLite snapshot cannot be opened cleanly."""
         import sqlite3
@@ -769,7 +818,7 @@ class CodeIndexManager:
                 temporary = destination.with_name(
                     f".{destination.name}.publish-{token}"
                 )
-                shutil.copy2(source, temporary)
+                self._copy_for_publication(source, temporary)
                 self._fsync_file(temporary)
                 prepared.append((temporary, destination))
 
@@ -988,7 +1037,7 @@ class CodeIndexManager:
                     filename = artifact_name.replace("/", "_")
                 used_names.add(filename)
                 destination = candidate_dir / filename
-                shutil.copy2(source, destination)
+                self._copy_for_publication(source, destination)
                 self._fsync_file(destination)
                 entry["path"] = str(
                     (generation_dir / filename).relative_to(self.storage_dir)
