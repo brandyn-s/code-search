@@ -92,12 +92,16 @@ def test_merge_workflow_builds_once_and_gates_every_required_lane() -> None:
         "build-wheel",
         "unit-tests",
         "frozen-retrieval",
-        "wheel-smoke",
+        "wheel-smoke-linux",
+        "wheel-smoke-platform",
         "merge-gate",
     }
 
     assert workflow["permissions"] == {"contents": "read"}
     assert required_jobs <= jobs.keys()
+    assert jobs["build-wheel"]["outputs"]["platform_smoke_required"] == (
+        "${{ steps.platform-scope.outputs.required }}"
+    )
 
     build_source = "\n".join(
         step.get("run", "") for step in jobs["build-wheel"]["steps"]
@@ -112,23 +116,34 @@ def test_merge_workflow_builds_once_and_gates_every_required_lane() -> None:
     assert "py3-none-any.whl" in build_source
     assert "pip wheel" not in non_build_source
 
-    wheel_smoke = jobs["wheel-smoke"]
-    assert wheel_smoke["needs"] == "build-wheel"
-    assert set(wheel_smoke["strategy"]["matrix"]["os"]) == {
-        "ubuntu-24.04",
-        "macos-14",
-        "windows-2022",
-    }
-    assert set(wheel_smoke["strategy"]["matrix"]["python-version"]) == {
+    wheel_smoke_linux = jobs["wheel-smoke-linux"]
+    assert wheel_smoke_linux["needs"] == "build-wheel"
+    assert wheel_smoke_linux["strategy"]["matrix"]["os"] == ["ubuntu-24.04"]
+    assert set(wheel_smoke_linux["strategy"]["matrix"]["python-version"]) == {
         "3.12",
         "3.13",
     }
-    wheel_smoke_source = "\n".join(
-        step.get("run", "") for step in wheel_smoke["steps"]
-    )
-    assert "tests/acceptance/wheel_contract.py" in wheel_smoke_source
-    assert "--wheel" in wheel_smoke_source
-    assert "--install-dependencies" in wheel_smoke_source
+
+    wheel_smoke_platform = jobs["wheel-smoke-platform"]
+    assert wheel_smoke_platform["needs"] == "build-wheel"
+    assert "needs.build-wheel.outputs.platform_smoke_required" in wheel_smoke_platform["if"]
+    assert set(wheel_smoke_platform["strategy"]["matrix"]["os"]) == {
+        "macos-14",
+        "windows-2022",
+    }
+    assert set(wheel_smoke_platform["strategy"]["matrix"]["python-version"]) == {
+        "3.12",
+        "3.13",
+    }
+
+    for smoke_job in (wheel_smoke_linux, wheel_smoke_platform):
+        smoke_source = "\n".join(
+            step.get("run", "") for step in smoke_job["steps"]
+        )
+        assert "tests/acceptance/wheel_contract.py" in smoke_source
+        assert "--wheel" in smoke_source
+        assert "--install-dependencies" in smoke_source
+        assert all("cache" not in step.get("with", {}) for step in smoke_job["steps"])
 
     frozen_source = "\n".join(
         step.get("run", "") for step in jobs["frozen-retrieval"]["steps"]

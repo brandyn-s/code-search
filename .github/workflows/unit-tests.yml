@@ -2,14 +2,24 @@ name: Merge CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  # A newer commit supersedes an older PR run. Merge-group and main runs are
+  # retained because they are the validation that can actually land or has
+  # already landed code.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-wheel:
+    outputs:
+      platform_smoke_required: ${{ steps.platform-scope.outputs.required }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -20,7 +30,34 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Determine cross-platform smoke scope
+        id: platform-scope
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          required=false
+          if ! changed_files="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"; then
+            echo "::warning::Could not resolve the PR diff; retaining the full platform smoke matrix"
+            required=true
+          else
+            while IFS= read -r changed_file; do
+              case "$changed_file" in
+                *.py|*.json|*.yml|*.yaml|*.toml|*.cfg|*.ini|*.lock|\
+                requirements*.txt|Dockerfile*)
+                  required=true
+                  break
+                  ;;
+              esac
+            done <<< "$changed_files"
+          fi
+          echo "required=$required" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -149,12 +186,12 @@ jobs:
           tests/integration/test_frozen_retrieval_contract.py
           -q
 
-  wheel-smoke:
+  wheel-smoke-linux:
     needs: build-wheel
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2022]
+        os: [ubuntu-24.04]
         python-version: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
@@ -171,8 +208,54 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
+
+      - name: Download the single test artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: code-search-wheel
+          path: dist
+
+      - name: Install acceptance-runner dependencies
+        run: python -m pip install pytest PyYAML
+
+      - name: Exercise the built wheel outside the source tree
+        shell: bash
+        run: |
+          WHEEL="$(python -c 'from pathlib import Path; wheels=list(Path("dist").glob("*.whl")); assert len(wheels) == 1, wheels; print(wheels[0])')"
+          python tests/acceptance/wheel_contract.py \
+            --wheel "$WHEEL" \
+            --install-dependencies
+
+  # Cross-platform wheel behavior is load-bearing, but running four hosted
+  # platform legs on documentation-only PRs multiplies cost before merge.
+  # Keep the full matrix on merge-group/main and packaging/runtime PRs; those
+  # lanes are skipped only when the scope check proves no package behavior can
+  # have changed.
+  wheel-smoke-platform:
+    needs: build-wheel
+    if: >-
+      github.event_name != 'pull_request' ||
+      needs.build-wheel.outputs.platform_smoke_required == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+        python-version: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Download the single test artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -198,7 +281,8 @@ jobs:
       - build-wheel
       - unit-tests
       - frozen-retrieval
-      - wheel-smoke
+      - wheel-smoke-linux
+      - wheel-smoke-platform
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -212,16 +296,22 @@ jobs:
           BUILD_WHEEL_RESULT: ${{ needs.build-wheel.result }}
           UNIT_TESTS_RESULT: ${{ needs.unit-tests.result }}
           FROZEN_RETRIEVAL_RESULT: ${{ needs.frozen-retrieval.result }}
-          WHEEL_SMOKE_RESULT: ${{ needs.wheel-smoke.result }}
+          WHEEL_SMOKE_LINUX_RESULT: ${{ needs.wheel-smoke-linux.result }}
+          WHEEL_SMOKE_PLATFORM_RESULT: ${{ needs.wheel-smoke-platform.result }}
         run: |
           for result in \
             "$BUILD_WHEEL_RESULT" \
             "$UNIT_TESTS_RESULT" \
             "$FROZEN_RETRIEVAL_RESULT" \
-            "$WHEEL_SMOKE_RESULT"
+            "$WHEEL_SMOKE_LINUX_RESULT"
           do
             if [ "$result" != "success" ]; then
               echo "Required merge lane did not succeed: $result" >&2
               exit 1
             fi
           done
+          if [ "$WHEEL_SMOKE_PLATFORM_RESULT" != "success" ] && \
+             [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "Required cross-platform smoke lane did not succeed: $WHEEL_SMOKE_PLATFORM_RESULT" >&2
+            exit 1
+          fi
