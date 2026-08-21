@@ -1,4 +1,16 @@
-anthropic>=0.40.0
+# anthropic 1.0.0 (2026-08-20) is a declared BREAKING release (see its
+# MIGRATION.md). The bound is deliberate: do not cross a breaking major on an
+# unbounded spec, where a fresh `pip install` silently adopts it.
+#
+# Measured 2026-08-21 with `pip install --dry-run --ignore-installed`:
+#   unbounded  -> anthropic==1.0.0, httpx2==2.12.0, httpx==0.28.1
+# NOTE httpx2 is a SEPARATE distribution, not an httpx major upgrade -- httpx
+# stays at 0.28.1, so this repo's 11 direct httpx.Client() call sites are
+# unaffected. The exposure is the anthropic SDK surface itself, which we use
+# narrowly (anthropic.Anthropic / anthropic.AsyncAnthropic), so the migration is
+# expected to be small. Lift this bound after reading MIGRATION.md and running
+# tests/unit against 1.x.
+anthropic>=0.40.0,<1.0.0
 click>=8.2.1
 faiss-cpu>=1.12.0
 httpx>=0.27.0
