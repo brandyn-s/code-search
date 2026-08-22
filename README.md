@@ -133,7 +133,7 @@ schema so a downstream host can join evidence without relying on prose.
 
 ## Quick Start
 
-### Install the Verified Release
+### Install the verified v0.3.6 release
 
 The release contains a Python wheel, SHA-256 manifest, and GitHub artifact
 attestation bundle:
@@ -160,14 +160,25 @@ gh attestation verify "$WHEEL" \
   --source-ref "refs/heads/main" \
   --source-digest "$RELEASE_SHA"
 gh release verify "$TAG" --repo "$REPO"
+gh release verify-asset "$TAG" "$WHEEL" --repo "$REPO"
+gh release verify-asset "$TAG" SHA256SUMS --repo "$REPO"
+gh release verify-asset "$TAG" "$BUNDLE" --repo "$REPO"
 
 python3 -m venv .venv
 .venv/bin/python -m pip install "$WHEEL"
 ```
 
 Python 3.12 or newer and an authenticated GitHub CLI are required. For a
-development checkout, run `./scripts/install.sh`; it installs that checkout
-into its own `.venv` and does not update another clone.
+development checkout:
+
+```bash
+git clone https://github.com/redacted-org/code-search.git
+cd code-search
+./scripts/install.sh
+```
+
+`./scripts/install.sh` installs that checkout into its own `.venv` and does
+not update another clone.
 
 ### Configure an MCP Client
 
