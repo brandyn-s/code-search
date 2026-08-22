@@ -116,7 +116,15 @@ def _assert_wheel_contents(wheel: Path) -> None:
     assert "search/index_identity.py" in names
     assert "search/profiles/corsair-v1.json" in names
     assert "search/profiles/generic-v1.json" in names
-    assert "Requires-Dist: anthropic>=" in metadata
+    # Wheel METADATA normalizes specifier order (anthropic<1.0.0,>=0.40.0),
+    # so match the line and assert both bounds instead of a literal prefix.
+    anthropic_requirement = next(
+        line
+        for line in metadata.splitlines()
+        if line.startswith("Requires-Dist: anthropic")
+    )
+    assert ">=" in anthropic_requirement
+    assert "<1.0.0" in anthropic_requirement
     assert "Requires-Dist: PyYAML>=6.0" in metadata
     assert "sys.path.insert" not in server_source
     assert "sys.path.insert" not in implementation_source
