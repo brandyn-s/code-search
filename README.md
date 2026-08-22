@@ -1,293 +1,142 @@
 # code-search
 
-Semantic code search MCP server for Claude Code. Ask natural language questions about your codebase and get ranked, relevant results instead of string matches.
+Hybrid semantic and lexical code retrieval for MCP clients, with persistent
+per-project indexes, explicit freshness, and backend-issued source evidence.
 
-## Why This Exists
+`code-search` is the discovery half of redacted's verifiable code-intelligence
+stack. It answers “where is the code that does X?” Code relationships and
+impact questions belong to
+[code-graph](https://github.com/redacted-org/code-graph).
 
-Standard code search (grep, ripgrep, Glob) finds text patterns. Ask "where is the firewall configuration?" and you get every file containing the word "firewall" — hundreds of results across comments, variable names, tests, and documentation. The actual firewall config function is buried at position #47.
+> **Current state (reviewed 2026-08-13):** implementation baseline
+> `cbdb9bd` is exactly the published [`v0.3.6`](https://github.com/redacted-org/code-search/releases/tag/v0.3.6)
+> tag. This statement describes source and release identity; it does not assert
+> which version any MCP client currently has installed.
 
-Semantic search understands *meaning*. The same query returns the actual firewall config function at position #1 because the embedding model understands that `networking.firewall.allowedTCPPorts` is semantically related to "firewall configuration" even though the words don't match exactly.
+Read the [architecture and operating model](docs/ARCHITECTURE.md) for component
+boundaries, failure behavior, and storage contracts. The combined
+[`code-search` + `code-graph` HTML guide](https://github.com/redacted-org/code-graph/blob/main/docs/index.html)
+is a self-contained page that can be downloaded and opened locally.
 
-This matters for AI coding assistants. Every irrelevant result consumes context window tokens. A grep for "authentication" in a large monorepo returns thousands of lines. Semantic search returns the 10 most relevant functions, saving ~80K tokens per query. Over a multi-tool session, that's the difference between hitting compaction at 60% context and finishing the task with room to spare.
+## What It Provides
+
+- Natural-language and exact-signal retrieval over source code and Markdown.
+- Hybrid FAISS vector search plus SQLite FTS5 BM25, fused with weighted
+  reciprocal-rank fusion (RRF).
+- Structure-aware chunking for 17 language modes across 21 registered file
+  extensions, with bounded adjacent-chunk merging.
+- Provider-aware project indexes, Merkle-based incremental updates, background
+  indexing progress, and source/index identity checks.
+- Immutable generation publication with manifest verification and last-good
+  fallback.
+- Optional cloud embeddings/reranking or local embeddings.
+- Backend-issued, generation-bound evidence IDs for exact source lines.
+- Project-balanced discovery across as many as 25 isolated indexes without
+  treating scores from different indexes as comparable.
+
+## Choose the Right Operation
+
+| Need | Use |
+|---|---|
+| Exact literal, regex, or known symbol | `rg` or `search_code(search_mode="keyword")` |
+| Conceptual discovery | `search_code` in `auto` or `hybrid` mode |
+| Evidence for a claim | `search_code_evidence`; select an emitted `evidence_ref.id` |
+| Similar implementations | `find_similar_code` |
+| File-level issue localization | `code_localize` |
+| Discovery across local projects | `search_all_projects`, then a project-bound follow-up |
+| Callers, callees, inheritance, impact, or graph paths | `code-graph` |
+| Vulnerability-grade variable taint | CodeQL; neither search nor graph reachability substitutes for it |
 
 ## How It Works
 
-The search pipeline has three stages: **chunk**, **embed**, and **search**.
-
 ```mermaid
 flowchart LR
-    subgraph Chunk["1. Chunk"]
-        A[Source Files] --> B[Tree-Sitter AST]
-        B --> C[Semantic Boundaries]
-        C --> D[Merge Small Chunks]
-    end
-    subgraph Embed["2. Embed"]
-        D --> E[Contextual Headers]
-        E --> F[Voyage AI voyage-4-large]
-        F --> G[FAISS int8 Index]
-    end
-    subgraph Search["3. Search"]
-        H[Query] --> I[Vector Search]
-        H --> J[BM25 Keyword]
-        I --> K[RRF Fusion]
-        J --> K
-        K --> L[Type Boost]
-        L --> M[Ranked Results]
-    end
+    A[Source checkout] --> B[Language-aware chunks]
+    B --> C[Contextual headers]
+    C --> D[Embedding provider]
+    D --> E[FAISS vectors]
+    B --> F[SQLite FTS5]
+    E --> G[Vector candidates]
+    F --> H[BM25 candidates]
+    G --> I[RRF + deterministic boosts]
+    H --> I
+    I --> J[Optional PPR]
+    J --> K[Optional Sonnet rerank]
+    K --> L[Ranked retrieval context]
+    L --> M[Atomic evidence candidates]
 ```
 
-
-### 1. Chunking (Tree-Sitter AST)
-
-Source files are parsed into Abstract Syntax Trees using tree-sitter, then split at semantic boundaries — function definitions, class declarations, module sections. This means a search result is always a complete logical unit (a full function, a full class), never a random 500-character window that starts mid-expression.
-
-**18 languages supported**: Python, JavaScript, TypeScript, JSX, TSX, Go, Rust, Java, C, C++, C#, Svelte, plus regex-based chunking for Markdown, TOML, YAML, HCL, Nix, and configuration files.
-
-**Chunk merging** (inspired by the cAST paper, CMU 2025): After AST splitting, a post-processing pass greedily merges adjacent small chunks up to a 2,500 non-whitespace character budget. This captures gap code — imports, constants, and comments that fall between semantic units — and prevents sub-100-token chunks that degrade embedding quality by 6-16% (Ekimetrics 2026 benchmark). The merge uses non-whitespace character count rather than line count because a 50-line file of blank lines and a 50-line file of dense code are not equivalent.
-
-**Contextual headers**: Before embedding, each chunk gets a header prepended: `# From <filepath> - <type> <name>`. This gives the embedding model critical context about what the chunk *is* (a function named `authenticate` in `auth/handlers.py`), improving retrieval accuracy by connecting the code content to its structural role. Adds +9.6% MRR on Nix files when combined with enriched sibling context.
-
-### 2. Embedding (Voyage AI)
-
-Each chunk is converted to a high-dimensional vector using [Voyage AI](https://voyageai.com)'s `voyage-4-large` model, the current cloud default. The vectors are stored in a FAISS index with int8 quantization (4x smaller than float32, negligible quality loss on normalized vectors).
-
-Four embedding providers are available:
-
-| Provider | Model | Quality (MRR) | Data leaves machine? | Cost | Setup |
-|----------|-------|:---:|:---:|:---:|---|
-| **`voyage`** (default) | voyage-4-large | **0.828** | Yes (API call) | ~$0.06/1M tokens | Set `VOYAGE_API_KEY` |
-| `voyage-code-3` | voyage-code-3 | 0.623–0.748¹ | Yes (API call) | ~$0.06/1M tokens | Set `VOYAGE_API_KEY`; use `EMBEDDING_PROVIDER=voyage-code-3` |
-| `jina` | jina-code-0.5b | 0.638-0.742 | **No** (runs locally) | **Free** | Nothing — downloads model on first run |
-| `local` | all-MiniLM-L6-v2 | ~0.35-0.45 | No | Free | Nothing |
-
-¹ `voyage-code-3` aggregate A/B vs voyage-4-large: CI includes zero (PSM-full, n=102 golden + 183 harvested, rerank=off, 2026-05-15). Per-subproject: wins on TypeScript/mithrandir (+0.119 MRR, CI excludes zero), regresses on Nix (-0.091 MRR, CI excludes zero). Use for TypeScript-heavy corpora. See `docs/findings/2026-05-15-voyage-code-3-ab-finding.md`.
-
-MRR (Mean Reciprocal Rank) was measured on 102 golden queries across 4 language sub-projects from a production Rust/Nix/TypeScript monorepo. MRR aggregates reciprocal rank across queries; it does not by itself determine top-result accuracy, a typical rank, or the probability that any one query succeeds.
-
-> **Historical baseline (2026-04-26)**: The 0.828 Voyage-only MRR below comes from the original 102-query golden set and its recorded configuration. These are historical evaluation results, not current production guarantees. A separate public released-binary result is reported under **Public release evidence** below; the two corpora, models, and metrics are not interchangeable.
-
-**Why offer Voyage and local models?** The historical evaluations below measured higher aggregate reciprocal-rank performance for Voyage than for the local sentence-transformer baseline. Treat that as dated comparative evidence, not a current top-result probability or token-savings guarantee.
-
-**Reranking.** The current default is **Sonnet 4.6 pointwise reranking** with the R9 Nix-aware clause (`RERANKER=sonnet`, validated +0.087 MRR / +0.137 HR@1 on n=183 multi-target real_session, see `CLAUDE.md`). Reranks top-15 hybrid candidates via Anthropic API with always-on graceful fallback to hybrid order. PR #199 briefly flipped the default to listwise on 2026-05-23 citing Phase C v2 bootstrap CI, but the rule-9 re-eval on current main (post-R9 pointwise) showed listwise harvested MRR delta −0.0456 CI [−0.0891, −0.0024] excludes zero unfavorable — the default was reverted the same day. Listwise (`RERANKER=listwise`) remains selectable for callers wanting the single-call latency profile. See `docs/findings/2026-05-23-listwise-default-eval-finding.md` for the eval narrative. The earlier "cross-encoder rerank (rerank-2.5) degrades quality by -30% MRR" finding still holds and is preserved as the off-by-default `RERANKER=cross-encoder` legacy path; `RERANKER=off` skips reranking entirely.
-
-### 3. Search (Hybrid BM25 + Vector with RRF Fusion)
-
-Queries run through two parallel search paths:
-
-1. **Vector search**: The query is embedded via Voyage, then FAISS finds the most similar chunk vectors by cosine similarity. This handles semantic matches — "authentication logic" finds `validate_jwt_token()`.
-
-2. **BM25 keyword search**: SQLite FTS5 full-text search finds exact keyword matches. This handles cases where you know the exact name — `validate_jwt_token` — and want direct string matching.
-
-3. **Reciprocal Rank Fusion (RRF)**: Both result lists are fused using content-specific weights: code 65/35, docs 70/30, all 50/50 (vector/BM25). For issue-style queries containing explicit code identifiers, qualified members, acronyms, or source paths, the searcher first extracts those signals, widens retrieval to at most 200 candidates, and uses a bounded 35/65 vector/BM25 blend. Exact signal matches are promoted before rank-only fusion discards score magnitude. Plain-language queries retain the established weights and candidate depth.
-
-4. **Chunk type boosting**: After fusion, results are boosted by type — functions and methods get 1.3x in code mode, sections and documents get 1.3x in docs mode. This ensures that searching for "authentication" surfaces the `authenticate()` function over the `# Authentication` markdown section when searching code.
-
-5. **Query expansion**: Domain-specific synonym maps expand query terms before BM25 search. "auth" expands to include "authentication", "oauth", "jwt", "token", "credential", "login". This bridges the vocabulary gap between how developers *ask* about code and how code *names* things.
-
-### Verifiable evidence
-
-`search_code_evidence` uses the same retrieval pipeline, but keeps retrieval
-context separate from claim evidence. A result's broad chunk range is labeled
-`retrieval_context`; it is never issued as selectable evidence. Instead, the
-backend returns `evidence_candidates` for exact nonblank source lines from the
-same generation-bound indexed chunk. Each candidate carries an immutable
-`evidence_ref.id`, source coordinate, and preview. Consumers select those IDs
-rather than constructing or widening source ranges themselves. If the indexed
-content cannot be bound to the result and stable index identity, evidence
-emission fails closed while ordinary retrieval remains available.
-
-### Incremental Indexing (Merkle Trees)
-
-After initial indexing, only changed files are re-embedded. A Merkle DAG (directed acyclic graph) tracks content hashes for every file and directory. On re-index, the tree is diffed against the stored snapshot — only files whose hashes changed get re-chunked and re-embedded. For a 3,000-chunk repo where 5 files changed, this means re-embedding ~20 chunks instead of 3,000, completing in seconds instead of minutes.
-
-## Historical Benchmarks
-
-These recorded results used golden test sets — hand-verified query-to-expected-file mappings across 4 language sub-projects from a production monorepo. They describe their dated evaluation configurations, not the current production stack:
-
-| Provider | Model | Nix (n=44) | Rust svc (n=20) | Rust lib (n=18) | TypeScript (n=20) | Weighted Avg |
-|----------|-------|:---:|:---:|:---:|:---:|:---:|
-| **`voyage`** (default) | **voyage-4-large** | **0.826** | **0.917** | 0.861 | 0.683 | **0.828** |
-| `voyage-code-3` | voyage-code-3 | 0.517 (↓) | — | — | **0.596** (↑) | 0.623¹ |
-| `voyage-context` | voyage-context-3 | 0.792 | 0.783 | **0.861** | 0.662 | 0.775 |
-| `voyage` | voyage-4 | 0.803 | 0.892 | 0.861 | 0.650 | 0.806 |
-| **`jina`** (local) | jina-code-0.5b | 0.638 | 0.742 | ~0.86 | 0.660 | ~0.72 |
-| `local` | all-MiniLM-L6-v2 | ~0.35 | ~0.45 | ~0.50 | ~0.40 | ~0.42 |
-
-¹ voyage-code-3 evaluated on PSM-full (4 subprojects, n=102 golden, rerank=off, 2026-05-15). Aggregate CI includes zero; Nix regression CI excludes zero (-0.091); TypeScript improvement CI excludes zero (+0.119). Aggregate column shows golden MRR. Rust rows omitted (not measured in this A/B). See `docs/findings/2026-05-15-voyage-code-3-ab-finding.md`.
-
-### What the numbers mean
-
-- **0.828 MRR**: On that evaluation set, the arithmetic mean of reciprocal relevant-result ranks was 0.828.
-- **0.42 MRR**: On its evaluation set, the arithmetic mean of reciprocal relevant-result ranks was 0.42. Compare MRR values only when the query set, relevance labels, and retrieval configuration are compatible.
-- **The Nix gap**: Nix has unusual syntax (`mkOption`, `mkEnableOption`, `imports = [...]`) that generic models struggle with. Contextual headers and domain synonym expansion were specifically added to close this gap — Nix MRR improved from 0.72 to 0.826 with these features.
-
-### Indexing performance
-
-| Provider | Time (3,000 chunks) | Notes |
-|----------|------|-------|
-| `voyage` (voyage-4-large) | ~5-10 min | API rate-limited, batched |
-| `jina` (local CPU) | ~50 min | First run downloads ~1GB model. GPU: ~5 min |
-| `local` | ~2-5 min | Small model, fast but low quality |
-
-## What It's Good For
-
-- **Codebase exploration**: "Where is the authentication middleware?" returns ranked results by relevance, not alphabetical file listing
-- **Cross-language search**: Same query works across Python, Rust, TypeScript, Nix — the embedding model understands all of them
-- **API documentation search**: Index API docs as markdown and search them semantically (see below)
-- **Large monorepos**: Handles 3,000+ chunk repos with incremental re-indexing. FAISS int8 quantization keeps indexes small.
-- **Multi-project workflows**: Switch instantly, or use bounded project-balanced discovery across up to 25 isolated indexes without changing the active project.
-
-## What It's Not Good For
-
-- **Exact string matching**: If you know the exact function name `validate_jwt_token_v2`, use grep. Semantic search adds latency for literal lookups (though BM25 hybrid mode handles this reasonably well).
-- **Structural queries**: "What functions call `authenticate()`?" is a graph question, not a search question. Use [code-graph](https://github.com/redacted-org/code-graph) for call chain analysis, dead code detection, and dependency tracing.
-- **Real-time editing feedback**: The index updates on re-index, not on every keystroke. For IDE-style "as you type" search, use your editor's built-in search.
-- **Organization-wide federation**: Cross-project discovery queries isolated local indexes. Scores are not comparable across projects, and there is no organization ACL model or continuously managed indexing fleet.
-- **Binary files, images, PDFs**: Only text-based source files are indexed.
-
-## The API Documentation Pipeline
-
-A key lesson learned: pointing an AI assistant at raw API documentation is hit or miss. Usable OpenAPI specs are rarer than expected — most are incomplete, outdated, or missing critical details like auth flows, error shapes, and permission scopes.
-
-The solution: **crawl API docs with [Firecrawl](https://firecrawl.dev), convert to structured markdown, and index with code-search**. This creates a searchable, semantic API reference that the AI assistant can query during development — resulting in significantly better MCP server implementations.
-
-Currently indexed APIs:
-
-| API | Files | Key content |
-|-----|------:|-------------|
-| Microsoft Graph (GCC High) | 21 | 602+ endpoints across identity, devices, audit, compliance |
-| Slack | 176 | Web API, Events, Audit Logs, SCIM, Discovery, Legal Holds, Admin, GovSlack |
-| X.AI | 85 | Inference, Tools, Files, Collections, Management, REST Reference |
-| Claude Agent SDK | 31 | Agent loop, hooks, MCP, subagents, plugins, permissions |
-| FastMCP | 60 | Server, client, auth, deployment, transforms, apps |
-
-All API docs are indexed under a single `api-docs` project, so a single search query can surface results across all indexed APIs. File paths include the API name (e.g., `microsoft-graph/audit-sign-in-logs.md`) so results are attributable.
-
-## Examples
-
-### Semantic search vs grep
-
-**grep** for "authentication" in the mcp-servers repo:
-```
-$ rg "authentication" --count
-shared/mcp_http.py:3
-msgraph/msgraph_mcp.py:8
-crowdstrike/crowdstrike_mcp.py:2
-tenable/tenable_mcp.py:1
-lever/lever_mcp.py:1
-docs/plans/auth-redesign.md:12
-...47 files, 200+ matches across comments, strings, variable names, docs
-```
-
-**code-search** for "authentication middleware token validation":
-```json
-{
-  "query": "authentication middleware token validation",
-  "results": [
-    {
-      "file": "shared/mcp_http.py",
-      "name": "_build_oauth",
-      "type": "function",
-      "lines": "45-72",
-      "score": 0.91,
-      "snippet": "async def _build_oauth(app, token_url, client_id, ...):\n    \"\"\"Build OAuth middleware for token validation...\""
-    },
-    {
-      "file": "msgraph/msgraph_mcp.py",
-      "name": "_auth_headers",
-      "type": "function",
-      "lines": "23-31",
-      "score": 0.87,
-      "snippet": "def _auth_headers():\n    \"\"\"Get auth headers from OBO token exchange...\""
-    }
-  ]
-}
-```
-
-The grep returns 200+ matches across 47 files — comments, string literals, documentation, and actual code all mixed together. code-search returns the 2 functions that actually implement authentication, ranked by relevance.
-
-### API documentation search
-
-After indexing Microsoft Graph docs with `/api-ingest`:
-```
-Query: "conditional access policy permissions required scopes"
-Project: api-docs/microsoft-graph
-
-Result #1: conditional-access-identity.md (score: 0.89)
-  "Required permissions: Policy.Read.All, Policy.ReadWrite.ConditionalAccess"
-
-Result #2: constraints.md (score: 0.84)
-  "Conditional Access: requires Policy.ReadWrite.ConditionalAccess for mutations"
-```
-
-This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, converted them to markdown, and code-search indexed them. Now Claude can look up the exact permissions needed before writing integration code, instead of guessing from training data.
-
-## Examples
-
-### Semantic search vs grep
-
-**grep** for "authentication" in the mcp-servers repo:
-```
-$ rg "authentication" --count
-shared/mcp_http.py:3
-msgraph/msgraph_mcp.py:8
-crowdstrike/crowdstrike_mcp.py:2
-tenable/tenable_mcp.py:1
-lever/lever_mcp.py:1
-docs/plans/auth-redesign.md:12
-...47 files, 200+ matches across comments, strings, variable names, docs
-```
-
-**code-search** for "authentication middleware token validation":
-```json
-{
-  "query": "authentication middleware token validation",
-  "results": [
-    {
-      "file": "shared/mcp_http.py",
-      "name": "_build_oauth",
-      "type": "function",
-      "lines": "45-72",
-      "score": 0.91,
-      "snippet": "async def _build_oauth(app, token_url, client_id, ...):\n    \"\"\"Build OAuth middleware for token validation...\""
-    },
-    {
-      "file": "msgraph/msgraph_mcp.py",
-      "name": "_auth_headers",
-      "type": "function",
-      "lines": "23-31",
-      "score": 0.87,
-      "snippet": "def _auth_headers():\n    \"\"\"Get auth headers from OBO token exchange...\""
-    }
-  ]
-}
-```
-
-The grep returns 200+ matches across 47 files — comments, string literals, documentation, and actual code all mixed together. code-search returns the 2 functions that actually implement authentication, ranked by relevance.
-
-### API documentation search
-
-After indexing Microsoft Graph docs with `/api-ingest`:
-```
-Query: "conditional access policy permissions required scopes"
-Project: api-docs/microsoft-graph
-
-Result #1: conditional-access-identity.md (score: 0.89)
-  "Required permissions: Policy.Read.All, Policy.ReadWrite.ConditionalAccess"
-
-Result #2: constraints.md (score: 0.84)
-  "Conditional Access: requires Policy.ReadWrite.ConditionalAccess for mutations"
-```
-
-This is the pipeline in action — Firecrawl crawled the Microsoft Graph docs, converted them to markdown, and code-search indexed them. Now Claude can look up the exact permissions needed before writing integration code, instead of guessing from training data.
-
-## Installation
-
-### 1. Install the verified v0.3.6 release
-
-The release contains a wheel, its checksum manifest, and a signed GitHub
-artifact-attestation bundle. The commands below download and verify all three
-before installing the wheel:
+### Indexing and Publication
+
+1. `index_directory` captures the source identity and starts a background job.
+2. Language-specific chunkers split files at semantic boundaries where
+   supported; a merge pass combines small adjacent units within the configured
+   **400-2500 NWS budget**: a 2,500 non-whitespace character budget. This
+   preserves short gap code without turning a retrieval unit into a file-sized
+   citation.
+3. The configured embedder produces vectors. FAISS stores vector search state;
+   SQLite stores FTS5 and chunk metadata.
+4. A Merkle DAG classifies additions, changes, and deletions for incremental
+   runs. Excess stale-vector churn escalates to compaction.
+5. Candidate artifacts are validated and published as an immutable generation.
+   `manifest/current.json` names the active generation; a verified prior
+   generation provides fail-closed recovery.
+6. The ending checkout identity must match the starting identity. A source
+   change during indexing prevents the generation from becoming ready.
+
+Project storage is rooted at `CODE_SEARCH_STORAGE` (default
+`~/.claude_code_search`). Provider-specific indexes for the same checkout can
+coexist; the project configuration and verified manifest bind the provider,
+model, and vector dimension used by that generation.
+
+### Retrieval
+
+`search_code` supports `auto`, `hybrid`, `keyword`, and `semantic` modes. The
+default hybrid path runs vector and BM25 retrieval, applies query-signal-aware
+candidate widening and exact-signal promotion, fuses ranks, applies content
+type boosts and file diversification, then optionally applies graph PPR and a
+reranker. PPR is off by default. The default reranker mode is Sonnet, but any
+missing key, timeout, rate limit, or other reranker error preserves the hybrid
+order and is reported in `_metadata.reranker`.
+
+The fusion policy is content-mode specific: **code 65/35, docs 70/30, all 50/50 (vector/BM25)**. `search/retrieval.py` owns vector/BM25 candidate
+retrieval and deterministic signal promotion; `search/fusion.py` owns RRF and
+chunk-type boosts; `search/query_expansion.py` owns synonym expansion;
+`search/result_models.py` owns response types; and `search/pipeline.py`
+composes optional PPR and reranking. `search/searcher.py` remains the
+orchestration and compatibility boundary.
+
+Each result includes retrieval coordinates and structured metadata for
+freshness, generation manifest, provider/model, reranker outcome, and any
+stale-index advisory. Retrieval coordinates are context, not automatically a
+minimal proof.
+
+### Verifiable Evidence
+
+`search_code_evidence` wraps the same production retrieval path. It does not
+fork ranking behavior.
+
+- The broad result span is labeled `retrieval_context`.
+- The backend reads the exact indexed chunk and offers each nonblank source
+  line as an `atomic_source_line` candidate.
+- Every candidate carries an immutable `evidence_ref` and `observation_ref`
+  bound to repository, source revision, index generation, path, and line.
+- A `symbol_ref` is emitted only when the result contains a canonical qualified
+  name. A short name is never guessed into a cross-engine identity.
+- Identity is checked before and after search. If the generation changes or is
+  stale, evidence emission fails closed while ordinary retrieval remains
+  available.
+
+Consumers should select emitted IDs. They should not manufacture, widen, or
+rewrite source ranges. `code-graph` implements the same canonical reference
+schema so a downstream host can join evidence without relying on prose.
+
+## Quick Start
+
+### Install the Verified Release
+
+The release contains a Python wheel, SHA-256 manifest, and GitHub artifact
+attestation bundle:
 
 ```bash
 REPO="redacted-org/code-search"
@@ -299,12 +148,10 @@ mkdir code-search-v0.3.6
 cd code-search-v0.3.6
 gh release download "$TAG" --repo "$REPO"
 
-# Linux (on macOS, use: shasum -a 256 -c SHA256SUMS)
+# Linux; on macOS use: shasum -a 256 -c SHA256SUMS
 sha256sum --check SHA256SUMS
 
-RELEASE_SHA="$(
-  gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha'
-)"
+RELEASE_SHA="$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')"
 gh attestation verify "$WHEEL" \
   --bundle "$BUNDLE" \
   --deny-self-hosted-runners \
@@ -313,262 +160,184 @@ gh attestation verify "$WHEEL" \
   --source-ref "refs/heads/main" \
   --source-digest "$RELEASE_SHA"
 gh release verify "$TAG" --repo "$REPO"
-gh release verify-asset "$TAG" "$WHEEL" --repo "$REPO"
-gh release verify-asset "$TAG" SHA256SUMS --repo "$REPO"
-gh release verify-asset "$TAG" "$BUNDLE" --repo "$REPO"
 
 python3 -m venv .venv
 .venv/bin/python -m pip install "$WHEEL"
 ```
 
-This path requires Python 3.12 or newer and the
-[GitHub CLI](https://cli.github.com/). For a source checkout used in
-development, install the current checkout without changing another clone:
+Python 3.12 or newer and an authenticated GitHub CLI are required. For a
+development checkout, run `./scripts/install.sh`; it installs that checkout
+into its own `.venv` and does not update another clone.
 
-```bash
-git clone https://github.com/redacted-org/code-search.git
-cd code-search
-./scripts/install.sh
-```
-
-### 2. Configure Claude Code
-
-Add to your MCP settings (`.claude/settings.local.json` or project `.mcp.json`):
+### Configure an MCP Client
 
 ```json
 {
   "mcpServers": {
     "code-search": {
       "type": "stdio",
-      "command": "/path/to/code-search/.venv/bin/python",
+      "command": "/absolute/path/to/.venv/bin/python",
       "args": ["-m", "mcp_server.server"],
-      "cwd": "/path/to/code-search",
       "env": {
-        "VOYAGE_API_KEY": "pa-..."
+        "VOYAGE_API_KEY": "<secret>"
       }
     }
   }
 }
 ```
 
-For local-only (no API key, lower quality):
-```json
-{
-  "env": {
-    "EMBEDDING_PROVIDER": "jina"
-  }
-}
+With `VOYAGE_API_KEY`, code-mode indexing defaults to Voyage
+`voyage-4-large`. Without it, provider resolution defaults to the local
+sentence-transformer path. Set `EMBEDDING_PROVIDER=jina` for the larger local
+Jina code model. `RERANKER=sonnet` is the search default; set `RERANKER=off`
+for a fully local query path or when no Anthropic key is configured.
+
+### Index, Verify, and Search
+
+```text
+index_directory(directory_path="/absolute/repository")
+get_indexing_progress()
+get_index_status(project_path="/absolute/repository")
+search_code(query="where is request authentication enforced?", search_mode="auto")
+search_code_evidence(query="where is request authentication enforced?", search_mode="auto")
 ```
 
-On Windows, use `.venv\Scripts\pythonw.exe` instead of `.venv/bin/python`.
-
-### 3. Index a repo
-
-```
-mcp__code-search__index_directory(directory_path="/path/to/your/repo")
-```
-
-### 4. Search
-
-```
-mcp__code-search__search_code(query="authentication middleware")
-```
+Do not treat a background job start as a ready index. Wait for a terminal
+progress result and require `index_ready=true` with a matching live identity.
 
 ## MCP Tools
 
+The current server registers 16 tools: 15 direct server operations plus the
+additive evidence adapter.
+
 | Tool | Purpose |
-|------|---------|
-| `search_code` | Semantic + keyword hybrid search across the active project |
-| `search_all_projects` | Read-only, project-balanced discovery across up to 25 isolated indexes; returns per-project scores and never treats them as globally comparable |
-| `find_similar_code` | Find chunks structurally similar to a given search result |
-| `index_directory` | Index a directory in the background (with progress polling) |
-| `get_indexing_progress` | Poll the status of a background indexing job |
-| `clear_index` | Delete the active project's index entirely |
-| `switch_project` | Change which indexed project is active for search |
-| `list_projects` | Show all indexed projects with metadata |
-| `get_index_status` | Index statistics — chunk count, embedding model, staleness |
+|---|---|
+| `search_code` | Ranked semantic, keyword, or hybrid retrieval in the active project |
+| `search_code_evidence` | Normal retrieval plus atomic, immutable evidence candidates |
+| `code_localize` | Aggregate chunk results into a file-level issue ranking |
+| `find_similar_code` | Nearest chunks to a prior result |
+| `get_file_context` | Inspect indexed chunks for a file or line window |
+| `search_all_projects` | Project-balanced discovery across isolated indexes |
+| `index_directory` | Start background full or incremental indexing |
+| `get_indexing_progress` | Poll the active indexing job |
+| `cancel_indexing` | Request bounded cancellation at a progress checkpoint |
+| `get_index_status` | Read readiness, source/index identity, provider, and stats |
+| `verify_index_integrity` | Check canonical chunk IDs, dependent stores, and manifests |
+| `list_projects` | List indexed projects and active state |
+| `switch_project` | Change the active project without modifying index data |
+| `index_test_project` | Index the packaged demonstration fixture |
+| `clear_index` | Destructively remove the active index |
+| `delete_project` | Destructively remove one project and all of its artifacts |
 
-## Environment Variables
+Tool annotations classify read-only and destructive operations. Treat
+`clear_index` and `delete_project` as irreversible; list and resolve the exact
+project first.
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set), else `local` | Embedding provider selection |
-| `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; known built-in models derive this automatically |
-| `VOYAGE_API_KEY` | - | Voyage AI API key ([get one](https://dash.voyageai.com)) |
-| `LOCAL_EMBEDDING_MODEL` | `jinaai/jina-code-embeddings-0.5b` | Model for `jina` provider |
-| `JINA_TRUNCATE_DIM` | - | Jina Matryoshka dimension (0.5b: 64, 128, 256, 512, 896; 1.5b: 128, 256, 512, 1024, 1536) |
-| `CONTENT_MODE` | `code` | `code` (boost functions/methods) or `docs` (boost sections/documents) |
-| `CONTEXTUAL_HEADERS` | `on` | Prepend structural context headers before embedding |
-| `ENRICHED_CONTEXT` | `on` (jina/local), `off` (voyage-context) | Include sibling chunk names in headers (+9.6% MRR on Nix) |
-| `QUERY_EXPANSION` | `on` | Expand queries with domain-specific synonyms before BM25 |
-| `CODE_SYNONYM_PROFILE` | `corsair` | Built-in synonym profile: `corsair`, `generic`, or `off`. The default remains `corsair` pending comparative measurement. |
-| `CODE_SYNONYMS_PATH` | `unset` | Optional path to a JSON synonym overlay applied after the selected built-in profile |
-| `CODE_SEARCH_LOG_LEVEL` | `INFO` | Minimum code-search log level |
-| `CODE_SEARCH_LOG_QUERY_TEXT` | `off` | Opt in to raw query text in logs; the default avoids logging query text |
-| `CODE_SEARCH_QUERY_HISTORY` | `metadata` | Query-history mode: `off`, `metadata`, or `full`; metadata mode excludes raw query text |
-| `CODE_SEARCH_QUERY_RETENTION_DAYS` | `30` | Retain query-history records for this many days |
-| `QUANTIZATION` | `int8` | FAISS index type: `int8` (4x smaller), `float32`, `binary` (32x smaller) |
-| `VOYAGE_BATCH_API` | `off` | Use Voyage Batch API for full reindexes (33% cheaper, 1000+ chunks) |
-| `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory for all indexes |
+## Configuration
+
+The common settings are below. The complete, current table is in
+[`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EMBEDDING_PROVIDER` | Voyage when its key exists; otherwise local | `voyage`, `voyage-code-3`, `voyage-context`, `openai`, `jina`, or `local` |
+| `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; built-in models derive it automatically |
+| `CONTENT_MODE` | `code` | `code`, `docs`, or `all`; controls retrieval weights and boosts |
+| `CONTEXTUAL_HEADERS` | `on` | Add file/type/name context before embedding |
+| `QUERY_EXPANSION` | `on` | Expand BM25 terms with the selected synonym profile |
+| `CODE_SYNONYM_PROFILE` | `corsair` | `corsair`, `generic`, or `off` |
+| `CODE_SYNONYMS_PATH` | `unset` | Optional JSON overlay for the selected synonym profile |
+| `CODE_SEARCH_LOG_LEVEL` | `INFO` | Minimum server log level |
+| `RERANKER` | `sonnet` | `sonnet`, `listwise`, `cross-encoder`, or `off` |
+| `QUANTIZATION` | `int8` | FAISS `int8`, `float32`, or `binary` storage |
+| `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Root for project indexes and local models |
+| `CODE_SEARCH_LOG_QUERY_TEXT` | `off` | Opt in to raw query text in logs |
+| `CODE_SEARCH_QUERY_HISTORY` | `metadata` | `off`, `metadata`, or `full`; metadata excludes raw query text |
+| `CODE_SEARCH_QUERY_RETENTION_DAYS` | `30` | Query-history retention window in days |
 
 These settings are process-static: they are read once when the MCP server starts. Restart the MCP server after changing them.
 
-## Architecture
+## Operating Guidance
 
-```
-code-search/
-├── chunking/                       # Multi-language AST chunking (18 file types)
-│   ├── tree_sitter.py              # Tree-sitter grammar loading and AST parsing
-│   ├── chunk_merging.py            # cAST-style post-processing merge (400-2500 NWS budget)
-│   ├── multi_language_chunker.py   # Language detection and chunker dispatch
-│   └── languages/                  # Per-language chunkers (Python, Rust, Go, TS, etc.)
-├── embeddings/
-│   ├── embedder.py                 # Provider routing, contextual header prepending
-│   ├── openai_embedder.py          # Voyage AI + OpenAI standard /embeddings API
-│   ├── voyage_context_embedder.py  # Voyage contextualized embeddings (legacy)
-│   ├── voyage_batch_embedder.py    # Voyage Batch API for bulk indexing (33% cheaper)
-│   ├── jina_code_embedder.py       # Jina local code embeddings (on-device)
-│   └── sentence_transformer.py     # Local sentence-transformers fallback
-├── search/
-│   ├── indexer.py                  # FAISS vector index + SQLite FTS5 metadata store
-│   ├── fusion.py                   # Weighted RRF fusion + chunk-type boost policy
-│   ├── query_expansion.py          # Synonym profiles and BM25 query expansion
-│   ├── result_models.py            # Search result data model
-│   ├── retrieval.py                # Vector/BM25 retrieval, fusion, and deterministic boosts
-│   ├── pipeline.py                 # Optional PPR and reranker stages
-│   ├── searcher.py                 # Thin search orchestration + compatibility exports
-│   ├── query_rewriter.py           # Optional multi-query rewrite support
-│   └── incremental_indexer.py      # Merkle-tree-based change detection
-├── merkle/
-│   ├── merkle_dag.py               # Content-hash Merkle DAG for file change tracking
-│   ├── change_detector.py          # Diff between Merkle snapshots
-│   └── snapshot_manager.py         # Snapshot persistence and lifecycle
-├── mcp_server/
-│   ├── server.py                   # MCP stdio entry point
-│   └── code_search_server.py       # Business logic, per-project config, tool handlers
-├── benchmarks/
-│   ├── golden_nix.json             # 44 hand-verified Nix queries
-│   ├── golden_rust_assetman.json   # 20 Rust service queries
-│   ├── golden_rust_libnet.json     # 18 Rust library queries
-│   ├── golden_typescript_mithrandir.json  # 20 TypeScript queries
-│   └── run_multilang_eval.py       # Cross-language A/B evaluation harness
-└── tests/
-    ├── unit/                       # 34+ unit tests
-    └── integration/                # Full-flow, incremental indexing, MCP tool tests
-```
+1. Index a stable checkout and wait for `index_ready=true`.
+2. Use keyword mode for known tokens and hybrid mode for concepts.
+3. Use ordinary results for discovery; use `search_code_evidence` when an
+   answer will make a code claim.
+4. Keep evidence IDs with the answer and report the source revision/index
+   generation when the decision is consequential.
+5. Use `search_all_projects` only to discover the owning project. Re-run a
+   project-bound evidence query before asserting anything.
+6. Escalate relationship questions to `code-graph`. Composition is owned by
+   the client or agent; `code-search` does not silently query graph state.
 
-## Testing
+## Measured Evidence
 
-```bash
-# All unit tests
-.venv/Scripts/python.exe -m pytest tests/unit/ -v
+- On a frozen, balanced public LocBench `n=80` file-localization endpoint,
+  released `v0.3.5` measured Acc@1 `0.375`, Acc@3 `0.613`, Acc@10 `0.788`,
+  and MRR@10 `0.503`. A Sourcegraph public endpoint measured
+  `0.150/0.175/0.188/0.165` under that same endpoint. The paired Acc@1 sign
+  test was `p=0.00053`. This is narrow endpoint evidence, not general platform
+  superiority.
+- The `v0.3.6` source-role prior and file diversification improved a separate
+  paired replay from Acc@1 `0.3625` to `0.3875` and MRR@10 `0.49147` to
+  `0.51608`, with 13 cases improved and none regressed. See
+  [`docs/findings/2026-08-12-public-n80-source-role-prior.md`](docs/findings/2026-08-12-public-n80-source-role-prior.md).
+- The released server indexed a pinned 39,222,246-line LLVM checkout into
+  183,663 chunks in 609.3 seconds with 3.65 GB peak RSS. The persisted search
+  index was 4.98 GB; five warm queries measured 3.77 seconds p50 and 3.84
+  seconds p95. This proves operation on one very large repository, not a
+  distributed organizational fleet or class-leading efficiency.
+- On APFS, `v0.3.6` uses copy-on-write clones for mutable compatibility mirrors
+  when available; other filesystems retain byte-copy behavior. See
+  [`docs/findings/2026-08-12-copy-on-write-publication.md`](docs/findings/2026-08-12-copy-on-write-publication.md).
 
-# Multi-language benchmark evaluation (requires indexed repos)
-.venv/Scripts/python.exe benchmarks/run_multilang_eval.py --lang rust-assetman
+Historical provider and reranker experiments remain in `docs/findings/` and
+[`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md). Compare only measurements
+with compatible corpus, revision, configuration, and metric definitions.
+MRR aggregates reciprocal rank across queries; it does not by itself determine top-result accuracy, a typical rank, or the probability that any one query succeeds. These are historical evaluation results, not current production guarantees.
 
-# Full eval across all 4 languages (~2 hours with Jina CPU)
-.venv/Scripts/python.exe benchmarks/run_multilang_eval.py
-```
-
-The evaluation harness runs each golden query, checks whether the expected file appears in the top-K results, and computes MRR per language. Results are saved as timestamped JSON for A/B comparison between configurations.
-
-## Public release evidence
-
-On the frozen balanced public LocBench n=80 endpoint, code-search v0.3.5
-reached Acc@1 0.375 (95% Wilson interval 0.277–0.485), Acc@3 0.613,
-Acc@10 0.788, and MRR@10 0.503. The Sourcegraph public endpoint reached
-0.150/0.175/0.188/0.165, respectively, with zero request failures. The paired
-Acc@1 comparison produced 22 wins, 4 losses, and 54 ties; the exact two-sided
-sign test yielded p=0.00053. This establishes narrow superiority for this
-frozen file-localization endpoint, not general platform superiority.
-
-This is a zero-LLM file-localization measurement of the released v0.3.5
-server through the code-intelligence plugin's frozen runner. The 80 cases are
-balanced across bug, feature, performance, and security categories and selected
-from a pinned LocBench n=200 set. Expected files require independent agreement
-between LocBench and immutable merged GitHub pull-request evidence at the exact
-historical revision. Twelve cases were excluded before retrieval because that
-second source did not expose every required terminal symbol.
-
-The result supports only the stated public file-localization endpoint. It is
-not evidence of general platform superiority, editor or review quality,
-organization operations, or performance against Cursor, Augment, or Greptile,
-whose revision-pinned callable interfaces were unavailable. Sourcegraph uses a
-public network endpoint with at most three identical attempts; failures remain
-misses and network latency is not directly comparable with local process
-latency.
-
-Release v0.3.6 adds a bounded source-role prior and file diversification for
-code-mode queries. In a separate paired replay of the same frozen 80 cases,
-the candidate improved the then-current main baseline from Acc@1 0.3625 to
-0.3875, Acc@3 0.6125 to 0.6250, Acc@10 0.7625 to 0.7750, and MRR@10 0.49147
-to 0.51608, with 13 cases improved and none regressed. This replay is not a
-replacement for the released-v0.3.5 comparison above; its exact controls and
-boundary are recorded in
-[`docs/findings/2026-08-12-public-n80-source-role-prior.md`](docs/findings/2026-08-12-public-n80-source-role-prior.md).
-
-The same released search server also completed a 39,222,246-line LLVM checkout:
-search indexed 183,663 chunks in 609.3 seconds with 3.65 GB peak RSS, persisted
-4.98 GB (126.9 bytes per source line), and answered the five warm queries at
-3.77 seconds p50 / 3.84 seconds p95. This demonstrates very-large-repository
-operation on one host and also shows that resource efficiency is not yet
-class-leading. The revision-pinned checkout contained 160,123 tracked files;
-the zero-LLM result file is bound by SHA-256
-`831068ace4d0daff59d6e1409dcdf42f2627691bc4e7ea7103b696d5327cf9c8`.
-
-Release v0.3.6 also publishes mutable root compatibility mirrors with APFS
-copy-on-write clones when available. A controlled copy of the same
-282,106,413-byte index allocated 282,017,792 new bytes with an ordinary copy
-and 446,464 bytes with a clone, while retaining distinct inodes and independent
-writes. Non-macOS and unsupported filesystems keep the portable byte-copy
-behavior; existing indexes are not retroactively compacted. See
-[`docs/findings/2026-08-12-copy-on-write-publication.md`](docs/findings/2026-08-12-copy-on-write-publication.md).
-
-## Troubleshooting
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| **Results are irrelevant** | Wrong embedding provider or stale index | Check `get_index_status` — if provider is `local`, switch to `voyage`. If index is >7 days old, re-run `index_directory`. |
-| **Empty results** | Wrong project active, or index doesn't exist | Run `list_projects` to see what's indexed. Run `switch_project` to the correct path. |
-| **"Indexing in progress"** | Auto-reindex triggered by stale detection | Wait 5-10 min for Voyage, or set `auto_reindex: false` to search the existing (possibly stale) index. |
-| **Slow indexing** | Using Jina on CPU | First run downloads ~1GB model. Subsequent runs: ~50 min for 3K chunks on CPU. Switch to `voyage` provider for 5-10 min indexing via API. |
-| **Wrong language detected** | File extension not in the 18 supported types | Check `chunking/available_languages.py`. Unsupported extensions fall back to generic line-based chunking. |
-| **Nix results are poor** | Missing domain synonyms | Ensure `QUERY_EXPANSION=on` and `CONTEXTUAL_HEADERS=on`. These features were specifically tuned for Nix syntax. |
-| **int8 index returns 0.0 similarity** | Index built with QT_8bit_direct (pre-2026-04-05 bug) | Delete the index (`clear_index`) and re-run `index_directory`. QT_8bit (trained) replaced QT_8bit_direct. |
+The frozen balanced public LocBench n=80 endpoint establishes a narrow comparison: “This establishes narrow superiority for this frozen file-localization endpoint, not general platform superiority.”
 
 ## Comparison to Alternatives
 
-| Tool | Strengths | Limitations | When to use instead of code-search |
-|------|-----------|-------------|-----------------------------------|
-| **grep / ripgrep** | Instant, exact, no indexing needed, regex support | No understanding of meaning — "auth" won't find "credential validation" | You know the exact string. Literal lookups. |
-| **GitHub Code Search** | Searches all of GitHub, regex, symbol-aware | Cloud-only, no private GHES support, no custom embeddings | Searching across public repos you don't have locally. |
-| **Sourcegraph** | Enterprise-grade search language, cross-repo code intelligence, history, ACLs, and managed indexing | Requires deployment infrastructure; a broader product surface than this local-first tool | Large organizations needing unified governed search and history. |
-| **IDE search (VS Code, JetBrains)** | Real-time, integrated in editor, symbol navigation | Single-repo, no semantic understanding, no cross-project | Navigating within a single file or project you have open. |
-| **code-graph** | Structural queries — call graphs, dead code, blast radius | No semantic/meaning-based search | "What calls this?" not "Where is the auth code?" |
+- Public superiority is established only for the bounded endpoint above.
+  Cursor, Augment, and Greptile remain ungraded.
+- Sourcegraph has the broader search language, history UX, organization ACLs,
+  and managed indexing fleet. This project is a focused MCP retrieval backend.
+- Cross-project search does not federate scores and does not implement an
+  organization authorization model.
+- The index is not updated on every keystroke. Reindex or allow the freshness
+  path to refresh it.
+- Cloud embedding and reranking providers send query/source-derived content to
+  their APIs. Select a local provider and disable reranking when that boundary
+  is unacceptable.
+- Search does not prove call relationships, runtime behavior, or variable-level
+  taint. Use the appropriate graph, runtime, or CodeQL evidence.
+- Very-large-repository storage and warm latency are functional but remain
+  optimization targets.
 
-**code-search is best when**: You need to find code by meaning across a codebase, especially when you don't know the exact names. It's designed for AI assistants that need to quickly locate relevant code with minimal token waste.
+## Troubleshooting
 
-`search_all_projects` is deliberately a discovery boundary, not score
-federation. It opens one exact provider-specific index per requested project,
-keeps the server's active project and provider state unchanged, ranks within
-each project, and interleaves results project-first. Use the returned project
-identity for a follow-up search or proof; do not compare a score from one index
-with a score from another.
+| Symptom | Check | Recovery |
+|---|---|---|
+| Index job started but queries are incomplete | `get_indexing_progress()` and `get_index_status()` | Wait for `index_ready=true` and a matching source/index identity. |
+| Evidence is absent | Index identity or generation is stale | Reindex the unchanged checkout; evidence intentionally fails closed until identity is current. |
+| Reranker is unavailable | `_metadata.reranker.reason` | Results retain the hybrid order; configure the provider/key or keep `RERANKER=off`. |
+| Changed environment is ignored | Server was already running | Restart the MCP process; configuration is process-static. |
 
-## How code-search and code-graph Work Together
+## Development
 
-These two tools are complementary — **code-search finds things by meaning, code-graph finds things by structure**.
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest tests/unit/ -v
+```
 
-| Question | Use |
-|----------|-----|
-| "Where is the authentication middleware?" | **code-search** — semantic query, meaning-based |
-| "What functions call `authenticate()`?" | **code-graph** — structural query, call graph traversal |
-| "Find code related to rate limiting" | **code-search** — conceptual search across the codebase |
-| "What's the blast radius if I change `User.validate()`?" | **code-graph** — dependency analysis, change impact |
-| "Show me how error handling works" | **code-search** first (find the patterns), then **code-graph** (trace through call chains) |
-
-The `get_relevant_context` tool in code-graph uses both: it takes the files you plan to modify, finds their callers, callees, tests, and change-coupled files via the graph, giving you everything needed to make a safe change — in ~500 tokens instead of ~80K from file-by-file exploration.
+Architecture-sensitive changes should also run the relevant integration and
+acceptance suites. A quality, latency, or storage claim is not complete merely
+because tests pass; follow [`docs/SHIP_DISCIPLINE.md`](docs/SHIP_DISCIPLINE.md)
+and [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md).
 
 ## License
 
-GPL-3.0 (inherited from upstream fork)
+GPL-3.0 (inherited from the upstream fork).
