@@ -7,6 +7,7 @@ name = "redacted-code-search"
 version = "0.3.6"
 description = "Hybrid semantic + keyword code search MCP server. FAISS vector + FTS5 BM25 with Voyage AI, Jina, or local embeddings."
 readme = "README.md"
+license = { text = "GPL-3.0-only" }
 requires-python = ">=3.12"
 authors = [
     { name = "redacted Security" }
@@ -67,8 +68,8 @@ dev = [
 code-search-mcp = "mcp_server.server:main"
 
 [project.urls]
-Homepage = "https://github.com/redacted-org/code-search"
-Repository = "https://github.com/redacted-org/code-search"
+Homepage = "https://github.com/brandyn-s/code-search"
+Repository = "https://github.com/brandyn-s/code-search"
 
 [tool.setuptools]
 py-modules = ["common_utils"]

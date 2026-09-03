@@ -1,5 +1,11 @@
 # Eval Runbook — paired-bootstrap CI for ship-decisions
 
+> **Public repository note (2026-09):** the research harness under
+> `bench/research/` and `benchmarks/` (gold sets harvested from redacted's
+> internal codebases, sweep results, and eval outputs) is not included in this
+> repository. References to those paths below are historical. The frozen
+> offline retrieval floor under `bench/eval/` is included and runs in CI.
+
 **Status**: Operational. Run this when a PR carries a "NEEDS EVAL BEFORE
 MERGE" caveat in its commit body or PR description. Examples currently
 queued for verification:

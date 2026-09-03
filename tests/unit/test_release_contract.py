@@ -12,9 +12,6 @@ from tests.acceptance import wheel_contract
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 UNIT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
-EXTERNAL_WORKFLOW = (
-    REPO_ROOT / ".github" / "workflows" / "external-benchmarks.yml"
-)
 
 
 def test_wheel_contract_can_validate_an_existing_artifact() -> None:
@@ -169,55 +166,6 @@ def test_merge_workflow_builds_once_and_gates_every_required_lane() -> None:
     assert set(gate["needs"]) == required_jobs - {"merge-gate"}
 
 
-def test_external_benchmark_fails_closed_and_validates_both_ranked_runs() -> None:
-    workflow = yaml.safe_load(EXTERNAL_WORKFLOW.read_text(encoding="utf-8"))
-    job = workflow["jobs"]["external-eval"]
-    steps = {step["name"]: step for step in job["steps"] if "name" in step}
-
-    assert workflow["permissions"] == {"contents": "read"}
-
-    preflight = steps["Check VOYAGE_API_KEY"]["run"]
-    assert "exit 1" in preflight
-    assert "VOYAGE_SKIP" not in EXTERNAL_WORKFLOW.read_text(encoding="utf-8")
-
-    evaluation = steps[
-        "Eval voyage-4-large vs voyage-code-3 (rerank off)"
-    ]
-    assert "if" not in evaluation
-    source_identity = steps["Seal adapted corpus source identity"]["run"]
-    assert 'git -C "$CORPUS" init --quiet' in source_identity
-    assert 'git -C "$CORPUS" add --all' in source_identity
-    assert 'git -C "$CORPUS" commit --quiet' in source_identity
-    assert 'test -n "$SOURCE_REVISION"' in source_identity
-    assert 'test -z "$(git -C "$CORPUS" status --porcelain)"' in (
-        source_identity
-    )
-    step_names = [
-        step["name"] for step in job["steps"] if "name" in step
-    ]
-    assert step_names.index("Seal adapted corpus source identity") < (
-        step_names.index(
-            "Eval voyage-4-large vs voyage-code-3 (rerank off)"
-        )
-    )
-
-    validation = steps["Validate benchmark outputs"]["run"]
-    assert "voyage-4-large voyage-code-3" in validation
-    assert 'test -s "$RUNNER_TEMP/metrics_$M.txt"' in validation
-    assert 'test -s "$RUNNER_TEMP/results_$M.json"' in validation
-    assert (
-        "python bench/research/validate_external_benchmark.py"
-        in validation
-    )
-    assert '--golden "$RUNNER_TEMP/coir_task/golden.json"' in validation
-    assert '--qrels "$RUNNER_TEMP/coir_task/qrels_graded.json"' in validation
-    assert '--results-dir "$RUNNER_TEMP"' in validation
-    assert "python -" not in validation
-
-    upload = steps["Upload metrics and ranked runs"]
-    assert upload["if"] == "always()"
-    assert upload["with"]["if-no-files-found"] == "error"
-
 
 def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -298,7 +246,7 @@ def test_release_preflight_does_not_duplicate_runtime_dependencies() -> None:
 
 
 def test_dispatch_inputs_are_never_interpolated_into_shell_source() -> None:
-    for workflow_path in (RELEASE_WORKFLOW, EXTERNAL_WORKFLOW):
+    for workflow_path in (RELEASE_WORKFLOW,):
         workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
         run_blocks = [
             step["run"]
@@ -335,18 +283,6 @@ def test_sensitive_tokens_and_secrets_are_step_scoped() -> None:
         for job in release_jobs.values()
     )
 
-    external = yaml.safe_load(EXTERNAL_WORKFLOW.read_text(encoding="utf-8"))
-    external_job = external["jobs"]["external-eval"]
-    assert "VOYAGE_API_KEY" not in external_job.get("env", {})
-    secret_steps = [
-        step
-        for step in external_job["steps"]
-        if "VOYAGE_API_KEY" in step.get("env", {})
-    ]
-    assert [step["name"] for step in secret_steps] == [
-        "Check VOYAGE_API_KEY",
-        "Eval voyage-4-large vs voyage-code-3 (rerank off)",
-    ]
 
 
 def test_active_project_metadata_has_no_retired_organization_references() -> None:
@@ -363,8 +299,8 @@ def test_active_project_metadata_has_no_retired_organization_references() -> Non
 
     assert "redacted-org" not in active_text
     assert "redacted-org/.github" not in active_text
-    assert "github.com/redacted-org/code-search" in active_text
-    assert "github.com/redacted-org/code-graph" in active_text
+    assert "github.com/brandyn-s/code-search" in active_text
+    assert "github.com/brandyn-s/code-graph" in active_text
     assert (
         REPO_ROOT / ".github" / "CODEOWNERS"
     ).read_text(encoding="utf-8").strip().endswith("* @brandyn-s")
@@ -391,7 +327,7 @@ def test_readme_installs_the_verified_versioned_release() -> None:
     assert "gh release verify-asset" in readme
     assert '.venv/bin/python -m pip install "$WHEEL"' in readme
     assert (
-        "git clone https://github.com/redacted-org/code-search.git"
+        "git clone https://github.com/brandyn-s/code-search.git"
         in readme
     )
     assert "./scripts/install.sh" in readme

@@ -161,7 +161,7 @@ Sonnet (see `RERANKER`).
 
 ## Protected Repo
 
-PR required to merge to main. The repo is `redacted-org/code-search`
-(transferred from `redacted-org` in the 2026-04-26 split) — pass
-`--repo redacted-org/code-search` to `gh` so a bare `gh` doesn't
+PR required to merge to main. The primary repo is `brandyn-s/code-search`
+(originally developed inside redacted's GitHub org; made the public primary in
+2026-09). Pass `--repo brandyn-s/code-search` to `gh` so a bare `gh` doesn't
 resolve to upstream.

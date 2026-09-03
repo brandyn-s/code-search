@@ -23,7 +23,6 @@ on:
       - 'chunking/**'
       - 'search/**'
       - 'fusion/**'
-      - 'benchmarks/**'
       - 'bench/eval/**'
       - 'tests/unit/test_check_retrieval_floor.py'
       - '.github/workflows/retrieval-floor.yml'

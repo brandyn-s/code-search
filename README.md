@@ -6,16 +6,17 @@ per-project indexes, explicit freshness, and backend-issued source evidence.
 `code-search` is the discovery half of redacted's verifiable code-intelligence
 stack. It answers “where is the code that does X?” Code relationships and
 impact questions belong to
-[code-graph](https://github.com/redacted-org/code-graph).
+[code-graph](https://github.com/brandyn-s/code-graph).
 
-> **Current state (reviewed 2026-08-13):** implementation baseline
-> `cbdb9bd` is exactly the published [`v0.3.6`](https://github.com/redacted-org/code-search/releases/tag/v0.3.6)
-> tag. This statement describes source and release identity; it does not assert
-> which version any MCP client currently has installed.
+> **Current state (2026-09):** `brandyn-s/code-search` is now the primary
+> repository. Its history was rewritten to exclude internal evaluation data, so
+> the next tagged release from this repository re-establishes the
+> source-to-release identity that earlier `v0.3.x` releases carried. This
+> statement does not assert which version any MCP client currently has installed.
 
 Read the [architecture and operating model](docs/ARCHITECTURE.md) for component
 boundaries, failure behavior, and storage contracts. The combined
-[`code-search` + `code-graph` HTML guide](https://github.com/redacted-org/code-graph/blob/main/docs/index.html)
+[`code-search` + `code-graph` HTML guide](https://github.com/brandyn-s/code-graph/blob/main/docs/index.html)
 is a self-contained page that can be downloaded and opened locally.
 
 ## What It Provides
@@ -139,7 +140,7 @@ The release contains a Python wheel, SHA-256 manifest, and GitHub artifact
 attestation bundle:
 
 ```bash
-REPO="redacted-org/code-search"
+REPO="brandyn-s/code-search"
 TAG="v0.3.6"
 WHEEL="redacted_code_search-0.3.6-py3-none-any.whl"
 BUNDLE="redacted_code_search-0.3.6-provenance.jsonl"
@@ -172,7 +173,7 @@ Python 3.12 or newer and an authenticated GitHub CLI are required. For a
 development checkout:
 
 ```bash
-git clone https://github.com/redacted-org/code-search.git
+git clone https://github.com/brandyn-s/code-search.git
 cd code-search
 ./scripts/install.sh
 ```
@@ -351,4 +352,7 @@ and [`docs/EVAL_RUNBOOK.md`](docs/EVAL_RUNBOOK.md).
 
 ## License
 
-GPL-3.0 (inherited from the upstream fork).
+GPL-3.0-only. See [LICENSE](LICENSE). This project is derived from
+[FarhanAliRaza/claude-context-local](https://github.com/FarhanAliRaza/claude-context-local)
+(GPL-3.0); modifications are copyright 2026 redacted Security and are released
+under the same license.
