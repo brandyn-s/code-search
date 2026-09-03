@@ -95,7 +95,7 @@ def _build_wheel(destination: Path) -> Path:
         ],
         cwd=destination,
     )
-    wheels = list(destination.glob("redacted_code_search-*.whl"))
+    wheels = list(destination.glob("code_search_mcp-*.whl"))
     assert len(wheels) == 1, wheels
     return wheels[0]
 

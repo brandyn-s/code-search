@@ -5,7 +5,7 @@ had no domain awareness for Nix/NixOS — the dominant language in the
 production corpus. The listwise reranker (RERANKER=listwise) already
 had a dedicated Nix-aware rubric clause (PR #179), but pointwise is
 the production default until listwise graduates per
-docs/LISTWISE_CANARY.md.
+the internal listwise canary runbook.
 
 This file pins the Nix-aware clause text so it can't be accidentally
 removed without an explicit test update. The actual quality impact

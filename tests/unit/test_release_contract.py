@@ -173,7 +173,7 @@ def test_release_workflow_attests_and_verifies_the_published_wheel() -> None:
     assert "preflight-build:" in workflow
     assert "attest:" in workflow
     assert "publish:" in workflow
-    assert workflow.count("id-token: write") == 1
+    assert workflow.count("id-token: write") == 2  # attest + publish-pypi
     assert workflow.count("attestations: read") == 1
     assert workflow.count("attestations: write") == 1
     assert workflow.count("contents: write") == 1
@@ -315,9 +315,9 @@ def test_readme_installs_the_verified_versioned_release() -> None:
 
     assert f'Install the verified v{version} release' in readme
     assert f'TAG="v{version}"' in readme
-    assert f'WHEEL="redacted_code_search-{version}-py3-none-any.whl"' in readme
+    assert f'WHEEL="code_search_mcp-{version}-py3-none-any.whl"' in readme
     assert (
-        f'BUNDLE="redacted_code_search-{version}-provenance.jsonl"'
+        f'BUNDLE="code_search_mcp-{version}-provenance.jsonl"'
         in readme
     )
     assert 'gh release download "$TAG"' in readme

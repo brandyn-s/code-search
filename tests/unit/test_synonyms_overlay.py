@@ -1,16 +1,16 @@
 """Tests for the CODE_SYNONYMS_PATH per-deployment overlay.
 
-The built-in CODE_SYNONYMS map carries Corsair-specific daemon names; the
-overlay lets a deployment extend or disable entries without a source
-change. Default behavior (env unset) must stay byte-identical to the
-built-in map — changing defaults is a measured retrieval change.
+The overlay lets a deployment extend or disable entries of the selected
+synonym profile without a source change. Default behavior (env unset) must
+stay byte-identical to the active profile's map.
 """
 from __future__ import annotations
 
 import json
 
 import search.searcher as searcher_module
-from search.searcher import CODE_SYNONYMS, _active_synonyms, expand_code_query
+from search.searcher import _active_synonyms, expand_code_query
+from search.query_expansion import get_active_synonym_profile
 
 
 def _reset_overlay_cache():
@@ -20,7 +20,7 @@ def _reset_overlay_cache():
 def test_unset_env_returns_builtin_map(monkeypatch):
     monkeypatch.delenv("CODE_SYNONYMS_PATH", raising=False)
     _reset_overlay_cache()
-    assert _active_synonyms() is CODE_SYNONYMS
+    assert _active_synonyms() is get_active_synonym_profile().synonyms
 
 
 def test_overlay_extends_and_overrides(tmp_path, monkeypatch):
@@ -36,7 +36,7 @@ def test_overlay_extends_and_overrides(tmp_path, monkeypatch):
     assert merged["telemetry"] == ["metricsd", "statsd"]
     assert merged["auth"] == ["sso", "saml"]
     # Untouched built-in keys pass through.
-    assert merged["error"] == CODE_SYNONYMS["error"]
+    assert merged["error"] == get_active_synonym_profile().synonyms["error"]
 
     expanded = expand_code_query("telemetry pipeline")
     assert "metricsd" in expanded.split()
@@ -67,7 +67,7 @@ def test_malformed_overlay_falls_back_to_builtins(tmp_path, monkeypatch):
     monkeypatch.setenv("CODE_SYNONYMS_PATH", str(overlay))
     _reset_overlay_cache()
 
-    assert _active_synonyms() == CODE_SYNONYMS
+    assert _active_synonyms() == get_active_synonym_profile().synonyms
     _reset_overlay_cache()
 
 
@@ -77,5 +77,5 @@ def test_default_expansion_behavior_unchanged(monkeypatch):
     monkeypatch.delenv("CODE_SYNONYMS_PATH", raising=False)
     _reset_overlay_cache()
     expanded = expand_code_query("auth retry")
-    for syn in CODE_SYNONYMS["auth"]:
+    for syn in get_active_synonym_profile().synonyms["auth"]:
         assert syn.lower() in expanded.lower().split()

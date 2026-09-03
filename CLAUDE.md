@@ -1,33 +1,18 @@
 # CLAUDE.md
 
-redacted fork of claude-context-local. Hybrid semantic + keyword code search MCP server.
+Hybrid semantic + keyword code search MCP server (`code-search-mcp` on PyPI), derived from claude-context-local.
 
 > **Reference split**: this file is the always-loaded core. The full
 > environment-variable table (~30 vars incl. every diagnostic/experimental
 > reranker knob), the reranker `reason` vocabulary, the streaming-SDK
 > follow-up, and the multi-language embedding eval tables live in
-> [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md). Keep that file's measured
-> records intact (ship-discipline) — relocate findings here only as one-liners.
+> [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md).
 
-## Ship-Discipline Policy
+## Quality Claims
 
-Before claiming any change "improves code-search" (quality, latency, or
-any measurable outcome), apply rules 9 and 10 from `docs/SHIP_DISCIPLINE.md`:
-
-- **Rule 9 (evidence staleness)**: cited eval results must reflect current
-  state. Run `git log --since=<eval date> -- <comparison-arms>` before
-  citing measurements; if upstream changes touch the comparison, re-run
-  or explicitly justify why the old result still applies.
-- **Rule 10 (affirmative outcome)**: outcome claims need measurement
-  under current conditions. The closing of a goal / PR must explicitly
-  use one of: **DONE** (measured + affirmed), **DECIDE** (measured +
-  refuted), or **BLOCKED ON MEASUREMENT** (no current-state measurement).
-  Defensibility narratives, architectural reasoning, and absence-of-
-  contradicting-evidence do not satisfy rule 10.
-
-When in doubt, the correct closing is BLOCKED, not a softened DONE.
-
-See also: `docs/EVAL_RUNBOOK.md` (how to run paired-bootstrap CI).
+A ranking, latency, or storage claim needs a measurement under current
+conditions, not just passing tests. Put the eval you ran and its numbers in
+the PR description.
 
 ## Key Commands
 
@@ -44,7 +29,7 @@ See also: `docs/EVAL_RUNBOOK.md` (how to run paired-bootstrap CI).
 
 ## Architecture
 
-- **Embedding providers**: Voyage AI (`voyage-4-large` default — +0.053 weighted avg MRR over `voyage-context-3` across 4 langs), `voyage-code-3` (available, non-default — wins on TypeScript, regresses on Nix vs voyage-4-large per 2026-05-15 A/B; see `docs/findings/`), `voyage-context-3` legacy, OpenAI, local sentence-transformers
+- **Embedding providers**: Voyage AI (`voyage-4-large` default — +0.053 weighted avg MRR over `voyage-context-3` across 4 langs), `voyage-code-3` (available, non-default — wins on TypeScript, regresses on Nix vs voyage-4-large per 2026-05-15 A/B; see internal eval findings), `voyage-context-3` legacy, OpenAI, local sentence-transformers
 - **Search**: Weighted RRF fusion of FAISS vector + FTS5 BM25. Content mode boosts (code: function/method 1.3x, docs: section 1.3x)
 - **Search policy modules**: `search/fusion.py` owns RRF and chunk boosts; `search/query_expansion.py` owns synonym profiles and BM25 expansion; `search/result_models.py` owns the result data model; `search/retrieval.py` owns vector/BM25 retrieval, fusion, and deterministic boosts; `search/pipeline.py` owns optional PPR and reranker stages. `search/searcher.py` orchestrates them and retains compatibility exports.
 - **Chunking**: 17 registered language modes across 21 file extensions, using tree-sitter or language-specific structural/regex chunkers. Post-processing merge (cAST-style) greedily combines small adjacent chunks to a 2500 NWS char budget, capturing gap code (imports, constants) between semantic units.
@@ -79,13 +64,13 @@ per-cohort prompt/threshold overrides, latency-diag logging, `LLM_CONTEXT_PATH`,
 | `CONTENT_MODE` | `code` | `code`, `docs`, or `all` — affects search weights and, only when no provider is explicit or stored, selects `voyage-context` for docs and `voyage` for other modes |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend `# From <path>` context headers before embedding |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
-| `CODE_SYNONYM_PROFILE` | `corsair` | Built-in synonym profile: `corsair`, `generic`, or `off`. Keep `corsair` as the default until comparative measurement supports a switch. |
+| `CODE_SYNONYM_PROFILE` | `generic` | Built-in synonym profile: `generic`, `corsair`, or `off`. `corsair` is a domain-specific profile kept for existing deployments. |
 | `CODE_SYNONYMS_PATH` | `unset` | Optional JSON synonym overlay applied after the selected profile |
 | `CODE_SEARCH_LOG_LEVEL` | `INFO` | Minimum code-search log level |
 | `CODE_SEARCH_LOG_QUERY_TEXT` | `off` | Opt in to raw query text in logs; default off preserves query privacy |
 | `CODE_SEARCH_QUERY_HISTORY` | `metadata` | `off`, `metadata`, or `full`; metadata mode excludes raw query text |
 | `CODE_SEARCH_QUERY_RETENTION_DAYS` | `30` | Query-history retention window in days |
-| `RERANKER` | `sonnet` | `sonnet` (pointwise, default), `listwise`, `cross-encoder` (legacy), `off`. Graceful fallback to hybrid order on any error (reason recorded in `_metadata`). Full knob set + eval history in ENV_REFERENCE. |
+| `RERANKER` | `auto` | `auto` (default: `sonnet` when `ANTHROPIC_API_KEY` is set, else `off`), `sonnet` (pointwise), `listwise`, `cross-encoder` (legacy), `off`. Graceful fallback to hybrid order on any error (reason recorded in `_metadata`). Full knob set + eval history in ENV_REFERENCE. |
 | `QUANTIZATION` | `int8` | `int8` (QT_8bit trained, 4x smaller), `float32` (legacy), `binary` (32x smaller, 100K+ chunks). **Gotcha**: must be QT_8bit, NOT QT_8bit_direct (silently returns 0.0 sims — reindex anything built pre-2026-04-05). |
 | `VOYAGE_BATCH_API` | `off` | `on` for 33% cheaper async embedding on full reindex (1000+ chunks) |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Storage directory |
@@ -159,9 +144,8 @@ chunk-type boosts → optional Sonnet rerank. Voyage
 rerank-2.5 degrades quality (−30% MRR) and is disabled; the reranking layer is
 Sonnet (see `RERANKER`).
 
-## Protected Repo
+## Repository
 
-PR required to merge to main. The primary repo is `brandyn-s/code-search`
-(originally developed inside redacted's GitHub org; made the public primary in
-2026-09). Pass `--repo brandyn-s/code-search` to `gh` so a bare `gh` doesn't
-resolve to upstream.
+Primary repo: `brandyn-s/code-search` (PRs required to merge to `main`).
+Pass `--repo brandyn-s/code-search` to `gh` so a bare `gh` doesn't resolve to
+the upstream fork.

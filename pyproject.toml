@@ -3,8 +3,8 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "redacted-code-search"
-version = "0.3.6"
+name = "code-search-mcp"
+version = "0.4.0"
 description = "Hybrid semantic + keyword code search MCP server. FAISS vector + FTS5 BM25 with Voyage AI, Jina, or local embeddings."
 readme = "README.md"
 license = { text = "GPL-3.0-only" }
@@ -36,7 +36,8 @@ dependencies = [
     "httpx>=0.27.0",
     "fastmcp>=2.12.2",
     "huggingface-hub>=0.34.4",
-    "mcp>=1.13.1",
+    # mcp 2.x renamed FastMCP to MCPServer; this code targets the 1.x API.
+    "mcp>=1.13.1,<2",
     "numpy",
     "PyYAML>=6.0",
     "rich>=14.1.0",
@@ -70,6 +71,8 @@ code-search-mcp = "mcp_server.server:main"
 [project.urls]
 Homepage = "https://github.com/brandyn-s/code-search"
 Repository = "https://github.com/brandyn-s/code-search"
+Issues = "https://github.com/brandyn-s/code-search/issues"
+Changelog = "https://github.com/brandyn-s/code-search/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 py-modules = ["common_utils"]

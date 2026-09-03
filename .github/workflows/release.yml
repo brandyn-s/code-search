@@ -6,7 +6,7 @@ on:
       version:
         description: Project version to release (without the v prefix)
         required: true
-        default: "0.2.1"
+        default: "0.4.0"
 
 concurrency:
   group: code-search-release
@@ -102,7 +102,7 @@ jobs:
             --no-build-isolation \
             --wheel-dir dist \
             .
-          WHEEL_NAME="redacted_code_search-${VERSION}-py3-none-any.whl"
+          WHEEL_NAME="code_search_mcp-${VERSION}-py3-none-any.whl"
           test -f "dist/$WHEEL_NAME"
           python tests/acceptance/wheel_contract.py --wheel "dist/$WHEEL_NAME"
           (
@@ -174,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           WHEEL="dist/$WHEEL_NAME"
-          BUNDLE_NAME="redacted_code_search-${VERSION}-provenance.jsonl"
+          BUNDLE_NAME="code_search_mcp-${VERSION}-provenance.jsonl"
           BUNDLE="dist/$BUNDLE_NAME"
           cp "$BUNDLE_SOURCE" "$BUNDLE"
           test -s "$BUNDLE"
@@ -438,3 +438,45 @@ jobs:
               --json isDraft,targetCommitish \
               --jq '[.isDraft, .targetCommitish] | @tsv'
           )" = $'false\t'"$GITHUB_SHA"
+
+  # Publishes the attested wheel to PyPI with trusted publishing (OIDC); no
+  # API token secret is stored. One-time setup: create the PyPI project
+  # `code-search-mcp` with a pending trusted publisher for owner `brandyn-s`,
+  # repository `code-search`, workflow `release.yml`, environment `pypi`, and
+  # create the `pypi` environment in this repository's settings.
+  publish-pypi:
+    needs:
+      - preflight-build
+      - attest
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Download attested release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: attested-release-${{ needs.preflight-build.outputs.version }}
+          path: dist
+
+      - name: Keep only the wheel for PyPI
+        env:
+          WHEEL_NAME: ${{ needs.preflight-build.outputs.wheel_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p pypi-dist
+          cp "dist/$WHEEL_NAME" pypi-dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+        with:
+          packages-dir: pypi-dist
+          print-hash: true

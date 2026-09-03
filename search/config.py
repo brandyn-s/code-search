@@ -168,15 +168,22 @@ CONTENT_MODES: Tuple[str, ...] = ("code", "docs", "all")
 
 # Reranker mode allowlist. The dispatcher in searcher.py routes by this string.
 RERANKER_MODES: Tuple[str, ...] = (
-    "sonnet", "listwise", "cross-encoder", "off",
+    "auto", "sonnet", "listwise", "cross-encoder", "off",
 )
+
+# Modes RERANKER=auto can resolve to. "auto" picks the Sonnet pointwise
+# reranker when ANTHROPIC_API_KEY is present and "off" otherwise, so a fresh
+# install with no keys runs a fully local query path instead of failing every
+# rerank call.
+RERANKER_AUTO_WITH_KEY = "sonnet"
+RERANKER_AUTO_WITHOUT_KEY = "off"
 
 # Search mode allowlist (search_code's search_mode arg).
 SEARCH_MODES: Tuple[str, ...] = ("auto", "hybrid", "keyword", "semantic")
 
-# Packaged query-expansion profile selection. The current Corsair behavior
-# remains the default until a generic-default change passes retrieval eval.
-SYNONYM_PROFILES: Tuple[str, ...] = ("corsair", "generic", "off")
+# Packaged query-expansion profile selection. "generic" is the default;
+# "corsair" is a domain-specific profile kept for existing deployments.
+SYNONYM_PROFILES: Tuple[str, ...] = ("generic", "corsair", "off")
 
 
 @dataclass(frozen=True)
@@ -221,12 +228,12 @@ class SearchConfig:
 
     # Reranker selection + tuning
     reranker_mode: str
-    """One of RERANKER_MODES. Default 'sonnet' (pointwise rubric, with R9
+    """Resolved reranker mode (never "auto"). Default RERANKER=auto → 'sonnet' when ANTHROPIC_API_KEY is set, else 'off'. Historically 'sonnet' (pointwise rubric, with R9
     Nix-aware clause). The 2026-05-23 listwise default-flip (PR #199) was
     REVERTED 2026-05-23 after the rule-9 re-eval on current main: listwise
     harvested MRR delta −0.0456 CI [−0.0891, −0.0024], real_session_v1
     delta −0.0622 CI [−0.108, −0.017] — both CIs exclude zero unfavorable.
-    See docs/findings/2026-05-23-listwise-default-eval-finding.md. Listwise
+    See internal eval finding (2026-05-23). Listwise
     stays selectable via RERANKER=listwise for callers who want the
     single-call latency profile and accept the harvested MRR cost."""
 
@@ -254,6 +261,15 @@ class SearchConfig:
     Pre-R11 this read ``SEARCH_MODE`` env directly with no allowlist."""
 
 
+def _resolve_reranker_mode(mode: str) -> str:
+    """Resolve RERANKER=auto to a concrete mode based on available keys."""
+    if mode != "auto":
+        return mode
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return RERANKER_AUTO_WITH_KEY
+    return RERANKER_AUTO_WITHOUT_KEY
+
+
 @lru_cache(maxsize=1)
 def get_search_config() -> SearchConfig:
     """Return the validated SearchConfig, memoized across calls.
@@ -270,10 +286,12 @@ def get_search_config() -> SearchConfig:
 
         # Modes
         content_mode=parse_env_enum("CONTENT_MODE", default="code", allowed=CONTENT_MODES),
-        reranker_mode=parse_env_enum("RERANKER", default="sonnet", allowed=RERANKER_MODES),
+        reranker_mode=_resolve_reranker_mode(
+            parse_env_enum("RERANKER", default="auto", allowed=RERANKER_MODES)
+        ),
         synonym_profile=parse_env_enum(
             "CODE_SYNONYM_PROFILE",
-            default="corsair",
+            default="generic",
             allowed=SYNONYM_PROFILES,
         ),
 

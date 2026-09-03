@@ -93,7 +93,7 @@ def test_architecture_lists_extracted_search_policy_modules() -> None:
 
 def test_process_static_environment_contracts_and_defaults_are_documented() -> None:
     defaults = {
-        "CODE_SYNONYM_PROFILE": "corsair",
+        "CODE_SYNONYM_PROFILE": "generic",
         "CODE_SYNONYMS_PATH": "unset",
         "CODE_SEARCH_LOG_LEVEL": "INFO",
         "CODE_SEARCH_LOG_QUERY_TEXT": "off",
@@ -111,11 +111,7 @@ def test_process_static_environment_contracts_and_defaults_are_documented() -> N
         assert "`off`, `metadata`, or `full`" in document
 
     for document in (README, CLAUDE, ENV_REFERENCE):
-        assert "`corsair`, `generic`, or `off`" in document
-    assert (
-        "Changing the default away from `corsair` is **BLOCKED ON MEASUREMENT**"
-        in ENV_REFERENCE
-    )
+        assert "`generic`, `corsair`, or `off`" in document
 
 
 def test_custom_remote_embedding_dimension_contract_is_documented() -> None:

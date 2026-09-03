@@ -1,6 +1,7 @@
 """FastMCP server for Claude Code integration - main entry point."""
 import json
 import os
+import sys
 import threading
 from typing import TYPE_CHECKING
 
@@ -80,6 +81,29 @@ def _run_startup_integrity_audit(server: "CodeSearchServer") -> None:
         )
 
 
+def _log_startup_mode() -> None:
+    """Emit one stderr line saying which embedding provider and reranker are active.
+
+    Both cloud keys are optional; this line makes the resolved offline/online
+    mode visible without reading the env reference.
+    """
+    try:
+        from embeddings.embedder import resolve_embedding_config
+        from search.config import get_search_config
+
+        cfg = get_search_config()
+        emb = resolve_embedding_config()
+        model = getattr(emb, "model", None) or getattr(emb, "model_name", None) or ""
+        embeddings = f"{emb.provider}({model})" if model else str(emb.provider)
+        reranker = cfg.reranker_mode
+        hint = ""
+        if reranker == "off" and not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("RERANKER"):
+            hint = " (set ANTHROPIC_API_KEY to enable LLM reranking)"
+        print(f"code-search: embeddings={embeddings} reranker={reranker}{hint}", file=sys.stderr, flush=True)
+    except Exception:  # pragma: no cover - informational only
+        logger.debug("startup mode summary failed", exc_info=True)
+
+
 def main():
     """Main entry point for the server."""
     import argparse
@@ -116,6 +140,7 @@ def main():
 
     # Create and run server
     server = CodeSearchServer()
+    _log_startup_mode()
     # Run the integrity audit in a daemon thread so a slow/hung verifier
     # never wedges MCP startup. Findings go to the sidecar log; this is
     # log-only (no destructive cleanup).

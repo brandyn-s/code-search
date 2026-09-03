@@ -195,7 +195,7 @@ def _job_terminal_state(success: bool) -> tuple[str, str]:
     pollers key on the status string, and "completed" over a half-index sent
     a downstream eval measuring a phantom collapse (2026-06-12 P1 arm-2 —
     network outage dropped 11 batches, job still read completed; see
-    docs/findings/2026-06-12-p1-chunk-budget-eval-finding.md). The result
+    internal eval finding (2026-06-12). The result
     payload carries the detailed error either way.
     """
     return ("completed", "done") if success else ("failed", "error")
@@ -672,7 +672,9 @@ class CodeSearchServer:
         lifetime, so one startup warning covers every future query.
         """
         try:
-            mode = os.environ.get("RERANKER", "sonnet").strip().lower()
+            from search.config import get_search_config
+
+            mode = get_search_config().reranker_mode
             if mode in ("off", "cross-encoder"):
                 return
             problems = []

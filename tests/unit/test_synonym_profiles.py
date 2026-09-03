@@ -21,7 +21,7 @@ def _clear_process_static_profile_state_after_test():
     clear_synonym_cache()
 
 
-def test_default_profile_loads_packaged_corsair_v1(monkeypatch):
+def test_default_profile_loads_packaged_generic_v1(monkeypatch):
     monkeypatch.delenv("CODE_SYNONYM_PROFILE", raising=False)
     monkeypatch.delenv("CODE_SYNONYMS_PATH", raising=False)
 
@@ -37,21 +37,18 @@ def test_default_profile_loads_packaged_corsair_v1(monkeypatch):
     clear_synonym_cache()
 
     profile = get_active_synonym_profile()
-    assert profile.name == "corsair"
+    assert profile.name == "generic"
     assert profile.version == 1
-    assert profile.id == "corsair-v1"
+    assert profile.id == "generic-v1"
     assert get_active_synonym_profile_metadata() == {
-        "name": "corsair",
+        "name": "generic",
         "version": 1,
-        "id": "corsair-v1",
+        "id": "generic-v1",
     }
     assert resources.files("search").joinpath(
-        "profiles", "corsair-v1.json"
+        "profiles", "generic-v1.json"
     ).is_file()
-    assert expand_code_query("auth retry") == (
-        "auth retry authentication oauth jwt token credential login entra "
-        "backoff retryable retry_delay 429 529"
-    )
+    assert expand_code_query("auth retry") == 'auth retry authentication oauth jwt token credential login entra backoff retryable retry_delay 429 529'
 
 
 def test_generic_profile_removes_corsair_terms_but_keeps_code_terms(monkeypatch):
@@ -282,7 +279,7 @@ def test_failed_overlay_metadata_identifies_base_fallback_without_leaking_input(
     assert private_content not in serialized_metadata
 
 
-def test_invalid_profile_warns_and_falls_back_to_corsair(monkeypatch, caplog):
+def test_invalid_profile_warns_and_falls_back_to_generic(monkeypatch, caplog):
     monkeypatch.setenv("CODE_SYNONYM_PROFILE", "typo")
 
     from search.config import get_search_config
@@ -293,10 +290,10 @@ def test_invalid_profile_warns_and_falls_back_to_corsair(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="search.config"):
         config = get_search_config()
 
-    assert config.synonym_profile == "corsair"
-    assert get_active_synonym_profile().id == "corsair-v1"
+    assert config.synonym_profile == "generic"
+    assert get_active_synonym_profile().id == "generic-v1"
     assert "CODE_SYNONYM_PROFILE" in caplog.text
-    assert "using default 'corsair'" in caplog.text
+    assert "using default 'generic'" in caplog.text
 
 
 def test_profile_selection_is_process_static_until_config_cache_clear(monkeypatch):

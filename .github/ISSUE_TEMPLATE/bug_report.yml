@@ -1,0 +1,32 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: code-search-mcp version
+      placeholder: "0.4.0 (uvx code-search-mcp --version)"
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client and OS
+      placeholder: "Claude Code 2.x on macOS 15"
+  - type: textarea
+    id: startup
+    attributes:
+      label: Startup line
+      description: The `code-search: embeddings=... reranker=...` line from the server's stderr.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Tool calls in order, with arguments. Redact anything private.

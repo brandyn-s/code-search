@@ -134,6 +134,7 @@ def test_expand_query_stem_strips_whole_suffix_not_char_class():
     path that the existing tests don't (they pass the key directly).
     """
     from search.searcher import expand_code_query, _query_stem
+    _use_profile("corsair")
 
     # Direct stemmer assertions
     assert _query_stem("navigations") == "navigation"
@@ -144,6 +145,32 @@ def test_expand_query_stem_strips_whole_suffix_not_char_class():
     # Stem-via-expansion: "sensors" should hit the "sensor" key and expand
     expanded = expand_code_query("sensors data")
     assert "internal-svc-62" in expanded.lower() or "internal-svc-51" in expanded.lower() or "internal-svc-28" in expanded.lower(), expanded
+
+
+def _use_profile(name):
+    """Select a synonym profile for one test and restore the default afterwards."""
+    import os
+    from search.config import get_search_config
+    from search.query_expansion import clear_synonym_cache
+
+    os.environ["CODE_SYNONYM_PROFILE"] = name
+    get_search_config.cache_clear()
+    clear_synonym_cache()
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_synonym_profile(monkeypatch):
+    from search.config import get_search_config
+    from search.query_expansion import clear_synonym_cache
+
+    monkeypatch.delenv("CODE_SYNONYM_PROFILE", raising=False)
+    yield
+    monkeypatch.delenv("CODE_SYNONYM_PROFILE", raising=False)
+    get_search_config.cache_clear()
+    clear_synonym_cache()
 
 
 def test_expand_query_nix_domain():
@@ -161,6 +188,7 @@ def test_expand_query_nix_domain():
 def test_expand_query_corsair_services():
     """Corsair service synonyms should expand domain queries to daemon names."""
     from search.searcher import expand_code_query
+    _use_profile("corsair")
 
     expanded = expand_code_query("sensor navigation GPS")
     assert "internal-svc-62" in expanded.lower() or "internal-svc-51" in expanded.lower()

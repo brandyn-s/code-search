@@ -64,7 +64,7 @@ def _detach(mgr: CodeIndexManager) -> None:
 
     Why the watchdog: `CodeIndexManager.__del__` calls `SqliteDict.close()`,
     which can DEADLOCK on its background writer thread (observed in this
-    battery — see docs/findings/2026-05-30-codeindexmanager-del-deadlock.md).
+    battery — see internal eval finding (2026-05-30).
     A bounded close prevents the test from hanging and documents the latent
     server-hang risk (project-switch GC). Comparisons in these tests read
     in-memory state (_chunk_ids, the FAISS index), not the metadata DB, so a
@@ -151,7 +151,7 @@ def test_battery_index_determinism(tmp_path):
 
 @pytest.mark.skip(
     reason="Blocked by the CodeIndexManager.__del__/SqliteDict.close() deadlock "
-    "(docs/findings/2026-05-30-codeindexmanager-del-deadlock.md). The assertions "
+    "internal eval finding (2026-05-30). The assertions "
     "are correct and the indexing logic is verified, but the incremental path's "
     "teardown deadlocks the process. Unskip when the close path is made "
     "non-deadlocking — this then doubles as the regression test for that bug.")

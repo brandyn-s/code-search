@@ -43,7 +43,7 @@ class TestDefaults:
     evidence and was reverted the same day after a rule-9 re-eval showed
     listwise harvested MRR delta −0.0456 CI [−0.0891, −0.0024]
     excludes zero unfavorable (finding doc
-    docs/findings/2026-05-23-listwise-default-eval-finding.md).
+    internal eval finding (2026-05-23).
     Default is pointwise ('sonnet') with the R9 Nix-aware clause."""
 
     def test_defaults_match_current_constants(self, monkeypatch):
@@ -62,7 +62,10 @@ class TestDefaults:
         assert cfg.vector_weight == 0.0
         assert cfg.bm25_weight == 0.0
         assert cfg.content_mode == "code"
-        assert cfg.reranker_mode == "sonnet"  # listwise flip reverted 2026-05-23
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        get_search_config.cache_clear()
+        cfg = get_search_config()
+        assert cfg.reranker_mode == "off"  # RERANKER=auto without a key
         assert cfg.query_expansion is True   # default on
         assert cfg.bm25_rewrite is False     # default off
         assert cfg.short_query_rewrite is False
@@ -220,17 +223,30 @@ class TestRerankerDefaultGraduation:
     Nix-aware pointwise clause from PR #193, which post-dated Phase C v2)
     showed listwise harvested MRR delta −0.0456 CI [−0.0891, −0.0024]
     excludes zero unfavorable — REVERT per the ship-gate matrix. See
-    docs/findings/2026-05-23-listwise-default-eval-finding.md.
+    internal eval finding (2026-05-23).
 
     These tests pin the post-revert state: pointwise is the default;
     listwise / pointwise / off all stay selectable.
     """
 
-    def test_reranker_default_is_sonnet(self, monkeypatch):
-        """Fresh install with no env vars uses pointwise ('sonnet')."""
+    def test_reranker_default_is_auto_off_without_key(self, monkeypatch):
+        """Fresh install with no keys resolves RERANKER=auto to 'off'."""
         monkeypatch.delenv("RERANKER", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        cfg = get_search_config()
+        assert cfg.reranker_mode == "off"
+
+    def test_reranker_default_is_auto_sonnet_with_key(self, monkeypatch):
+        """RERANKER=auto resolves to pointwise 'sonnet' when a key is present."""
+        monkeypatch.delenv("RERANKER", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
         cfg = get_search_config()
         assert cfg.reranker_mode == "sonnet"
+
+    def test_reranker_auto_explicit(self, monkeypatch):
+        monkeypatch.setenv("RERANKER", "auto")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+        assert get_search_config().reranker_mode == "sonnet"
 
     def test_listwise_remains_selectable(self, monkeypatch):
         """RERANKER=listwise still routes to listwise reranker; not
@@ -261,11 +277,11 @@ class TestRerankerModeValidation:
         cfg = get_search_config()
         assert cfg.reranker_mode == mode
 
-    def test_unknown_mode_logs_and_defaults_to_sonnet(self, monkeypatch, caplog):
-        # Default fallback for unknown RERANKER values tracks the current
-        # default. Briefly 'listwise' on 2026-05-23 (PR #199); reverted to
-        # 'sonnet' the same day per the rule-9 re-eval finding.
+    def test_unknown_mode_logs_and_falls_back_to_auto(self, monkeypatch, caplog):
+        # Unknown RERANKER values fall back to the default (auto), which then
+        # resolves from the available keys.
         monkeypatch.setenv("RERANKER", "magick_reranker")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
         with caplog.at_level(logging.WARNING, logger="search.config"):
             cfg = get_search_config()
         assert cfg.reranker_mode == "sonnet"

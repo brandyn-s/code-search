@@ -424,7 +424,7 @@ def _factory_voyage_code3(model_name: str, cache_dir: str, device: str) -> Any:
     mithrandir TypeScript (+0.119 MRR) and nix declarative config (-0.091 MRR).
     Production default stays voyage-4-large. Enable with
     EMBEDDING_PROVIDER=voyage-code-3 for TypeScript-heavy corpora.
-    See docs/findings/2026-05-15-voyage-code-3-ab-finding.md.
+    See internal eval finding (2026-05-15).
     """
     from embeddings.openai_embedder import OpenAIEmbeddingModel
     model_name = model_name or os.environ.get(

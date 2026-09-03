@@ -4,7 +4,7 @@ Indexes a copy of this repo's own core modules with the `local`
 sentence-transformers provider and validates the full stack: chunk → embed →
 FAISS+FTS5 → hybrid search. Smoke-level correctness (known-item file hits,
 quantization parity), NOT a quality eval — MRR claims still require the PSM
-harness per docs/EVAL_RUNBOOK.md.
+harness (internal eval runbook).
 
 Skips when sentence-transformers (or its model download) is unavailable.
 Run: python3 -m pytest tests/integration/test_local_e2e_battery.py -v

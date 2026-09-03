@@ -6,7 +6,7 @@ Pins three contracts from the R12 registry pattern:
 3. The unknown-provider error message lists voyage-code-3 in the available set.
 
 No real API calls are made — the factory import is monkeypatched.
-Per docs/findings/2026-05-15-voyage-code-3-ab-finding.md, voyage-4-large
+Per internal eval finding (2026-05-15), voyage-4-large
 remains the production default; this provider is available for TypeScript-heavy
 corpora (mithrandir +0.119 MRR CI excludes zero, enabled via
 EMBEDDING_PROVIDER=voyage-code-3).
