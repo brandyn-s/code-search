@@ -116,7 +116,18 @@ def main():
 
     configure_first_party_logging()
 
-    parser = argparse.ArgumentParser(description="Code Search MCP Server")
+    # `code-search-mcp doctor [--json]` diagnoses the installation without
+    # starting the server; anything else starts the MCP server as before.
+    argv = sys.argv[1:]
+    if argv and argv[0] == "doctor":
+        from mcp_server.doctor import main as doctor_main
+
+        raise SystemExit(doctor_main(argv[1:]))
+
+    parser = argparse.ArgumentParser(
+        description="Code Search MCP Server",
+        epilog="Run `code-search-mcp doctor` to diagnose configuration, storage, and provider reachability.",
+    )
     parser.add_argument(
         "--transport",
         choices=["stdio", "sse", "http", "streamable-http"],
