@@ -44,6 +44,9 @@ First release from the public primary repository `brandyn-s/code-search`.
   `RERANKER_LLM_API_KEY`, `RERANKER_LLM_TIMEOUT_S`), sharing the judge prompt
   and score parser with the Anthropic engine (`search/llm_judge.py`). The
   pointwise Anthropic model now honours `ANTHROPIC_MODEL`.
+- `docs/providers.md`: which OpenAI-compatible endpoints work for embeddings
+  and reranking (OpenAI, Azure OpenAI, Gemini, Bedrock gateways, Ollama, vLLM,
+  LM Studio, OpenRouter), what each receives, and the tested-vs-expected status.
 - `OPENAI_BASE_URL` points the `openai` embedding provider at any
   OpenAI-compatible server (Ollama, vLLM, LM Studio, Azure OpenAI, OpenRouter,
   gateways). A key is required only for api.openai.com; `OPENAI_AUTH_HEADER=api-key`
