@@ -45,6 +45,12 @@ per-query delta. Put that output in the pull request. Only compare runs with
 the same corpus commit, provider, model and reranker; the runner records all
 four in the result file. Never commit `results/` or index artifacts.
 
+## Extending code-search
+
+Recipes for a new language chunker, embedding provider, reranker, or MCP
+tool, each with the file and test to copy, are in
+[docs/extending.md](docs/extending.md).
+
 ## Documentation contracts
 
 `tests/unit/test_documentation_contract.py` pins README, CLAUDE.md, and
