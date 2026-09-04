@@ -98,6 +98,29 @@ args = ["code-search-mcp"]
 }
 ```
 
+## Self-hosted embeddings (Ollama / vLLM / LM Studio)
+
+The `openai` provider speaks the OpenAI embeddings API, so any server that
+implements it works. Set the endpoint root (including `/v1`), the model name
+the server exposes, and the vector size for models not in the built-in table.
+No API key is needed for local servers.
+
+```bash
+ollama pull nomic-embed-text
+claude mcp add code-search --scope user \
+  -e EMBEDDING_PROVIDER=openai \
+  -e OPENAI_BASE_URL=http://localhost:11434/v1 \
+  -e EMBEDDING_MODEL=nomic-embed-text \
+  -e EMBEDDING_DIMENSION=768 \
+  -- uvx code-search-mcp
+```
+
+vLLM and LM Studio use the same four variables with their own port and model
+name. Hosted OpenAI-compatible endpoints (Azure OpenAI, OpenRouter, Gemini's
+OpenAI surface, Bedrock gateways) are listed in [providers.md](providers.md).
+Changing provider, model, or dimension changes the index identity, so reindex
+after switching.
+
 ## First run
 
 The first call to `index_directory` downloads the local embedding model when

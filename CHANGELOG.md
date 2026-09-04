@@ -39,6 +39,10 @@ First release from the public primary repository `brandyn-s/code-search`.
   derived from internal codebases.
 
 ### Added
+- `OPENAI_BASE_URL` points the `openai` embedding provider at any
+  OpenAI-compatible server (Ollama, vLLM, LM Studio, Azure OpenAI, OpenRouter,
+  gateways). A key is required only for api.openai.com; `OPENAI_AUTH_HEADER=api-key`
+  supports Azure API keys.
 - `code-search-mcp doctor [--json]`: resolved configuration with secrets
   redacted, storage and project inventory with generation and format version,
   provider reachability, grammar list, and versions.

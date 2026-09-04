@@ -10,6 +10,54 @@ from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+KEYED_HOSTS = ("api.openai.com", "api.voyageai.com")
+AUTH_HEADER_STYLES = ("bearer", "api-key")
+
+
+def _host_of(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    return (urlsplit(url).hostname or "").lower()
+
+
+def resolve_openai_base_url(explicit: str = "") -> str:
+    """Resolve the embeddings endpoint root.
+
+    ``OPENAI_BASE_URL`` (the standard OpenAI SDK name) points the ``openai``
+    provider at any OpenAI-compatible server: Ollama, vLLM, LM Studio, Azure
+    OpenAI, OpenRouter, or a gateway in front of Gemini or Bedrock. The value
+    must include the API version path (for example ``http://localhost:11434/v1``);
+    trailing slashes are removed. ``explicit`` wins over the environment.
+    """
+    raw = explicit or env_get("OPENAI_BASE_URL", "") or DEFAULT_OPENAI_BASE_URL
+    return raw.strip().rstrip("/")
+
+
+def requires_api_key(base_url: str) -> bool:
+    """OpenAI and Voyage always need a key; self-hosted servers often do not."""
+    return _host_of(base_url) in KEYED_HOSTS
+
+
+def resolve_auth_header_style() -> str:
+    """``OPENAI_AUTH_HEADER``: ``bearer`` (default) or ``api-key`` (Azure OpenAI keys)."""
+    style = (env_get("OPENAI_AUTH_HEADER", "bearer") or "bearer").strip().lower()
+    if style not in AUTH_HEADER_STYLES:
+        raise ValueError(
+            f"OPENAI_AUTH_HEADER must be one of {AUTH_HEADER_STYLES}, got {style!r}"
+        )
+    return style
+
+
+def build_auth_headers(api_key: str, style: str = "bearer") -> Dict[str, str]:
+    """Authorization headers for one request; empty when there is no key."""
+    if not api_key:
+        return {}
+    if style == "api-key":
+        return {"api-key": api_key}
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 # Known dimensions for OpenAI models
 MODEL_DIMENSIONS = {
     "text-embedding-3-small": 1536,
@@ -26,6 +74,17 @@ MODEL_DIMENSIONS = {
 
 # Voyage API token limits (leave headroom below the 120K hard limit)
 _VOYAGE_MAX_TOKENS_PER_REQUEST = 100_000
+
+
+def _env_dimension() -> int:
+    """``EMBEDDING_DIMENSION`` as an int, or 0 when unset/invalid (validated elsewhere)."""
+    raw = (env_get("EMBEDDING_DIMENSION", "") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
 
 
 def _estimate_tokens(text: str) -> int:
@@ -59,23 +118,28 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         self,
         api_key: str = "",
         model_name: str = "text-embedding-3-small",
-        base_url: str = "https://api.openai.com/v1",
+        base_url: str = "",
         batch_size: int = 0,
         batch_delay: float = 0.0,
+        auth_header: str = "",
         **kwargs,
     ):
         # Skip device resolution - not needed for API model
         self._device = "api"
+        self._base_url = resolve_openai_base_url(base_url)
         self._api_key = api_key or env_get("OPENAI_API_KEY", "")
-        if not self._api_key:
+        if not self._api_key and requires_api_key(self._base_url):
+            key_name = "VOYAGE_API_KEY" if "voyageai" in _host_of(self._base_url) else "OPENAI_API_KEY"
             raise ValueError(
-                "OPENAI_API_KEY is required. Set it as an environment variable "
-                "or pass api_key to the constructor."
+                f"{key_name} is required for {_host_of(self._base_url)}. Set it as an "
+                "environment variable, pass api_key to the constructor, or point "
+                "OPENAI_BASE_URL at a self-hosted OpenAI-compatible server "
+                "(Ollama, vLLM, LM Studio) that needs no key."
             )
+        self._auth_header = auth_header or resolve_auth_header_style()
         self._model_name = model_name
-        self._base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=300.0)
-        self._dimension = MODEL_DIMENSIONS.get(model_name, 1536)
+        self._dimension = MODEL_DIMENSIONS.get(model_name) or _env_dimension() or 1536
 
         # Voyage has stricter rate limits (6M TPM) - use smaller batches with delay
         is_voyage = model_name.startswith("voyage-")
@@ -84,6 +148,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
 
         logger.info(
             f"OpenAI embedder initialized: model={model_name}, dim={self._dimension}, "
+            f"base_url={self._base_url}, auth={'none' if not self._api_key else self._auth_header}, "
             f"batch_size={self._batch_size}, batch_delay={self._batch_delay}s"
         )
 
@@ -118,12 +183,11 @@ class OpenAIEmbeddingModel(EmbeddingModel):
                         # Voyage models support input_type for retrieval optimization
                         if input_type and is_voyage:
                             payload["input_type"] = input_type
+                        headers = {"Content-Type": "application/json"}
+                        headers.update(build_auth_headers(self._api_key, self._auth_header))
                         response = self._client.post(
                             f"{self._base_url}/embeddings",
-                            headers={
-                                "Authorization": f"Bearer {self._api_key}",
-                                "Content-Type": "application/json",
-                            },
+                            headers=headers,
                             json=payload,
                         )
                         response.raise_for_status()
@@ -154,6 +218,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
             "embedding_dimension": self._dimension,
             "provider": "openai",
             "device": "api",
+            "base_url": self._base_url,
             "status": "loaded",
         }
 

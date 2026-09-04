@@ -294,6 +294,13 @@ def resolve_embedding_config(
         or provider_model_is_invalid
         or custom_remote_model_without_contract
     ):
+        if custom_remote_model_without_contract and effective_provider in _CUSTOM_REMOTE_MODEL_PROVIDERS:
+            raise ValueError(
+                "Unsupported provider/model configuration: "
+                f"provider={effective_provider!r}, model={effective_model_name!r} "
+                "is a custom remote model, so EMBEDDING_DIMENSION is required: "
+                "set it to the vector size the server returns for that model."
+            )
         raise ValueError(
             "Unsupported provider/model configuration: "
             f"provider={effective_provider!r}, model={effective_model_name!r}. "
@@ -387,6 +394,12 @@ def list_providers() -> list[str]:
 
 @register_provider("openai")
 def _factory_openai(model_name: str, cache_dir: str, device: str) -> Any:
+    """OpenAI or any OpenAI-compatible embeddings endpoint.
+
+    ``OPENAI_BASE_URL`` selects the server (Ollama, vLLM, LM Studio, Azure,
+    OpenRouter, gateways); ``OPENAI_API_KEY`` is required only for
+    api.openai.com. Custom models need ``EMBEDDING_DIMENSION``.
+    """
     from embeddings.openai_embedder import OpenAIEmbeddingModel
     model_name = model_name or env_get(
         "EMBEDDING_MODEL", "text-embedding-3-small"

@@ -182,6 +182,7 @@ The complete table is in [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md).
 | Variable | Default | Meaning |
 |---|---|---|
 | `EMBEDDING_PROVIDER` | Voyage when its key exists; otherwise local | `voyage`, `voyage-code-3`, `voyage-context`, `openai`, `jina`, or `local` |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | With `EMBEDDING_PROVIDER=openai`, any OpenAI-compatible embeddings server: Ollama, vLLM, LM Studio, Azure, OpenRouter. No key needed for self-hosted servers. |
 | `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; built-in models derive it automatically |
 | `RERANKER` | `auto` | `auto` (Sonnet when `ANTHROPIC_API_KEY` is set, else off), `sonnet`, `listwise`, `cross-encoder`, or `off` |
 | `CONTENT_MODE` | `code` | `code`, `docs`, or `all`; controls retrieval weights and boosts |

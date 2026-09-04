@@ -150,7 +150,7 @@ def test_voyage_embedder_missing_api_key():
     try:
         from embeddings.openai_embedder import OpenAIEmbeddingModel
 
-        with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        with pytest.raises(ValueError, match="VOYAGE_API_KEY"):
             OpenAIEmbeddingModel(api_key="", base_url="https://api.voyageai.com/v1")
     finally:
         if old_key is not None:

@@ -14,7 +14,7 @@ reranker mode, for example
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `EMBEDDING_PROVIDER` | `voyage` (if `VOYAGE_API_KEY` set), else `local` | Embedding backend: `voyage` (voyage-4-large), `voyage-code-3`, `voyage-context` (contextualized embeddings), `openai`, `jina` (local code model), `gemma` (local), or `local` (small sentence-transformers model). Cloud providers receive chunk text and queries. |
-| `EMBEDDING_MODEL` | per provider | Model for remote providers: `voyage-4-large`, `voyage-code-3`, `voyage-context-3`, `text-embedding-3-small`. |
+| `EMBEDDING_MODEL` | per provider | Model for remote providers: `voyage-4-large`, `voyage-code-3`, `voyage-context-3`, `text-embedding-3-small`, or any model your `OPENAI_BASE_URL` server offers (set `EMBEDDING_DIMENSION` for models not in the built-in table). |
 | `LOCAL_EMBEDDING_MODEL` | per provider | Model for local providers: `sentence-transformers/all-MiniLM-L6-v2` (`local`), `jinaai/jina-code-embeddings-0.5b` (`jina`), `google/embeddinggemma-300m` (`gemma`). Downloaded on first index and cached under `CODE_SEARCH_STORAGE`. |
 | `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; known built-in models derive this automatically. Stored project metadata reuses the value only when its provider and model both match. |
 | `JINA_TRUNCATE_DIM` | unset | Matryoshka truncation for Jina models (0.5b: 64, 128, 256, 512, 896). |
@@ -22,7 +22,9 @@ reranker mode, for example
 | `VOYAGE_INPUT_TYPE` | `off` | `on` sends Voyage `input_type=document`/`query` hints. Always on for `voyage-context`. Recorded in the index identity, so changing it requires a full reindex. |
 | `VOYAGE_BATCH_API` | `off` | `on` uses Voyage's asynchronous batch endpoint for full reindexes, which is cheaper but slower. |
 | `VOYAGE_BATCH_THRESHOLD` | `1000` | Minimum chunk count before the batch endpoint is used. |
-| `OPENAI_API_KEY` | unset | Required for `EMBEDDING_PROVIDER=openai`. Never auto-selects the provider. |
+| `OPENAI_API_KEY` | unset | Key for `EMBEDDING_PROVIDER=openai`. Required when `OPENAI_BASE_URL` is api.openai.com; optional for self-hosted servers. Never auto-selects the provider. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Endpoint root for the `openai` provider, including the version path. Point it at any OpenAI-compatible embeddings server: Ollama (`http://localhost:11434/v1`), vLLM, LM Studio, Azure OpenAI, OpenRouter, or a gateway in front of Gemini or Bedrock. Custom models need `EMBEDDING_DIMENSION`. See `docs/providers.md`. |
+| `OPENAI_AUTH_HEADER` | `bearer` | How the key is sent: `bearer` (`Authorization: Bearer`) or `api-key` (Azure OpenAI API keys). |
 | `ANTHROPIC_API_KEY` | unset | Enables LLM reranking and query rewriting. With `RERANKER=auto`, its presence selects Sonnet reranking. |
 
 ## Indexing
