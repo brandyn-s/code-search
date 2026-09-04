@@ -98,7 +98,7 @@ args = ["code-search-mcp"]
 ## First run
 
 The first call to `index_directory` downloads the local embedding model when
-no `VOYAGE_API_KEY` is set (a few hundred megabytes, cached under
+no `VOYAGE_API_KEY` is set (`all-MiniLM-L6-v2`, about 90 MB, cached under
 `CODE_SEARCH_STORAGE`, default `~/.claude_code_search`). Indexes are
 per-project and persist across sessions; restart the server after changing any
 environment variable, because settings are read once at startup.

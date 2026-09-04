@@ -1,25 +1,22 @@
-# Epoch-Manifest Design (Plan-2 E1)
+# Epoch-Manifest Design
 
-**Status**: Reference implementation shipped (this PR). Migrating production
-write paths to use it is Plan-2 E2 (separate PRs); reader path with
-downgrade tolerance is E3.
-
-**Source**: `~/Documents/knowledge-base/plans/2026-05-05-codesearch-recommendations.md` Phase E1.
+How code-search publishes an index generation atomically and how readers fall
+back to the last verified generation. Implemented in `search/epoch_manifest.py`;
+write paths in `search/indexer.py` and `mcp_server/code_search_server.py` commit
+through it, and `verify_index_integrity` reports its status.
 
 ## Why
 
-The chunk_ids.pkl truncation incident (PR #97-#103, 2026-05-04/05) was the
-visible symptom of a deeper class: code-search has no atomic-or-fail
-discipline across its index write paths. PR #98's load-before-modify, #99's
-count guard, and #103's cleanup tool are tactical guards.
+An early incident truncated `chunk_ids.pkl` while other artifacts kept their
+full length, leaving an index that loaded but returned wrong results. The root
+cause was that index writes had no atomic-or-fail discipline; per-file guards
+only patched individual symptoms.
 
 The structural primitive that closes the entire incident class is an
 epoch-manifest: a single source of truth for what constitutes a "committed"
 index state, with atomic-rename commit semantics and reader fallback to the
 prior epoch on checksum failure.
 
-The roundtable (2026-05-05) flagged this as the keystone — 3-of-3 LLMs
-converged on it as the highest-leverage structural fix.
 
 ## Manifest contents
 
@@ -136,7 +133,7 @@ The key property: **at no point can a reader see a partially-committed
 state**. Either the new epoch has fully replaced the old one, or the old
 one is still in place.
 
-## Read protocol (E3 — separate PR)
+## Read protocol
 
 ```
 READ_EPOCH():
@@ -194,22 +191,7 @@ process committed `current.json`.
 - **Not consensus / distributed**: single-machine local index. No leader
   election, no Paxos, no Raft.
 
-## Migration path (E2)
-
-E2 will wire production write paths into this primitive:
-
-1. `search/indexer.py::add_embeddings`: after current write completes,
-   compute manifest + commit.
-2. `mcp_server/code_search_server.py::index_directory`: same hook.
-3. `scripts/cleanup_index_orphans.py --apply-stats`: re-write stats.json
-   under manifest commit instead of direct write.
-4. Existing PR #98 `load-before-modify` pattern in `add_embeddings`
-   becomes redundant once manifest commit-last semantics are in place;
-   explicitly retire it with a note in the diff.
-
-E3 will then add the reader downgrade tolerance.
-
-## Test coverage in this PR
+## Test coverage
 
 - Clean write + read roundtrip
 - Write-crash mid-step-4 (partial candidate.json)
@@ -220,9 +202,7 @@ E3 will then add the reader downgrade tolerance.
 - Verify checksums detects corruption
 - prior.json preserved across promotions
 
-## Out of scope for E1
+## Out of scope
 
-- Migrating production write paths (E2)
-- Reader downgrade tolerance using prior.json (E3)
-- Manifest hash signing for tamper detection (deferred — single-user prototype)
-- Compression of historical manifests (deferred — current/prior is sufficient)
+- Manifest hash signing for tamper detection.
+- Compression of historical manifests; current/prior is sufficient.

@@ -1,16 +1,14 @@
-# Quantization Drift Monitoring (Plan-2 B2)
+# Quantization Drift Monitoring
 
-**Date**: 2026-05-05
-**Source**: `~/Documents/knowledge-base/plans/2026-05-05-codesearch-recommendations.md` Phase B2
 **Tool**: `scripts/monitor_quantization_drift.py`
 
 ## What is quantization drift?
 
 When a project is first indexed with the default `QUANTIZATION=int8`, FAISS's `ScalarQuantizer` trains its codebook on the **first batch of embeddings** and freezes it (see `search/indexer.py:347-350`). The codebook learns the value-range of those initial vectors and linearly maps each future vector into 8 bits using that range.
 
-If the project's character SHIFTS over time — language mix changes (e.g., a Rust-heavy repo gradually adopts Python services), embedding model drift (per Plan-2 B3, mostly handled by the pipeline fingerprint), or a documentation fork that drifts from a code repo — new embeddings may sit outside the codebook's learned range. Quantization clamps them, producing degraded similarity scores. The failure is **silent**: searches still return results, but rankings slowly degrade.
+If the project's character SHIFTS over time — language mix changes (e.g., a Rust-heavy repo gradually adopts Python services), embedding model drift, or a documentation fork that drifts from a code repo — new embeddings may sit outside the codebook's learned range. Quantization clamps them, producing degraded similarity scores. The failure is **silent**: searches still return results, but rankings slowly degrade.
 
-This is the silent-degradation flagged in roundtable Disagreement that B2 closes.
+This is a silent-degradation mode: search keeps working, results slowly get worse.
 
 ## How the monitor works
 
@@ -71,17 +69,17 @@ Drift between two baselines (Δ on `avg_top_1_cosine`):
 
 When drift is flagged:
 
-1. **Check pipeline fingerprint** — did `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` change? If yes, the existing `pipeline_version` mechanism (Plan-2 B3) should have already forced a full reindex; if not, file a bug.
+1. **Check pipeline fingerprint** — did `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` change? If yes, the existing `pipeline_version` mechanism  should have already forced a full reindex; if not, file a bug.
 2. **Check ntotal trajectory** — did the project grow significantly? `ntotal_baseline` vs `ntotal_current` in the report. Large growth + small drift → expected; small growth + large drift → codebook no longer fits.
 3. **If drift persists after full reindex** — the project's vector distribution may be inherently bimodal (e.g., a monorepo with very different sub-corpora). Set `QUANTIZATION=float32` for that project to bypass quantization entirely. Cost: 4x larger index file. Acceptable for projects under ~10K chunks.
 
-## Future work (not in this PR)
+## Future work
 
 - **Continuous tracking**: integrate the drift check into a scheduled task (cron, GitHub Actions, or a periodic MCP tool call) so drift accumulates a time-series instead of pairwise comparisons.
 - **Per-language drift breakdown**: when the index grows across many languages, drift may concentrate in one language sub-corpus. Stratifying by language would localize the cause faster.
-- **Auto-retrain when drift exceeds a threshold**: today the operator runs `index_directory --force-full` manually after seeing drift. A future enhancement could wire `verify_index_integrity` (Plan-2 A3) to surface drift status, and have `index_directory` opt into a quantizer retrain on drift.
+- **Auto-retrain when drift exceeds a threshold**: today the operator runs `index_directory --force-full` manually after seeing drift. A future enhancement could wire `verify_index_integrity` to surface drift status, and have `index_directory` opt into a quantizer retrain on drift.
 
 ## Out of scope
 
 - Replacing ScalarQuantizer with a learned-codebook variant that retrains continuously (e.g., `IndexIVFPQ`). Would require larger architectural changes; revisit if drift turns out to be a systemic issue rather than per-project.
-- Implementing the monitor as an MCP tool. Today it's a script the operator runs. Plan-2 A3 already exposes `verify_index_integrity` for in-LLM consumption; drift could be added there as a separate check if useful.
+- Implementing the monitor as an MCP tool. Today it's a script the operator runs. The MCP tool `verify_index_integrity` for in-LLM consumption; drift could be added there as a separate check if useful.
