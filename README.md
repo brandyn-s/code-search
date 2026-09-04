@@ -184,7 +184,7 @@ The complete table is in [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md).
 | `EMBEDDING_PROVIDER` | Voyage when its key exists; otherwise local | `voyage`, `voyage-code-3`, `voyage-context`, `openai`, `jina`, or `local` |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | With `EMBEDDING_PROVIDER=openai`, any OpenAI-compatible embeddings server: Ollama, vLLM, LM Studio, Azure, OpenRouter. No key needed for self-hosted servers. |
 | `EMBEDDING_DIMENSION` | `unset` | Required positive output-dimension contract for custom remote embedding models; built-in models derive it automatically |
-| `RERANKER` | `auto` | `auto` (Sonnet when `ANTHROPIC_API_KEY` is set, else off), `sonnet`, `listwise`, `cross-encoder`, or `off` |
+| `RERANKER` | `auto` | `auto` (Sonnet when `ANTHROPIC_API_KEY` is set, else off), `sonnet`, `openai` (any OpenAI-compatible chat model via `RERANKER_LLM_*`), `listwise`, `cross-encoder`, or `off` |
 | `CONTENT_MODE` | `code` | `code`, `docs`, or `all`; controls retrieval weights and boosts |
 | `CONTEXTUAL_HEADERS` | `on` | Add file/type/name context before embedding |
 | `QUERY_EXPANSION` | `on` | Expand BM25 terms with the selected synonym profile |
@@ -198,6 +198,13 @@ The complete table is in [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md).
 | `CODE_SEARCH_QUERY_RETENTION_DAYS` | `30` | Query-history retention window in days |
 
 These settings are process-static: they are read once when the MCP server starts. Restart the MCP server after changing them.
+
+**Bring your own model.** Embeddings: `EMBEDDING_PROVIDER=openai` with
+`OPENAI_BASE_URL` reaches any OpenAI-compatible embeddings server. Reranking:
+`RERANKER=openai` with `RERANKER_LLM_BASE_URL` and `RERANKER_LLM_MODEL` uses any
+OpenAI-compatible chat model; the Anthropic engines take `ANTHROPIC_MODEL`. See
+[docs/providers.md](docs/providers.md) for Ollama, vLLM, LM Studio, Azure,
+OpenRouter, Gemini, and Bedrock settings.
 
 Cloud providers receive query text and chunk text; use the local provider and
 `RERANKER=off` when that boundary is unacceptable.

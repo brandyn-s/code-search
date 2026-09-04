@@ -96,6 +96,10 @@ def _log_startup_mode() -> None:
         model = getattr(emb, "model", None) or getattr(emb, "model_name", None) or ""
         embeddings = f"{emb.provider}({model})" if model else str(emb.provider)
         reranker = cfg.reranker_mode
+        if reranker == "openai":
+            from search.openai_reranker import resolve_model
+
+            reranker = f"openai({resolve_model() or 'RERANKER_LLM_MODEL unset'})"
         hint = ""
         if reranker == "off" and not env_get("ANTHROPIC_API_KEY") and not env_get("RERANKER"):
             hint = " (set ANTHROPIC_API_KEY to enable LLM reranking)"

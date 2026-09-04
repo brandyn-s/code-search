@@ -39,6 +39,11 @@ First release from the public primary repository `brandyn-s/code-search`.
   derived from internal codebases.
 
 ### Added
+- `RERANKER=openai`: pointwise LLM reranking through any OpenAI-compatible
+  chat endpoint (`RERANKER_LLM_BASE_URL`, `RERANKER_LLM_MODEL`,
+  `RERANKER_LLM_API_KEY`, `RERANKER_LLM_TIMEOUT_S`), sharing the judge prompt
+  and score parser with the Anthropic engine (`search/llm_judge.py`). The
+  pointwise Anthropic model now honours `ANTHROPIC_MODEL`.
 - `OPENAI_BASE_URL` points the `openai` embedding provider at any
   OpenAI-compatible server (Ollama, vLLM, LM Studio, Azure OpenAI, OpenRouter,
   gateways). A key is required only for api.openai.com; `OPENAI_AUTH_HEADER=api-key`

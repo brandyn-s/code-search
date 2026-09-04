@@ -52,8 +52,8 @@ from search.env import env_get
 
 LOG = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-6"
-MAX_CONTENT_CHARS = 4000
+DEFAULT_MODEL = "claude-sonnet-4-6"
+MODEL = DEFAULT_MODEL  # historical name; the live value is _resolve_model()
 DEFAULT_TIMEOUT = 8.0
 DEFAULT_RERANK_K = 15  # rerank top-15, return top-k of those (D4b validated)
 FAILURE_TOLERANCE = 0.3  # if >30% of calls fail, abort and use input order
@@ -221,42 +221,24 @@ _ERR_UNPARSEABLE = "_err_unparseable"
 _ERR_EMPTY = "_err_empty"
 
 # Base prompt with R9 nix-aware clause always-on (R9 SHIPped 2026-05-22 PR #193).
-# The {extra_clauses} slot is filled per-candidate at scoring time when
-# SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES injects path-prefix-matched clauses.
-# When the env var is unset (default), {extra_clauses} resolves to "" and the
-# prompt is byte-identical to the pre-Phase-2 R9-only baseline.
-JUDGE_PROMPT_TEMPLATE = """You are evaluating whether a code chunk is relevant to a developer search query.
-
-Query: {query}
-
-Code chunk (file: {file_path}):
-```
-{content}
-```
-
-Rate the relevance on a scale of 0-10:
-- 10 = This chunk IS exactly what the user is searching for
-- 7-9 = Highly relevant; clearly matches the user's intent
-- 4-6 = Partially relevant; related but not the primary target
-- 1-3 = Tangentially related
-- 0 = Not relevant at all
-
-Domain notes:
-- For Nix/NixOS/configuration queries, treat `option` and `binding` chunks
-  as primary definitions. If the query asks about `mkOption`,
-  `services.<name>`, enable / configuration / module setup, systemd
-  service configuration, hardware configuration, or NixOS modules, prefer
-  the Nix module or option declaration over daemon implementation code,
-  tests, call sites, or docs. For service setup queries,
-  `nix/modules/<service>.nix` is usually the implementation of the
-  user-visible configuration surface.{extra_clauses}
-
-Respond with ONLY valid JSON:
-{{"score": <int 0-10>, "reasoning": "<one sentence>"}}"""
-
-# Backward-compat alias: JUDGE_PROMPT == JUDGE_PROMPT_TEMPLATE with extra_clauses="".
-# Tests and external readers that imported JUDGE_PROMPT directly keep working.
-JUDGE_PROMPT = JUDGE_PROMPT_TEMPLATE.replace("{extra_clauses}", "")
+# The judge prompt and score parser are shared with the OpenAI-compatible
+# engine (search.openai_reranker) via search.llm_judge; the names below are
+# re-exported so existing imports keep working.
+from search.llm_judge import (  # noqa: E402,F401  (re-exported for callers)
+    JUDGE_PROMPT,
+    JUDGE_PROMPT_TEMPLATE,
+    MAX_CONTENT_CHARS,
+    build_judge_prompt,
+    parse_score,
+)
+__all__ = [
+    "JUDGE_PROMPT",
+    "JUDGE_PROMPT_TEMPLATE",
+    "MAX_CONTENT_CHARS",
+    "build_judge_prompt",
+    "parse_score",
+    "rerank_with_sonnet",
+]
 
 
 def _parse_clause_overrides(raw: str | None) -> dict[str, str]:
@@ -375,6 +357,11 @@ def _get_in_flight_lock() -> asyncio.Lock:
     return _IN_FLIGHT_LOCK
 
 
+def _resolve_model() -> str:
+    """Anthropic model for the pointwise judge (``ANTHROPIC_MODEL``)."""
+    return (env_get("ANTHROPIC_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+
+
 def _resolve_per_call_timeout() -> float:
     """Resolve per-call SDK timeout from env, falling back to the default.
 
@@ -448,13 +435,7 @@ async def _score_one(client: Any, query: str, file_path: str, content: str,
     concurrency. Used to diagnose latency regressions — see PR Plan D1-Pass-2.
     """
     global _IN_FLIGHT_COUNT, _ATTEMPT_SEQ
-    truncated = content[:MAX_CONTENT_CHARS] if len(content) > MAX_CONTENT_CHARS else content
-    prompt = JUDGE_PROMPT_TEMPLATE.format(
-        query=query,
-        file_path=file_path or "(unknown)",
-        content=truncated or "(empty content)",
-        extra_clauses=extra_clauses,
-    )
+    prompt = build_judge_prompt(query, file_path, content, extra_clauses)
 
     # Snapshot in-flight + attempt-seq under lock so the diag log line is
     # consistent. Increment counter, capture seq, then make the SDK call.
@@ -470,10 +451,11 @@ async def _score_one(client: Any, query: str, file_path: str, content: str,
     resp = None
     exc: BaseException | None = None
     per_call_timeout = _resolve_per_call_timeout()
+    model = _resolve_model()
     try:
         try:
             resp = await client.messages.create(
-                model=MODEL,
+                model=model,
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],
                 timeout=per_call_timeout,
@@ -486,7 +468,7 @@ async def _score_one(client: Any, query: str, file_path: str, content: str,
         async with lock:
             _IN_FLIGHT_COUNT -= 1
         LOG.info(
-            f"[ANTHROPIC_DIAG] model={MODEL} total_ms={t_total_ms} "
+            f"[ANTHROPIC_DIAG] model={model} total_ms={t_total_ms} "
             f"in_flight={in_flight} attempt={attempt_seq} outcome={outcome}"
         )
 
@@ -505,12 +487,10 @@ async def _score_one(client: Any, query: str, file_path: str, content: str,
                 break
         if not text:
             return _ERR_EMPTY
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(line for line in lines if not line.startswith("```"))
-        obj = json.loads(text)
-        score = int(obj.get("score", 0))
-        score = max(0, min(10, score))  # clamp to [0, 10]
+        parsed = parse_score(text)
+        if parsed is None:
+            return _ERR_UNPARSEABLE
+        score = parsed
         # Phase B'''(a) per-candidate score logging (opt-in, default off):
         # SONNET_RERANKER_LOG_PER_CANDIDATE_SCORE=1 emits one log line per
         # successful score call. Used to diagnose whether Sonnet's score

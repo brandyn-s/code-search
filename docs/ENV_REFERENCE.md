@@ -67,15 +67,19 @@ reranker mode, for example
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `RERANKER` | `auto` | `auto` resolves to `sonnet` when `ANTHROPIC_API_KEY` is set and `off` otherwise. `sonnet` scores the top hybrid candidates with one Anthropic call each. `listwise` ranks them in a single call. `cross-encoder` uses a local MiniLM cross-encoder. `off` returns fused order. Any reranker failure keeps the hybrid order and records the reason in `_metadata.reranker`. |
+| `RERANKER` | `auto` | `auto` resolves to `sonnet` when `ANTHROPIC_API_KEY` is set and `off` otherwise (it never selects `openai`). `sonnet` scores the top hybrid candidates with one Anthropic call each. `openai` does the same through any OpenAI-compatible chat endpoint (`RERANKER_LLM_*`). `listwise` ranks them in a single Anthropic call. `cross-encoder` uses a local MiniLM cross-encoder. `off` returns fused order. Any reranker failure keeps the hybrid order and records the reason in `_metadata.reranker`. |
 | `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Model for `RERANKER=cross-encoder`. Requires the `[local]` extra. |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Model for the listwise reranker. The pointwise reranker uses `claude-sonnet-4-6`. |
-| `SONNET_RERANKER_TIMEOUT` | `8.0` | Overall deadline in seconds for the pointwise rerank of one query. |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Anthropic model for both the pointwise (`sonnet`) and `listwise` rerankers. |
+| `RERANKER_LLM_MODEL` | unset | Model name for `RERANKER=openai` (required; the server warns at startup and keeps hybrid order when unset). |
+| `RERANKER_LLM_BASE_URL` | `OPENAI_BASE_URL`, else `https://api.openai.com/v1` | Chat-completions endpoint root for `RERANKER=openai`, including the version path (Ollama `http://localhost:11434/v1`, vLLM, LM Studio, Azure, OpenRouter, gateways). |
+| `RERANKER_LLM_API_KEY` | `OPENAI_API_KEY` | Key for the reranker endpoint; required only for api.openai.com. Sent per `OPENAI_AUTH_HEADER`. |
+| `RERANKER_LLM_TIMEOUT_S` | `12.0` | Per-request timeout for `RERANKER=openai`, capped by `SONNET_RERANKER_TIMEOUT`. |
+| `SONNET_RERANKER_TIMEOUT` | `8.0` | Overall deadline in seconds for the pointwise rerank of one query (`sonnet` and `openai`). |
 | `SONNET_LISTWISE_TIMEOUT` | `12.0` | Deadline in seconds for the single listwise call. |
 | `ANTHROPIC_PER_CALL_TIMEOUT_S` | `12.0` | Per-request timeout inside the overall deadline. |
 | `ANTHROPIC_MAX_RETRIES` | `1` | Anthropic SDK retry count for reranker calls. `0` disables retries. |
 | `ANTHROPIC_CONCURRENCY_LIMIT` | unset | Caps concurrent pointwise scoring calls. Unset scores all candidates in parallel. |
-| `SONNET_RERANKER_POOL_SIZE` | `0` | Score only the top N hybrid candidates; the rest keep their order. `0` scores all. |
+| `SONNET_RERANKER_POOL_SIZE` | `0` | Score only the top N hybrid candidates; the rest keep their order. `0` scores all. Applies to `sonnet` and `openai`. |
 | `SONNET_RERANKER_SKIP_THRESHOLD` | unset | Skip reranking when the top hybrid `similarity_score` is at least this value; reason `skipped_high_confidence`. |
 | `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD` | `6` | If no candidate scores at least this (0-10 scale), the reranker is treated as uncertain and hybrid order is kept; reason `hybrid_prior_fallback`. `0` disables. |
 | `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES` | unset | JSON object mapping path prefix to a higher threshold, e.g. `{"billing/": 11}`. The strictest matching override applies; overrides can only tighten. |
@@ -100,7 +104,8 @@ reranker mode, for example
 |--------|---------|---------|
 | `ok` | true | Rerank applied |
 | `empty_input` | false | No candidates passed to the reranker |
-| `api_key_missing` | false | `ANTHROPIC_API_KEY` not set |
+| `api_key_missing` | false | `ANTHROPIC_API_KEY` not set (`sonnet`, `listwise`) or no key for an api.openai.com reranker endpoint (`openai`) |
+| `model_not_configured` | false | `RERANKER=openai` without `RERANKER_LLM_MODEL` |
 | `package_not_installed` | false | `anthropic` SDK not importable |
 | `timeout` | false | Deadline exceeded |
 | `rate_limit` | false | Rate-limit responses dominated |

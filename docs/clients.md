@@ -115,6 +115,21 @@ claude mcp add code-search --scope user \
   -- uvx code-search-mcp
 ```
 
+To rerank with a local chat model as well:
+
+```bash
+ollama pull qwen2.5-coder:7b
+claude mcp add code-search --scope user \
+  -e EMBEDDING_PROVIDER=openai -e OPENAI_BASE_URL=http://localhost:11434/v1 \
+  -e EMBEDDING_MODEL=nomic-embed-text -e EMBEDDING_DIMENSION=768 \
+  -e RERANKER=openai -e RERANKER_LLM_MODEL=qwen2.5-coder:7b \
+  -- uvx code-search-mcp
+```
+
+`RERANKER_LLM_BASE_URL` defaults to `OPENAI_BASE_URL`, so one endpoint serves
+both. Small local models rerank slowly; raise `SONNET_RERANKER_TIMEOUT` or set
+`SONNET_RERANKER_POOL_SIZE=5` if searches time out.
+
 vLLM and LM Studio use the same four variables with their own port and model
 name. Hosted OpenAI-compatible endpoints (Azure OpenAI, OpenRouter, Gemini's
 OpenAI surface, Bedrock gateways) are listed in [providers.md](providers.md).

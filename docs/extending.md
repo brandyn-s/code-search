@@ -56,7 +56,11 @@ Providers are factories registered by name; resolution happens in
 ## 3. A reranker
 
 Rerankers are functions registered in `search/reranker_registry.py`; the
-pipeline looks them up by the `RERANKER` value.
+pipeline looks them up by the `RERANKER` value. Use `search/openai_reranker.py`
+as the template for a new LLM engine: it reuses the shared judge prompt and
+score parser in `search/llm_judge.py`, so a new transport needs only the HTTP
+call and error classification. `tests/unit/test_openai_reranker.py` shows how
+to fake the endpoint.
 
 1. Add a function with the shared signature next to the existing ones:
 

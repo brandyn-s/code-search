@@ -596,6 +596,18 @@ class CodeSearchServer:
             if mode in ("off", "cross-encoder"):
                 return
             problems = []
+            if mode == "openai":
+                from search.openai_reranker import preflight_problems
+
+                problems = preflight_problems()
+                if problems:
+                    logger.warning(
+                        "RERANKER=openai is configured but %s — every search will "
+                        "silently fall back to hybrid order. Fix the cause or set "
+                        "RERANKER=off to make the degradation explicit.",
+                        " and ".join(problems),
+                    )
+                return
             try:
                 import anthropic  # noqa: F401
             except ImportError:

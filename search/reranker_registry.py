@@ -77,6 +77,44 @@ def _full_content(metadata_lookup: dict, result: SearchResult) -> str:
     )
 
 
+def _skip_if_confident(searcher: Any, config: Any, candidates: List[SearchResult], k: int) -> bool:
+    """Honour SONNET_RERANKER_SKIP_THRESHOLD for any LLM engine; True when skipped."""
+    skip_threshold = config.sonnet_skip_threshold
+    if skip_threshold is None:
+        return False
+    top_1_score = candidates[0].similarity_score
+    if top_1_score < skip_threshold:
+        return False
+    searcher._logger.info(
+        "[RERANK_REASON] skipped_high_confidence "
+        "top_1_score=%.4f threshold=%.4f "
+        "n_candidates=%d; preserved hybrid order",
+        top_1_score,
+        skip_threshold,
+        len(candidates),
+    )
+    searcher.last_reranker_metadata = {
+        "applied": False,
+        "reason": "skipped_high_confidence",
+        "latency_ms": 0,
+        "top_1_score": top_1_score,
+        "skip_threshold": skip_threshold,
+    }
+    return True
+
+
+def _pointwise_input(candidates: List[SearchResult], metadata_lookup: dict, n: int) -> List[dict]:
+    return [
+        {
+            "chunk_id": result.chunk_id,
+            "file_path": result.relative_path,
+            "full_content": _full_content(metadata_lookup, result),
+            "_orig": result,
+        }
+        for result in candidates[:n]
+    ]
+
+
 @register_reranker("sonnet")
 def rerank_sonnet(
     searcher: Any,
@@ -92,40 +130,46 @@ def rerank_sonnet(
         _not_invoked(searcher, "not_invoked_insufficient_candidates")
         return candidates[:k]
 
-    skip_threshold = config.sonnet_skip_threshold
-    if skip_threshold is not None:
-        top_1_score = candidates[0].similarity_score
-        if top_1_score >= skip_threshold:
-            searcher._logger.info(
-                "[RERANK_REASON] skipped_high_confidence "
-                "top_1_score=%.4f threshold=%.4f "
-                "n_candidates=%d; preserved hybrid order",
-                top_1_score,
-                skip_threshold,
-                len(candidates),
-            )
-            searcher.last_reranker_metadata = {
-                "applied": False,
-                "reason": "skipped_high_confidence",
-                "latency_ms": 0,
-                "top_1_score": top_1_score,
-                "skip_threshold": skip_threshold,
-            }
-            return candidates[:k]
+    if _skip_if_confident(searcher, config, candidates, k):
+        return candidates[:k]
 
     from search.sonnet_reranker import rerank_with_sonnet
 
     n_to_rerank = min(LLM_RERANK_POOL, len(candidates))
-    rerank_input = [
-        {
-            "chunk_id": result.chunk_id,
-            "file_path": result.relative_path,
-            "full_content": _full_content(metadata_lookup, result),
-            "_orig": result,
-        }
-        for result in candidates[:n_to_rerank]
-    ]
+    rerank_input = _pointwise_input(candidates, metadata_lookup, n_to_rerank)
     reranked, rerank_meta = rerank_with_sonnet(
+        query,
+        rerank_input,
+        top_k=k,
+        return_metadata=True,
+    )
+    searcher.last_reranker_metadata = rerank_meta
+    new_top = [item["_orig"] for item in reranked]
+    return (new_top + candidates[n_to_rerank:])[:k]
+
+
+@register_reranker("openai")
+def rerank_openai(
+    searcher: Any,
+    query: str,
+    *,
+    k: int,
+    config: Any,
+    candidates: List[SearchResult],
+    metadata_lookup: dict,
+) -> List[SearchResult]:
+    """Pointwise rerank through any OpenAI-compatible chat model (bring your own LLM)."""
+    if len(candidates) <= k:
+        _not_invoked(searcher, "not_invoked_insufficient_candidates")
+        return candidates[:k]
+    if _skip_if_confident(searcher, config, candidates, k):
+        return candidates[:k]
+
+    from search.openai_reranker import rerank_with_openai
+
+    n_to_rerank = min(LLM_RERANK_POOL, len(candidates))
+    rerank_input = _pointwise_input(candidates, metadata_lookup, n_to_rerank)
+    reranked, rerank_meta = rerank_with_openai(
         query,
         rerank_input,
         top_k=k,
