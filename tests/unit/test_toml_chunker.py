@@ -7,7 +7,7 @@ def test_toml_chunker_splits_on_sections():
     """TOML chunker should produce one chunk per [section]."""
     chunker = TomlChunker()
     source = """[package]
-name = "internal-svc-12"
+name = "motorctl"
 version = "0.1.0"
 edition = "2021"
 
@@ -53,7 +53,7 @@ def test_toml_chunker_overlap():
     """Adjacent TOML chunks should overlap by the specified character count."""
     chunker = TomlChunker(overlap_chars=50)
     source = """[package]
-name = "internal-svc-12"
+name = "motorctl"
 version = "0.1.0"
 edition = "2021"
 

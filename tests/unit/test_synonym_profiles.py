@@ -79,7 +79,7 @@ def test_generic_profile_selected_explicitly(monkeypatch):
         "profiles", "generic-v1.json"
     ).is_file()
     assert "navigation" not in profile.synonyms
-    assert "internal-svc-19" not in profile.synonyms["network"]
+    assert "vlan" in profile.synonyms["network"]
     assert "oauth" in expand_code_query("auth").split()
     assert "nixpkgs" in profile.synonyms["nix"]
     assert expand_code_query("navigation") == "navigation"

@@ -72,10 +72,10 @@ def test_embedding_content_header_nix_binding():
     embedder = CodeEmbedder()
 
     chunk = MagicMock()
-    chunk.relative_path = "nix/modules/internal-svc-19.nix"
+    chunk.relative_path = "nix/modules/lan-config.nix"
     chunk.chunk_type = "binding"
     chunk.name = "nft_pre_dport_map"
-    chunk.parent_name = "options.redacted.internal-svc-19"
+    chunk.parent_name = "options.services.lan-config"
     chunk.docstring = None
     chunk.content = (
         "nft_pre_dport_map = mkOption {\n  type = types.listOf types.str;\n};"
@@ -85,7 +85,7 @@ def test_embedding_content_header_nix_binding():
     content = embedder.create_embedding_content(chunk)
 
     first_line = content.split("\n")[0]
-    assert "internal-svc-19.nix" in first_line
+    assert "lan-config.nix" in first_line
     assert "nft_pre_dport_map" in first_line
 
 
