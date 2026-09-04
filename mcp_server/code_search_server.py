@@ -32,6 +32,8 @@ from search.index_identity import (
     validate_index_identity_dict,
 )
 from search.indexer import CodeIndexManager
+from search.index_jobs import BackgroundReindexGuard, IndexingJobState
+from search import identity_checks
 from search.logging_privacy import (
     format_query_exception_for_log,
     format_query_for_log,
@@ -401,32 +403,12 @@ class CodeSearchServer:
         # selects the provider-aware index but subsequent search_code calls
         # fall back to the legacy (path-only) hash and return empty results.
         self._current_provider: Optional[str] = None
-        self._indexing_job = (
-            None  # {job_id, status, phase, current, total, errors, result}
-        )
+        # Foreground index_directory job and the search-time background
+        # reindex guard live in search.index_jobs; the underscore attributes
+        # below are compatibility properties over those objects.
+        self._jobs = IndexingJobState()
+        self._bg = BackgroundReindexGuard()
         self._indexing_thread = None
-        # PR Plan-2 F2 (2026-05-05): background reindex thread state.
-        # When CODE_SEARCH_NONBLOCKING_SEARCH=1, search_code dispatches
-        # auto_reindex_if_needed to a daemon thread + returns last-good-index
-        # results immediately with _metadata.freshness="stale_reindex_in_progress".
-        # Concurrent searches use the OLD _searcher reference (held in
-        # local var of in-flight calls); after reindex completes, _searcher
-        # is set to None so the next call rebuilds against the fresh index.
-        #
-        # The lock guards the check-and-set of `_background_reindex_active`.
-        # Without it, two concurrent search_code calls can both observe the
-        # flag as False, both enter the dispatch path, and both start a
-        # reindex thread (TOCTOU). `_background_reindex_started_at` carries
-        # a monotonic start timestamp so a stuck reindex (hung Merkle walk,
-        # API stall) can be detected and the flag forcibly released — a
-        # crashed thread between line 596's `finally` and process restart
-        # is the failure shape this guards against.
-        import threading as _threading
-        self._indexing_job_lock = _threading.RLock()
-        self._background_reindex_lock = _threading.Lock()
-        self._background_reindex_active = False
-        self._background_reindex_started_at: Optional[float] = None
-        self._background_reindex_thread: Optional[Any] = None
 
         # Consent-aware query history. Metadata-only is the safe default;
         # plaintext requires CODE_SEARCH_QUERY_HISTORY=full.
@@ -442,6 +424,87 @@ class CodeSearchServer:
         # inspected). Never fails startup.
         self._warn_if_reranker_degraded()
 
+    # -- job/background-reindex state (compatibility surface) ---------------
+
+    def _job_state(self) -> IndexingJobState:
+        state = self.__dict__.get("_jobs")
+        if state is None:
+            # Some tests bypass __init__; production instances always have it.
+            state = IndexingJobState()
+            self.__dict__["_jobs"] = state
+        return state
+
+    def _bg_guard(self) -> BackgroundReindexGuard:
+        guard = self.__dict__.get("_bg")
+        if guard is None:
+            guard = BackgroundReindexGuard()
+            self.__dict__["_bg"] = guard
+        return guard
+
+    @property
+    def _indexing_job(self) -> Optional[Dict[str, Any]]:
+        return self._job_state().job
+
+    @_indexing_job.setter
+    def _indexing_job(self, value: Optional[Dict[str, Any]]) -> None:
+        self._job_state().job = value
+
+    @_indexing_job.deleter
+    def _indexing_job(self) -> None:
+        self._job_state().job = None
+
+    @property
+    def _indexing_job_lock(self) -> Any:
+        return self._job_state().lock
+
+    @_indexing_job_lock.setter
+    def _indexing_job_lock(self, value: Any) -> None:
+        self._job_state().lock = value
+
+    @property
+    def _background_reindex_active(self) -> bool:
+        return self._bg_guard().active
+
+    @_background_reindex_active.setter
+    def _background_reindex_active(self, value: bool) -> None:
+        self._bg_guard().active = bool(value)
+
+    @_background_reindex_active.deleter
+    def _background_reindex_active(self) -> None:
+        self._bg_guard().active = False
+
+    @property
+    def _background_reindex_started_at(self) -> Optional[float]:
+        return self._bg_guard().started_at
+
+    @_background_reindex_started_at.setter
+    def _background_reindex_started_at(self, value: Optional[float]) -> None:
+        self._bg_guard().started_at = value
+
+    @_background_reindex_started_at.deleter
+    def _background_reindex_started_at(self) -> None:
+        self._bg_guard().started_at = None
+
+    @property
+    def _background_reindex_thread(self) -> Optional[Any]:
+        return self._bg_guard().thread
+
+    @_background_reindex_thread.setter
+    def _background_reindex_thread(self, value: Optional[Any]) -> None:
+        self._bg_guard().thread = value
+
+    @_background_reindex_thread.deleter
+    def _background_reindex_thread(self) -> None:
+        self._bg_guard().thread = None
+
+    @property
+    def _background_reindex_lock(self) -> Any:
+        return self._bg_guard().lock
+
+    @_background_reindex_lock.setter
+    def _background_reindex_lock(self, value: Any) -> None:
+        self._bg_guard().lock = value
+
     def _capture_index_identity(self, project_path: Path) -> IndexIdentity:
         """Seam for deterministic start/end identity capture tests."""
         return capture_index_identity(project_path)
@@ -452,44 +515,16 @@ class CodeSearchServer:
         published: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Replace persisted identity state without retaining stale fields."""
-        try:
-            _update_project_info(
-                info_file,
-                published,
-                remove_fields=(
-                    "index_identity",
-                    "index_identity_error",
-                    "index_identity_status",
-                ),
-            )
-        except (OSError, ValueError) as exc:
-            return {
-                "index_identity_status": "error",
-                "index_identity_error": (
-                    f"Could not persist index identity: {exc}"
-                ),
-            }
-        return published
+        return identity_checks.persist_index_identity_state(
+            info_file, published, _update_project_info,
+        )
 
     def _read_index_identity_state(
         self,
         info_file: Path,
     ) -> Dict[str, Any]:
         """Read only the replaceable identity fields from project metadata."""
-        try:
-            with open(info_file, encoding="utf-8") as handle:
-                project_info = json.load(handle)
-        except (OSError, ValueError):
-            return {}
-        return {
-            key: project_info[key]
-            for key in (
-                "index_identity_status",
-                "index_identity",
-                "index_identity_error",
-            )
-            if key in project_info
-        }
+        return identity_checks.read_index_identity_state(info_file)
 
     def _completed_index_metadata(
         self,
@@ -497,18 +532,9 @@ class CodeSearchServer:
         configuration: EffectiveEmbeddingConfig,
     ) -> Dict[str, Any]:
         """Build provenance to publish with a coherent completed identity."""
-        profile_metadata = _active_synonym_profile_metadata()
-        return {
-            "pipeline_version": pipeline_version,
-            "synonym_profile": profile_metadata,
-            "embedding_provider": configuration.provider,
-            "embedding_model": configuration.model_name,
-            "embedding_dimension": configuration.output_dimension,
-            "embedding_input_type_enabled": (
-                configuration.input_type_enabled
-            ),
-            "content_mode": configuration.content_mode,
-        }
+        return identity_checks.completed_index_metadata(
+            pipeline_version, configuration, _active_synonym_profile_metadata(),
+        )
 
     def _finalize_index_identity(
         self,
@@ -519,38 +545,14 @@ class CodeSearchServer:
         ready_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Atomically publish identity and metadata for a coherent index."""
-        try:
-            end_identity = self._capture_index_identity(project_path)
-            mismatch_fields = identity_mismatch_fields(
-                start_identity,
-                end_identity,
-            )
-            if mismatch_fields:
-                change_details = describe_identity_mismatches(
-                    start_identity,
-                    end_identity,
-                )
-                published: Dict[str, Any] = {
-                    "index_identity_status": "source_changed_during_index",
-                    "index_identity_error": (
-                        "Source changed during indexing ("
-                        f"{change_details}); rerun "
-                        "index_directory against a stable checkout."
-                    ),
-                }
-            else:
-                published = {
-                    **(ready_metadata or {}),
-                    "index_identity_status": "ready",
-                    "index_identity": end_identity.to_dict(),
-                }
-        except IdentityCaptureError as exc:
-            published = {
-                "index_identity_status": "error",
-                "index_identity_error": str(exc),
-            }
-
-        return self._persist_index_identity_state(info_file, published)
+        return identity_checks.finalize_index_identity(
+            capture=self._capture_index_identity,
+            project_path=project_path,
+            info_file=info_file,
+            start_identity=start_identity,
+            ready_metadata=ready_metadata,
+            update_project_info=_update_project_info,
+        )
 
     def _auto_reindex_with_identity(
         self,
@@ -567,101 +569,16 @@ class CodeSearchServer:
             str(source_path),
             provider=getattr(self, "_current_provider", None),
         )
-        info_file = project_dir / "project_info.json"
-        previous_state = self._read_index_identity_state(info_file)
-
-        start_identity: Optional[IndexIdentity] = None
-        start_error: Optional[str] = None
-        try:
-            start_identity = self._capture_index_identity(source_path)
-        except IdentityCaptureError as exc:
-            start_error = str(exc)
-
-        if publish_pending:
-            pending: Dict[str, Any] = {
-                "index_identity_status": "pending",
-            }
-            if start_error:
-                pending["index_identity_error"] = (
-                    f"identity_capture_start_failed: {start_error}"
-                )
-            self._persist_index_identity_state(info_file, pending)
-
-        try:
-            result = incremental_indexer.auto_reindex_if_needed(
-                str(source_path),
-                max_age_minutes=max_age_minutes,
-            )
-        except Exception as exc:
-            self._persist_index_identity_state(
-                info_file,
-                {
-                    "index_identity_status": "error",
-                    "index_identity_error": (
-                        f"auto_reindex_exception: {exc}"
-                    ),
-                },
-            )
-            raise
-
-        def _count(field: str) -> int:
-            value = getattr(result, field, 0)
-            return value if isinstance(value, int) else 0
-
-        mutated = any(
-            _count(field) > 0
-            for field in (
-                "files_added",
-                "files_modified",
-                "files_removed",
-            )
+        return identity_checks.auto_reindex_with_identity(
+            capture=self._capture_index_identity,
+            incremental_indexer=incremental_indexer,
+            source_path=source_path,
+            info_file=project_dir / "project_info.json",
+            max_age_minutes=max_age_minutes,
+            publish_pending=publish_pending,
+            ready_metadata=ready_metadata,
+            update_project_info=_update_project_info,
         )
-        disposition = getattr(result, "reindex_disposition", None)
-        completed_scan = (
-            disposition == "completed"
-            if isinstance(disposition, str)
-            else mutated
-        )
-        succeeded = bool(getattr(result, "success", True))
-        if not succeeded:
-            state = self._persist_index_identity_state(
-                info_file,
-                {
-                    "index_identity_status": "error",
-                    "index_identity_error": (
-                        "auto_reindex_failed: "
-                        f"{getattr(result, 'error', None) or 'unknown error'}"
-                    ),
-                },
-            )
-        elif not completed_scan:
-            if publish_pending:
-                self._persist_index_identity_state(
-                    info_file,
-                    previous_state,
-                )
-            state = previous_state or {
-                "index_identity_status": "legacy_missing",
-            }
-        elif start_identity is None:
-            state = self._persist_index_identity_state(
-                info_file,
-                {
-                    "index_identity_status": "error",
-                    "index_identity_error": (
-                        "identity_capture_start_failed: "
-                        f"{start_error or 'unknown error'}"
-                    ),
-                },
-            )
-        else:
-            state = self._finalize_index_identity(
-                source_path,
-                info_file,
-                start_identity,
-                ready_metadata=ready_metadata,
-            )
-        return result, succeeded and mutated, state
 
     def _warn_if_reranker_degraded(self) -> None:
         """Warn at startup when the configured reranker cannot run.
@@ -1276,21 +1193,8 @@ class CodeSearchServer:
         import time as _time
 
         now = _time.monotonic()
-        with self._background_reindex_lock:
-            if self._background_reindex_active:
-                started = self._background_reindex_started_at or now
-                age = now - started
-                if age <= self.BG_REINDEX_WATCHDOG_SECONDS:
-                    return False
-                # Watchdog fires: previous thread is assumed stuck.
-                logger.warning(
-                    "[F2-bg] watchdog: prior reindex 'active' for %.1fs (>%.0fs deadline); "
-                    "releasing flag and dispatching fresh reindex. Stuck thread name=%s",
-                    age, self.BG_REINDEX_WATCHDOG_SECONDS,
-                    getattr(self._background_reindex_thread, "name", "?"),
-                )
-            self._background_reindex_active = True
-            self._background_reindex_started_at = now
+        if not self._bg_guard().try_acquire(now, self.BG_REINDEX_WATCHDOG_SECONDS):
+            return False
 
         def _run():
             try:
@@ -1345,9 +1249,7 @@ class CodeSearchServer:
             except Exception as e:
                 logger.warning(f"[F2-bg] background reindex failed: {e}")
             finally:
-                with self._background_reindex_lock:
-                    self._background_reindex_active = False
-                    self._background_reindex_started_at = None
+                self._bg_guard().release()
 
         t = threading.Thread(target=_run, daemon=True, name="bg-reindex")
         t.start()
@@ -1884,20 +1786,11 @@ class CodeSearchServer:
 
     def _indexing_job_state_lock(self) -> Any:
         """Return the lock guarding the process-global foreground job."""
-        job_lock = getattr(self, "_indexing_job_lock", None)
-        if job_lock is None:
-            # Some tests intentionally bypass __init__. Production instances
-            # always receive this lock in __init__.
-            job_lock = threading.RLock()
-            self._indexing_job_lock = job_lock
-        return job_lock
+        return self._job_state().lock
 
     def _indexing_job_snapshot(self) -> Optional[Dict[str, Any]]:
         """Return one coherent copy of the current foreground job."""
-        with self._indexing_job_state_lock():
-            if self._indexing_job is None:
-                return None
-            return dict(self._indexing_job)
+        return self._job_state().snapshot()
 
     def _update_indexing_job(
         self,
@@ -1905,14 +1798,7 @@ class CodeSearchServer:
         **updates: Any,
     ) -> bool:
         """Atomically update only the foreground job owned by ``job_id``."""
-        with self._indexing_job_state_lock():
-            if (
-                not self._indexing_job
-                or self._indexing_job.get("job_id") != job_id
-            ):
-                return False
-            self._indexing_job.update(updates)
-            return True
+        return self._job_state().update(job_id, **updates)
 
     def _active_indexing_job_response(
         self,
@@ -1920,83 +1806,10 @@ class CodeSearchServer:
         provider: Optional[str],
     ) -> Optional[str]:
         """Describe the active foreground job without starting another."""
-        active_job = self._indexing_job
-        if not active_job or active_job["status"] != "indexing":
-            return None
-
-        requested_directory = str(Path(directory_path).resolve())
-        active_directory = str(active_job.get("directory", ""))
-        active_provider_value = active_job.get("provider")
-        active_provider = (
-            active_provider_value.strip().lower()
-            if isinstance(active_provider_value, str)
-            and active_provider_value.strip()
-            else None
+        response = self._job_state().active_conflict_response(
+            directory_path, provider, _planned_index_storage_target,
         )
-        active_storage_target = str(
-            Path(
-                active_job.get("storage_target")
-                or _planned_index_storage_target(
-                    active_directory,
-                    active_provider,
-                )
-            ).resolve()
-        )
-        requested_storage_target = str(
-            _planned_index_storage_target(
-                requested_directory,
-                provider,
-            ).resolve()
-        )
-        directory_conflict = requested_directory != active_directory
-        provider_conflict = provider != active_provider
-        storage_target_conflict = requested_storage_target != active_storage_target
-        indexing_conflict = (
-            directory_conflict
-            or provider_conflict
-            or storage_target_conflict
-        )
-        active_project = str(
-            active_job.get("project_name")
-            or Path(active_directory).name
-            or "unknown"
-        )
-        requested_project = Path(requested_directory).name or "unknown"
-        if indexing_conflict:
-            message = (
-                f"Indexing job {active_job['job_id']} is already active "
-                f"for {active_project}; request for {requested_project} "
-                "did not start another job"
-            )
-        else:
-            message = (
-                f"Indexing already in progress for {active_project}; "
-                "reusing the active job"
-            )
-        response: Dict[str, Any] = {
-            "status": "indexing",
-            "index_ready": False,
-            "message": message,
-            "job_id": active_job["job_id"],
-            "phase": active_job.get("phase", "unknown"),
-            "chunks_done": active_job.get("current", 0),
-            "chunks_total": active_job.get("total", 0),
-            "directory": active_directory,
-            "project_name": active_project,
-            "provider": active_provider,
-            "storage_target": active_storage_target,
-            "requested_directory": requested_directory,
-            "requested_provider": provider,
-            "requested_storage_target": requested_storage_target,
-            "indexing_conflict": indexing_conflict,
-        }
-        if directory_conflict:
-            response["conflict_reason"] = "different_project_indexing"
-        elif provider_conflict:
-            response["conflict_reason"] = "different_provider_indexing"
-        elif storage_target_conflict:
-            response["conflict_reason"] = "different_storage_target_indexing"
-        return json.dumps(response)
+        return None if response is None else json.dumps(response)
 
     def index_directory(
         self,
@@ -2116,32 +1929,10 @@ class CodeSearchServer:
             identity_start_error=identity_start_error,
         )
 
-        def _progress_callback(phase, current, total):
-            with job_lock:
-                active_job = self._indexing_job
-                if not active_job or active_job.get("job_id") != job_id:
-                    return
-                active_job.update(
-                    {
-                        "phase": phase,
-                        "current": current,
-                        "total": total,
-                    }
-                )
-                cancel_requested = bool(
-                    active_job.get("cancel_requested")
-                )
-            if cancel_requested:
-                raise InterruptedError("Indexing cancelled by user")
+        _progress_callback = self._job_state().progress_callback(job_id)
 
         def _cancel_requested() -> bool:
-            with job_lock:
-                active_job = self._indexing_job
-                return bool(
-                    active_job
-                    and active_job.get("job_id") == job_id
-                    and active_job.get("cancel_requested")
-                )
+            return self._job_state().cancel_requested(job_id)
 
         def _run_indexing():
             try:
@@ -2429,81 +2220,8 @@ class CodeSearchServer:
           - "completed" / "failed": foreground job ended; result attached
           - "background_reindex_active": only F2's background thread runs
         """
-        bg_active = bool(getattr(self, "_background_reindex_active", False))
-        job = self._indexing_job_snapshot()
-
-        if not job:
-            if bg_active:
-                # No foreground job, but background reindex IS running.
-                return json.dumps({
-                    "status": "background_reindex_active",
-                    "index_ready": False,
-                    "background_reindex_active": True,
-                    "message": (
-                        "Search-time background reindex in progress "
-                        "(CODE_SEARCH_NONBLOCKING_SEARCH=1). search_code "
-                        "calls return last-good-index results with "
-                        "_metadata.freshness=stale_reindex_in_progress "
-                        "until this completes."
-                    ),
-                })
-            return json.dumps({
-                "status": "idle",
-                "index_ready": False,
-                "background_reindex_active": False,
-                "message": "No indexing job running",
-            })
-
-        response = {
-            "job_id": job["job_id"],
-            "status": job["status"],
-            "phase": job["phase"],
-            "directory": job.get("directory", ""),
-            "project_name": job.get("project_name", ""),
-            "provider": job.get("provider"),
-            "storage_target": job.get("storage_target"),
-            "background_reindex_active": bg_active,
-            "index_ready": bool(job.get("index_ready", False)),
-        }
-
-        if job["total"] > 0:
-            response["chunks_done"] = job["current"]
-            response["chunks_total"] = job["total"]
-            response["percent"] = round(100 * job["current"] / job["total"], 1)
-            # Disambiguate the unit because chunks_done/chunks_total are
-            # named "chunks" but actually count FILES during the chunking
-            # and removing phases (files are scanned/chunked one at a time)
-            # then switch to counting chunks during embedding/saving. Without
-            # this label the total appears to "jump" mid-job (e.g. 936
-            # during chunking, 4709 during embedding) which looks like a
-            # bug. Phases that count files vs chunks per current pipeline:
-            #   chunking: files (one file may yield 1-N chunks)
-            #   removing: files (whose chunks are being removed)
-            #   detecting_changes: not counted (total is 0)
-            #   embedding: chunks
-            #   saving: chunks (total is 0 during this phase currently)
-            phase = job.get("phase", "")
-            if phase in ("chunking", "removing"):
-                response["unit"] = "files"
-            elif phase in ("embedding", "saving"):
-                response["unit"] = "chunks"
-
-        if job["status"] in ("completed", "failed", "cancelled") and job.get(
-            "result"
-        ):
-            terminal_result = job["result"]
-            if isinstance(terminal_result, dict):
-                terminal_result = {
-                    **terminal_result,
-                    **{
-                        key: job[key]
-                        for key in ("provider", "storage_target")
-                        if key in job
-                    },
-                }
-            response["result"] = terminal_result
-
-        return json.dumps(response)
+        bg_active = bool(self._bg_guard().active)
+        return json.dumps(self._job_state().progress_response(bg_active))
 
     def find_similar_code(self, chunk_id: str, k: int = 5) -> str:
         """Implementation of find_similar_code tool."""
@@ -3815,18 +3533,13 @@ class CodeSearchServer:
     def cancel_indexing(self) -> str:
         """Cancel the currently running indexing job."""
         try:
-            with self._indexing_job_state_lock():
-                job = self._indexing_job
-                if not job or job["status"] != "indexing":
-                    return json.dumps({
-                        "success": False,
-                        "error": "No active indexing job to cancel",
-                    })
-
-                job["cancel_requested"] = True
-                job_id = job["job_id"]
+            job_id = self._job_state().request_cancel()
+            if job_id is None:
+                return json.dumps({
+                    "success": False,
+                    "error": "No active indexing job to cancel",
+                })
             logger.info(f"Cancellation requested for indexing job {job_id}")
-
             return json.dumps({
                 "success": True,
                 "job_id": job_id,
