@@ -271,6 +271,12 @@ cd code-search
 See [CONTRIBUTING.md](CONTRIBUTING.md), [docs/RELEASING.md](docs/RELEASING.md),
 and [CHANGELOG.md](CHANGELOG.md).
 
+## Security
+
+See [SECURITY.md](SECURITY.md) for the threat model (what is read, what is
+stored, what leaves the machine per provider, and why the network transports
+are localhost-only) and how to report a vulnerability privately.
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE). This project is derived from
