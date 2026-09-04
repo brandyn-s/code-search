@@ -23,20 +23,8 @@ claude mcp add code-search --scope user -e VOYAGE_API_KEY=... -- uvx code-search
 claude mcp add code-search --scope user -- uvx --from 'code-search-mcp[local]' code-search-mcp
 ```
 
-Any MCP client works; see [docs/clients.md](docs/clients.md) for Claude
-Desktop, Cursor, Codex CLI, Windsurf, and generic stdio configuration:
-
-```json
-{
-  "mcpServers": {
-    "code-search": {
-      "command": "uvx",
-      "args": ["code-search-mcp"],
-      "env": { "VOYAGE_API_KEY": "optional", "ANTHROPIC_API_KEY": "optional" }
-    }
-  }
-}
-```
+Any MCP client works; [docs/clients.md](docs/clients.md) has the JSON for Claude
+Desktop, Cursor, Codex CLI, Windsurf, and generic stdio.
 
 No API keys are required. Without `VOYAGE_API_KEY` the server embeds with a
 local model (`all-MiniLM-L6-v2`, about 90 MB, downloaded on first index),
@@ -56,20 +44,56 @@ search_code_evidence(query="where is request authentication enforced?")
 
 Python 3.12 or newer is required.
 
+## Why This and Not grep or Another Indexer
+
+Every evidence result is bound to the exact source revision and index
+generation it came from, and the server refuses to emit evidence when the
+checkout no longer matches the index. Captured from a live server, local
+embeddings, no API keys, trimmed:
+
+```json
+{"file": "auth/session_tokens.py", "lines": "1-9", "kind": "function",
+ "name": "validate_bearer_token", "span_role": "retrieval_context",
+ "evidence_candidates": [{
+   "role": "atomic_source_line", "lines": "4-4",
+   "snippet": "def validate_bearer_token(encoded_token: str) -> dict[str, str]:",
+   "evidence_ref": {
+     "id": "ev:v1:02a703c316a0f79e…",
+     "source_revision": "eef07d8b2fba24df552b88d67b13ee89188c7254",
+     "index_generation": "530d541b30398cf5…",
+     "relative_path": "auth/session_tokens.py", "start_line": 4, "end_line": 4}}]}
+```
+
+The same query after one file in the checkout was edited: ranked results still
+come back, evidence does not.
+
+```json
+{"results": [ "...5 ranked chunks, no evidence_candidates..." ],
+ "_metadata": {"freshness": "fresh_after_reindex",
+               "evidence_refs": {"emitted": false, "count": 0,
+                                 "reason": "before_search:stale_source"}}}
+```
+
+| You need | code-search | `rg` | Typical embedding indexer |
+|---|---|---|---|
+| A conceptual query ("where is request auth enforced?") | Hybrid vector + BM25, optional LLM rerank | Only if you already know the token | Vector search |
+| Evidence for a claim an agent is about to make | Immutable `evidence_ref` per source line, bound to revision and generation | File and line, no identity | Snippet and score |
+| The index went stale | Evidence fails closed; retrieval keeps working and says why | Always live, no index | Serves stale snippets silently |
+
+
 ## What It Provides
 
-- Natural-language and exact-signal retrieval over source code and Markdown.
-- Hybrid FAISS vector search plus SQLite FTS5 BM25, fused with weighted
-  reciprocal-rank fusion (RRF).
+- Natural-language and exact-signal retrieval over source code and Markdown:
+  FAISS vectors plus SQLite FTS5 BM25, fused with weighted reciprocal-rank
+  fusion (RRF).
 - Structure-aware chunking for 17 language modes across 21 registered file
   extensions, with bounded adjacent-chunk merging.
-- Provider-aware project indexes, Merkle-based incremental updates, background
-  indexing progress, and source/index identity checks.
-- Immutable generation publication with manifest verification and last-good
-  fallback.
+- Persistent per-project indexes with Merkle-based incremental updates,
+  background indexing, and source/index identity checks; generations are
+  published atomically with a verified manifest and last-good fallback.
 - Optional cloud embeddings and reranking, or a fully local path.
-- Backend-issued, generation-bound evidence IDs for exact source lines.
-- Project-balanced discovery across as many as 25 isolated indexes.
+- Backend-issued, generation-bound evidence IDs for exact source lines, and
+  project-balanced discovery across as many as 25 isolated indexes.
 
 ## Choose the Right Operation
 
@@ -172,8 +196,8 @@ The complete table is in [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md).
 
 These settings are process-static: they are read once when the MCP server starts. Restart the MCP server after changing them.
 
-Cloud providers receive query text and source-derived chunk text. Use the local
-provider and `RERANKER=off` when that boundary is unacceptable.
+Cloud providers receive query text and chunk text; use the local provider and
+`RERANKER=off` when that boundary is unacceptable.
 
 ## Measured Evidence
 
@@ -187,17 +211,13 @@ MRR aggregates reciprocal rank across queries; it does not by itself determine t
 
 ## Comparison to Alternatives
 
-- Sourcegraph has the broader search language, history UX, organization ACLs,
-  and a managed indexing fleet. This project is a focused MCP retrieval
-  backend with evidence semantics.
-- Grep-style tools (`rg`, Claude Code's built-in search) win on exact tokens.
-  code-search is for conceptual queries and for evidence you can cite.
+- Sourcegraph has the broader search language, history UX, and organization
+  ACLs; this is a focused MCP retrieval backend with evidence semantics.
+- Grep-style tools win on exact tokens; code-search is for conceptual queries
+  and evidence you can cite. It does not prove call relationships; use
+  code-graph or CodeQL for those.
 - Cross-project search does not federate scores and has no organization
-  authorization model.
-- The index is not updated on every keystroke; reindex or rely on the
-  freshness path.
-- Search does not prove call relationships or runtime behavior. Use
-  code-graph, runtime instrumentation, or CodeQL for those.
+  authorization model, and the index refreshes on demand, not per keystroke.
 
 ## Troubleshooting
 
