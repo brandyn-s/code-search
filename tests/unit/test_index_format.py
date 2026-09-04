@@ -138,6 +138,7 @@ def test_newer_format_is_refused_with_upgrade_guidance(installed_fixture) -> Non
     assert started["status"] == "indexing"
     import time
 
+    progress: dict = {}
     for _ in range(600):
         progress = json.loads(server.get_indexing_progress())
         if progress["status"] in {"completed", "failed", "cancelled"}:

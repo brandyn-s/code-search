@@ -16,6 +16,7 @@ fixture corpus with a deterministic in-process embedder, injecting
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 import shutil
 import subprocess
 import threading
@@ -36,6 +37,7 @@ TERMINAL = {"completed", "failed", "cancelled"}
 
 def _wait_terminal(server: CodeSearchServer, timeout: float = 60.0) -> dict:
     deadline = time.monotonic() + timeout
+    progress: dict = {}
     while time.monotonic() < deadline:
         progress = json.loads(server.get_indexing_progress())
         if progress.get("status") in TERMINAL:
@@ -45,7 +47,7 @@ def _wait_terminal(server: CodeSearchServer, timeout: float = 60.0) -> dict:
 
 
 @pytest.fixture()
-def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setenv("CODE_SEARCH_STORAGE", str(tmp_path / "storage"))
     monkeypatch.setenv("RERANKER", "off")
     monkeypatch.setenv("CODE_SEARCH_STARTUP_AUDIT", "0")
