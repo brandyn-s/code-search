@@ -16,6 +16,7 @@ from typing import List, Optional
 
 import httpx
 import numpy as np
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class VoyageBatchEmbedder:
     """Embeds texts via Voyage Batch API for full reindexing."""
 
     def __init__(self, api_key: str = "", model: str = "voyage-code-3"):
-        self.api_key = api_key or os.environ.get("VOYAGE_API_KEY", "")
+        self.api_key = api_key or env_get("VOYAGE_API_KEY", "")
         self.model = model
         self.client = httpx.Client(timeout=120.0)
         self._headers = {"Authorization": f"Bearer {self.api_key}"}

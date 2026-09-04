@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +14,7 @@ from search.query_signals import (
     extract_query_signals,
 )
 from search.result_models import SearchResult
+from search.env import env_get
 
 
 @dataclass
@@ -159,7 +159,7 @@ def retrieve_hybrid_candidates(
     # searcher.py. Passing the mapping preserves the legacy
     # search.searcher.CHUNK_TYPE_BOOSTS monkey-patch seam.
     boosts = dict(chunk_type_boosts.get(config.content_mode, {}))
-    override_raw = os.environ.get("CHUNK_TYPE_BOOST_OVERRIDE")
+    override_raw = env_get("CHUNK_TYPE_BOOST_OVERRIDE")
     if override_raw:
         try:
             override = json.loads(override_raw)

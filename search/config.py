@@ -1,6 +1,6 @@
 """Typed configuration for search-time behavior (R11 phase 1).
 
-Replaces scattered ``os.environ.get(...)`` calls across ``search/searcher.py``
+Replaces scattered ``env_get(...)`` calls across ``search/searcher.py``
 with a single dataclass that parses, validates, and surfaces config at one
 place. Built on top of the ``_parse_env_int`` / ``_parse_env_float``
 helpers introduced in R3 (PR #192) so all parsing has consistent failure
@@ -44,12 +44,12 @@ Test pattern:
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Tuple
 
 from search.reranker_registry import registered_rerankers
+from search.env import env_get
 
 _module_logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def parse_env_int(
     logger: Optional[logging.Logger] = None,
 ) -> int:
     """Parse an int from an env var with graceful fallback on bad input."""
-    raw = os.environ.get(name)
+    raw = env_get(name)
     if raw is None:
         return default
     try:
@@ -101,7 +101,7 @@ def parse_env_float(
     logger: Optional[logging.Logger] = None,
 ) -> float:
     """Parse a float from an env var with graceful fallback on bad input."""
-    raw = os.environ.get(name)
+    raw = env_get(name)
     if raw is None:
         return default
     try:
@@ -129,7 +129,7 @@ def parse_env_float(
 
 def parse_env_bool(name: str, default: bool = False) -> bool:
     """Parse a bool from an env var. Truthy: 1/true/yes/on (case-insensitive)."""
-    raw = os.environ.get(name, "")
+    raw = env_get(name, "")
     return raw.strip().lower() in ("1", "true", "yes", "on") if raw else default
 
 
@@ -145,7 +145,7 @@ def parse_env_enum(
     the silent ``.get(mode, fallback)`` pattern that previously hid typos
     (e.g., CONTENT_MODE=cod silently became balanced weights).
     """
-    raw = os.environ.get(name)
+    raw = env_get(name)
     if raw is None:
         return default
     val = raw.strip().lower()
@@ -269,7 +269,7 @@ def _resolve_reranker_mode(mode: str) -> str:
     """Resolve RERANKER=auto to a concrete mode based on available keys."""
     if mode != "auto":
         return mode
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if env_get("ANTHROPIC_API_KEY"):
         return RERANKER_AUTO_WITH_KEY
     return RERANKER_AUTO_WITHOUT_KEY
 
@@ -333,7 +333,7 @@ def _parse_optional_float(name: str) -> Optional[float]:
     Returns None instead of a default when the env var is unset, so the
     caller can distinguish 'gate not configured' from 'gate at threshold=X'.
     """
-    raw = os.environ.get(name)
+    raw = env_get(name)
     if raw is None or raw.strip() == "":
         return None
     try:

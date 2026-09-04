@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
 from typing import Dict, List, Optional, Tuple
+from search.env import env_get
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,7 @@ def get_active_synonym_profile_metadata() -> Dict[str, object]:
         "version": profile.version,
         "id": profile.id,
     }
-    if profile.name != "off" and os.environ.get("CODE_SYNONYMS_PATH", ""):
+    if profile.name != "off" and env_get("CODE_SYNONYMS_PATH", ""):
         effective_synonyms = json.dumps(
             _active_synonyms(),
             ensure_ascii=False,
@@ -141,7 +141,7 @@ def _active_synonyms() -> Dict[str, List[str]]:
         return {}
 
     base_synonyms = profile.synonyms
-    path = os.environ.get("CODE_SYNONYMS_PATH", "")
+    path = env_get("CODE_SYNONYMS_PATH", "")
     if not path:
         return base_synonyms
 

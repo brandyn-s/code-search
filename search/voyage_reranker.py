@@ -1,11 +1,11 @@
 """Voyage AI reranker using /v1/rerank endpoint."""
 
-import os
 import logging
 import time
 from typing import List, Tuple
 
 import httpx
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ def voyage_rerank(
 
     Returns list of (original_index, relevance_score) sorted by descending relevance.
     """
-    key = api_key or os.environ.get("VOYAGE_API_KEY", "")
+    key = api_key or env_get("VOYAGE_API_KEY", "")
     if not key:
         raise ValueError("VOYAGE_API_KEY required for Voyage reranker")
     if not documents:

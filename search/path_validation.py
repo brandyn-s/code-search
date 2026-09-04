@@ -22,9 +22,9 @@ search callers. Two-prong fix:
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import List, Optional
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ _SENSITIVE_SYSTEM_PREFIXES: List[str] = [
 
 
 def _get_allowed_roots() -> Optional[List[Path]]:
-    raw = os.environ.get("CODE_SEARCH_ALLOWED_ROOTS", "").strip()
+    raw = env_get("CODE_SEARCH_ALLOWED_ROOTS", "").strip()
     if not raw:
         return None
     roots: List[Path] = []

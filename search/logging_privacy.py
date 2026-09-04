@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
+from search.env import env_get
 
 
 # Ephemeral on purpose: log fingerprints are useful for correlating records
@@ -16,7 +16,7 @@ _LOG_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 def query_text_logging_enabled() -> bool:
     """Return whether the operator explicitly opted into plaintext logs."""
-    return os.environ.get("CODE_SEARCH_LOG_QUERY_TEXT", "off") == "on"
+    return env_get("CODE_SEARCH_LOG_QUERY_TEXT", "off") == "on"
 
 
 def query_fingerprint(query: str) -> str:

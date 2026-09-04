@@ -1,9 +1,9 @@
 """Cross-encoder reranker for search result refinement."""
 
 import logging
-import os
 from typing import List, Dict, Any
 from functools import lru_cache
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def _load_cross_encoder():
     """Lazy-load the cross-encoder model. Cached after first call."""
-    model_name = os.environ.get(
+    model_name = env_get(
         "RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
     )
     logger.info(f"Loading cross-encoder reranker: {model_name}")

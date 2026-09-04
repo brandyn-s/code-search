@@ -1,6 +1,5 @@
 """Voyage AI contextualized chunk embedder using /v1/contextualizedembeddings."""
 
-import os
 import logging
 import time
 from typing import List, Dict, Any
@@ -8,6 +7,7 @@ import numpy as np
 import httpx
 
 from embeddings.embedding_model import EmbeddingModel
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class VoyageContextEmbedder(EmbeddingModel):
         **kwargs,
     ):
         self._device = "api"
-        self._api_key = api_key or os.environ.get("VOYAGE_API_KEY", "")
+        self._api_key = api_key or env_get("VOYAGE_API_KEY", "")
         if not self._api_key:
             raise ValueError(
                 "VOYAGE_API_KEY is required. Set it as an environment variable "

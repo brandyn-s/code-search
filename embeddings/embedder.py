@@ -1,6 +1,5 @@
 """Code embedding wrapper using EmbeddingGemma model."""
 
-import os
 import logging
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -9,6 +8,7 @@ import numpy as np
 
 from chunking.code_chunk import CodeChunk
 from common_utils import get_storage_dir
+from search.env import env_get
 
 
 @dataclass
@@ -138,7 +138,7 @@ def _configured_output_dimension(
             source="configured",
         )
     if configuration.provider in {"jina", "jina-code"}:
-        truncate_dimension = os.environ.get("JINA_TRUNCATE_DIM", "").strip()
+        truncate_dimension = env_get("JINA_TRUNCATE_DIM", "").strip()
         if truncate_dimension:
             return _parse_output_dimension(
                 truncate_dimension,
@@ -160,12 +160,12 @@ def resolve_embedding_config(
     stored = stored or {}
     stored_provider = str(stored.get("embedding_provider") or "").strip().lower()
     ambient_provider = (
-        os.environ.get("EMBEDDING_PROVIDER", "").strip().lower()
+        env_get("EMBEDDING_PROVIDER", "").strip().lower()
     )
     effective_content_mode = (
         content_mode
         or stored.get("content_mode")
-        or os.environ.get("CONTENT_MODE")
+        or env_get("CONTENT_MODE")
         or "code"
     )
     effective_content_mode = str(effective_content_mode).strip().lower() or "code"
@@ -178,7 +178,7 @@ def resolve_embedding_config(
     if not effective_provider:
         effective_provider = ambient_provider
     if not effective_provider:
-        if os.environ.get("VOYAGE_API_KEY"):
+        if env_get("VOYAGE_API_KEY"):
             effective_provider = (
                 "voyage-context"
                 if effective_content_mode == "docs"
@@ -207,7 +207,7 @@ def resolve_embedding_config(
     )
     ambient_model_name = ""
     if ambient_provider_is_compatible:
-        ambient_model_name = os.environ.get(model_environment, "").strip()
+        ambient_model_name = env_get(model_environment, "").strip()
     effective_model_name = (
         effective_model_name
         or ambient_model_name
@@ -233,10 +233,10 @@ def resolve_embedding_config(
         dimension_value is None
         and ambient_provider_is_compatible
         and ambient_model_is_compatible
-        and os.environ.get("EMBEDDING_DIMENSION", "").strip()
+        and env_get("EMBEDDING_DIMENSION", "").strip()
     ):
         dimension_source = "EMBEDDING_DIMENSION"
-        dimension_value = os.environ["EMBEDDING_DIMENSION"]
+        dimension_value = env_get("EMBEDDING_DIMENSION")
     requested_dimension = _parse_output_dimension(
         dimension_value,
         source=dimension_source,
@@ -261,7 +261,7 @@ def resolve_embedding_config(
         effective_input_type_enabled = stored_input_type
     else:
         effective_input_type_enabled = (
-            os.environ.get("VOYAGE_INPUT_TYPE", "off").strip().lower()
+            env_get("VOYAGE_INPUT_TYPE", "off").strip().lower()
             == "on"
         )
     if effective_provider == "voyage-context":
@@ -387,7 +387,7 @@ def list_providers() -> list[str]:
 @register_provider("openai")
 def _factory_openai(model_name: str, cache_dir: str, device: str) -> Any:
     from embeddings.openai_embedder import OpenAIEmbeddingModel
-    model_name = model_name or os.environ.get(
+    model_name = model_name or env_get(
         "EMBEDDING_MODEL", "text-embedding-3-small"
     )
     return OpenAIEmbeddingModel(model_name=model_name)
@@ -401,10 +401,10 @@ def _factory_voyage(model_name: str, cache_dir: str, device: str) -> Any:
     102 queries (2026-04-08).
     """
     from embeddings.openai_embedder import OpenAIEmbeddingModel
-    model_name = model_name or os.environ.get(
+    model_name = model_name or env_get(
         "EMBEDDING_MODEL", "voyage-4-large"
     )
-    api_key = os.environ.get("VOYAGE_API_KEY", "")
+    api_key = env_get("VOYAGE_API_KEY", "")
     return OpenAIEmbeddingModel(
         api_key=api_key,
         model_name=model_name,
@@ -427,10 +427,10 @@ def _factory_voyage_code3(model_name: str, cache_dir: str, device: str) -> Any:
     See internal eval finding (2026-05-15).
     """
     from embeddings.openai_embedder import OpenAIEmbeddingModel
-    model_name = model_name or os.environ.get(
+    model_name = model_name or env_get(
         "EMBEDDING_MODEL", "voyage-code-3"
     )
-    api_key = os.environ.get("VOYAGE_API_KEY", "")
+    api_key = env_get("VOYAGE_API_KEY", "")
     return OpenAIEmbeddingModel(
         api_key=api_key,
         model_name=model_name,
@@ -441,10 +441,10 @@ def _factory_voyage_code3(model_name: str, cache_dir: str, device: str) -> Any:
 @register_provider("voyage-context")
 def _factory_voyage_context(model_name: str, cache_dir: str, device: str) -> Any:
     from embeddings.voyage_context_embedder import VoyageContextEmbedder
-    model_name = model_name or os.environ.get(
+    model_name = model_name or env_get(
         "EMBEDDING_MODEL", "voyage-context-3"
     )
-    api_key = os.environ.get("VOYAGE_API_KEY", "")
+    api_key = env_get("VOYAGE_API_KEY", "")
     return VoyageContextEmbedder(api_key=api_key, model_name=model_name)
 
 
@@ -457,12 +457,12 @@ def _factory_jina(
     output_dimension: Optional[int] = None,
 ) -> Any:
     from embeddings.jina_code_embedder import JinaCodeEmbedder
-    model_name = model_name or os.environ.get(
+    model_name = model_name or env_get(
         "LOCAL_EMBEDDING_MODEL", "jinaai/jina-code-embeddings-0.5b"
     )
     truncate_dim = output_dimension
     if truncate_dim is None:
-        truncate_dim_str = os.environ.get("JINA_TRUNCATE_DIM", "")
+        truncate_dim_str = env_get("JINA_TRUNCATE_DIM", "")
         truncate_dim = int(truncate_dim_str) if truncate_dim_str else None
     return JinaCodeEmbedder(
         model_name=model_name,
@@ -475,7 +475,7 @@ def _factory_jina(
 @register_provider("local")
 def _factory_local(model_name: str, cache_dir: str, device: str) -> Any:
     from embeddings.sentence_transformer import SentenceTransformerModel
-    model_name = model_name or os.environ.get(
+    model_name = model_name or env_get(
         "LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
     )
     return SentenceTransformerModel(
@@ -705,7 +705,6 @@ class CodeEmbedder:
         Returns:
             Content string for embedding
         """
-        import os
 
         content_parts = []
 
@@ -727,7 +726,7 @@ class CodeEmbedder:
         # On REVERT -> remove the env var path entirely + the
         # generate_llm_contexts.py helper.
         llm_context_replaced = False
-        llm_context_path = os.environ.get("LLM_CONTEXT_PATH", "")
+        llm_context_path = env_get("LLM_CONTEXT_PATH", "")
         if llm_context_path:
             llm_map = self._load_llm_context_map(llm_context_path)
             # Reconstruct chunk_id using the same format as
@@ -743,7 +742,7 @@ class CodeEmbedder:
                 content_parts.append(llm_map[cid])
                 llm_context_replaced = True
 
-        if not llm_context_replaced and os.environ.get("CONTEXTUAL_HEADERS", "on") == "on":
+        if not llm_context_replaced and env_get("CONTEXTUAL_HEADERS", "on") == "on":
             header_parts = [f"# From {chunk.relative_path}"]
             if chunk.parent_name and chunk.name:
                 header_parts.append(
@@ -784,8 +783,8 @@ class CodeEmbedder:
             # Default: "on" for non-contextualized providers, "off" for voyage-context
             # (which already has file-grouped context via the API).
             # Eval result: +9.6% MRR on Nix, closing 40% of the gap to voyage-context-3.
-            enriched_default = "off" if os.environ.get("EMBEDDING_PROVIDER", "") == "voyage-context" else "on"
-            if os.environ.get("ENRICHED_CONTEXT", enriched_default) == "on":
+            enriched_default = "off" if env_get("EMBEDDING_PROVIDER", "") == "voyage-context" else "on"
+            if env_get("ENRICHED_CONTEXT", enriched_default) == "on":
                 siblings = self._sibling_context.get(chunk.relative_path, [])
                 # Exclude self, limit to 15 siblings to stay within token budget
                 other_names = [n for n in siblings if n != chunk.name][:15]

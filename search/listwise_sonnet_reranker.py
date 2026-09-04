@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import random
 import time
 from typing import Sequence
@@ -38,6 +37,7 @@ from search.logging_privacy import (
     format_query_exception_for_log,
     query_text_logging_enabled,
 )
+from search.env import env_get
 
 LOG = logging.getLogger(__name__)
 
@@ -371,11 +371,11 @@ def listwise_rerank_with_sonnet(
 
     if not candidates:
         return _emit([], False, REASON_EMPTY_INPUT)
-    if not os.environ.get("ANTHROPIC_API_KEY") and _client_factory is None:
+    if not env_get("ANTHROPIC_API_KEY") and _client_factory is None:
         return _emit(candidates[:top_k], False, REASON_API_KEY_MISSING)
     if timeout is None:
         try:
-            timeout = float(os.environ.get("SONNET_LISTWISE_TIMEOUT", DEFAULT_TIMEOUT_S))
+            timeout = float(env_get("SONNET_LISTWISE_TIMEOUT", DEFAULT_TIMEOUT_S))
         except ValueError:
             timeout = DEFAULT_TIMEOUT_S
 
@@ -392,7 +392,7 @@ def listwise_rerank_with_sonnet(
         except ImportError:
             return _emit(candidates[:top_k], False, REASON_PACKAGE_NOT_INSTALLED)
         client = anthropic.Anthropic(
-            max_retries=int(os.environ.get("ANTHROPIC_MAX_RETRIES", "1")),
+            max_retries=int(env_get("ANTHROPIC_MAX_RETRIES", "1")),
             timeout=timeout,
         )
 
@@ -404,7 +404,7 @@ def listwise_rerank_with_sonnet(
     # via brace-balanced extraction instead.
     try:
         resp = client.messages.create(
-            model=os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL),
+            model=env_get("ANTHROPIC_MODEL", DEFAULT_MODEL),
             max_tokens=2000,  # output schema is small; ranked_ids + scores
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],

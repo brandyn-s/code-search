@@ -1,12 +1,12 @@
 """OpenAI embedding model implementation."""
 
-import os
 import logging
 from typing import List, Dict, Any
 import numpy as np
 import httpx
 
 from embeddings.embedding_model import EmbeddingModel
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
     ):
         # Skip device resolution - not needed for API model
         self._device = "api"
-        self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self._api_key = api_key or env_get("OPENAI_API_KEY", "")
         if not self._api_key:
             raise ValueError(
                 "OPENAI_API_KEY is required. Set it as an environment variable "

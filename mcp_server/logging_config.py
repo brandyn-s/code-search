@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from typing import TextIO
+from search.env import env_get
 
 
 _FIRST_PARTY_LOGGERS = (
@@ -27,7 +27,7 @@ _LEVELS = {
 def configure_first_party_logging(*, stream: TextIO | None = None) -> int:
     """Configure first-party package loggers without changing the root logger."""
     configured_stream = stream if stream is not None else sys.stderr
-    raw_level = os.environ.get("CODE_SEARCH_LOG_LEVEL", "INFO")
+    raw_level = env_get("CODE_SEARCH_LOG_LEVEL", "INFO")
     level_name = raw_level.strip().upper()
     level = _LEVELS.get(level_name, logging.INFO)
     invalid_level = level_name not in _LEVELS

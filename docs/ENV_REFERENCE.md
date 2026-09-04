@@ -38,6 +38,7 @@ reranker mode, for example
 | `QUANTIZATION` | `int8` | FAISS storage: `int8` (trained scalar quantizer, 4x smaller), `float32`, or `binary` (32x smaller with float rescoring; for very large indexes). |
 | `CODE_SEARCH_NIX_OPTION_CHUNKING` | `off` | `on` chunks files under `nix/modules/` per option declaration instead of per module. |
 | `CODE_SEARCH_DISABLE_AUTO_REINDEX` | unset | `1`/`true`/`yes`/`on` stops searches from triggering incremental reindexes; refresh with `index_directory` instead. Useful for very large projects. |
+| `CODE_SEARCH_NONBLOCKING_SEARCH` | unset | `1`/`true`/`yes`/`on` makes `search_code` return last-good results immediately and run a needed reindex in a background thread; results carry `_metadata.freshness="stale_reindex_in_progress"` until it finishes. Default blocks until the index is fresh. |
 | `CODE_SEARCH_STARTUP_AUDIT` | `1` | `0` skips the background integrity audit of existing indexes at startup. |
 
 ## Retrieval and fusion
@@ -65,6 +66,7 @@ reranker mode, for example
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `RERANKER` | `auto` | `auto` resolves to `sonnet` when `ANTHROPIC_API_KEY` is set and `off` otherwise. `sonnet` scores the top hybrid candidates with one Anthropic call each. `listwise` ranks them in a single call. `cross-encoder` uses a local MiniLM cross-encoder. `off` returns fused order. Any reranker failure keeps the hybrid order and records the reason in `_metadata.reranker`. |
+| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Model for `RERANKER=cross-encoder`. Requires the `[local]` extra. |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Model for the listwise reranker. The pointwise reranker uses `claude-sonnet-4-6`. |
 | `SONNET_RERANKER_TIMEOUT` | `8.0` | Overall deadline in seconds for the pointwise rerank of one query. |
 | `SONNET_LISTWISE_TIMEOUT` | `12.0` | Deadline in seconds for the single listwise call. |
@@ -77,6 +79,7 @@ reranker mode, for example
 | `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES` | unset | JSON object mapping path prefix to a higher threshold, e.g. `{"billing/": 11}`. The strictest matching override applies; overrides can only tighten. |
 | `SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES` | unset | JSON object mapping path prefix to extra judging guidance injected only when scoring candidates under that prefix. |
 | `SONNET_RERANKER_LOG_PER_CANDIDATE_SCORE` | unset | Any value logs one line per scored candidate. Diagnostic only. |
+| `SONNET_RERANKER_LOG_OVERRIDE_TRIGGERS` | unset | Any value logs a `[PATH_OVERRIDE_TRIGGER]` line whenever a per-path hybrid-prior override raises the effective threshold. Diagnostic only. |
 
 ## Logging and privacy
 

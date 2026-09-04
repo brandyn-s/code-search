@@ -42,6 +42,7 @@ from search.logging_privacy import (
     format_query_exception_for_log,
     format_query_for_log,
 )
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def rewrite_short_natural_query(query: str, n_alternatives: int = 3) -> List[str
     `bench/research/anthropic_latency_diagnosis.md`). Graceful fallback
     on any error returns [].
     """
-    if os.environ.get("SHORT_QUERY_REWRITE", "off") != "on":
+    if env_get("SHORT_QUERY_REWRITE", "off") != "on":
         return []
     if not is_short_natural_query(query):
         return []
@@ -157,7 +158,7 @@ def rewrite_query_for_bm25(query: str) -> str:
     Returns:
         Code-oriented query for BM25 matching
     """
-    if os.environ.get("BM25_REWRITE", "off") != "on":
+    if env_get("BM25_REWRITE", "off") != "on":
         return query
 
     # Check cache
@@ -195,7 +196,7 @@ def _get_api_key() -> Optional[str]:
     """
     # Direct key (if set explicitly for the MCP server)
     for env_var in ["ANTHROPIC_API_KEY", "AUTO_LEARN_API_KEY"]:
-        key = os.environ.get(env_var, "")
+        key = env_get(env_var, "")
         if key and key.startswith("sk-ant-"):
             return key
 
@@ -255,7 +256,7 @@ def _call_haiku(query: str) -> Optional[str]:
     if not api_key:
         return None
 
-    model = os.environ.get("BM25_REWRITE_MODEL", DEFAULT_HAIKU_MODEL)
+    model = env_get("BM25_REWRITE_MODEL", DEFAULT_HAIKU_MODEL)
     resp = _ipv4_post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -325,7 +326,7 @@ def _call_haiku_short_query(query: str, n_alternatives: int) -> List[str]:
     if not api_key:
         return []
 
-    model = os.environ.get("BM25_REWRITE_MODEL", DEFAULT_HAIKU_MODEL)
+    model = env_get("BM25_REWRITE_MODEL", DEFAULT_HAIKU_MODEL)
     prompt = (
         f"Given a {len(query.split())}-word natural-language query "
         "targeting a code repository, produce exactly "

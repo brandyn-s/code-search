@@ -25,6 +25,7 @@ from search.logging_privacy import (
     format_query_for_log,
 )
 from embeddings.embedder import EffectiveEmbeddingConfig, EmbeddingResult
+from search.env import env_get
 
 
 def _install_search_file_handler() -> None:
@@ -1451,7 +1452,7 @@ class CodeIndexManager:
         - "float32": IndexFlatIP — original full-precision
         - "binary": IndexBinaryFlat + float store — 32x smaller, needs rescore (opt-in for 100K+ chunks)
         """
-        quantization = os.environ.get("QUANTIZATION", "int8").lower()
+        quantization = env_get("QUANTIZATION", "int8").lower()
         self._is_binary = False
 
         if quantization == "binary":

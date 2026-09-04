@@ -54,10 +54,11 @@ import sqlite3
 import sys
 from collections import Counter
 from pathlib import Path
+from search.env import env_get
 
 
 def _storage_dir() -> Path:
-    base = os.environ.get("CODE_SEARCH_STORAGE")
+    base = env_get("CODE_SEARCH_STORAGE")
     if base:
         return Path(os.path.expanduser(base)) / "projects"
     return Path.home() / ".claude_code_search" / "projects"

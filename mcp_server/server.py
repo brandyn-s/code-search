@@ -1,11 +1,11 @@
 """FastMCP server for Claude Code integration - main entry point."""
 import json
-import os
 import sys
 import threading
 from typing import TYPE_CHECKING
 
 import logging
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def _run_startup_integrity_audit(server: "CodeSearchServer") -> None:
     Cleanup remains the operator's call via delete_project / /index-repo
     --audit and the documented remediation paths in the audit response.
     """
-    if os.environ.get("CODE_SEARCH_STARTUP_AUDIT", "1") == "0":
+    if env_get("CODE_SEARCH_STARTUP_AUDIT", "1") == "0":
         logger.info("[STARTUP_AUDIT] disabled via CODE_SEARCH_STARTUP_AUDIT=0")
         return
     audit_logger = logging.getLogger("search.startup_audit")
@@ -97,7 +97,7 @@ def _log_startup_mode() -> None:
         embeddings = f"{emb.provider}({model})" if model else str(emb.provider)
         reranker = cfg.reranker_mode
         hint = ""
-        if reranker == "off" and not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("RERANKER"):
+        if reranker == "off" and not env_get("ANTHROPIC_API_KEY") and not env_get("RERANKER"):
             hint = " (set ANTHROPIC_API_KEY to enable LLM reranking)"
         print(f"code-search: embeddings={embeddings} reranker={reranker}{hint}", file=sys.stderr, flush=True)
     except Exception:  # pragma: no cover - informational only

@@ -1,7 +1,6 @@
 """Incremental indexing using Merkle tree change detection."""
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +13,7 @@ from chunking.multi_language_chunker import MultiLanguageChunker
 from embeddings.embedder import CodeEmbedder
 from search.indexer import CodeIndexManager as Indexer
 from search.path_validation import refuse_as_project_root_reason
+from search.env import env_get
 
 logger = logging.getLogger(__name__)
 
@@ -490,8 +490,8 @@ class IncrementalIndexer:
             self._progress_fn("embedding", 0, len(all_chunks))
 
             use_batch = (
-                os.environ.get("VOYAGE_BATCH_API", "off") == "on"
-                and len(all_chunks) >= int(os.environ.get("VOYAGE_BATCH_THRESHOLD", "1000"))
+                env_get("VOYAGE_BATCH_API", "off") == "on"
+                and len(all_chunks) >= int(env_get("VOYAGE_BATCH_THRESHOLD", "1000"))
                 and hasattr(self.embedder._model, '_model_name')
                 and self.embedder._model._model_name.startswith("voyage-")
             )
@@ -906,7 +906,7 @@ class IncrementalIndexer:
                 reindex_disposition=REINDEX_DISPOSITION_REFUSED,
             )
 
-        if os.environ.get("CODE_SEARCH_DISABLE_AUTO_REINDEX", "").lower() in (
+        if env_get("CODE_SEARCH_DISABLE_AUTO_REINDEX", "").lower() in (
             "1", "true", "yes", "on"
         ):
             logger.warning(

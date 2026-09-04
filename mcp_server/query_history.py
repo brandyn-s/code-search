@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 from typing import Literal
+from search.env import env_get
 
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,7 @@ class QueryHistoryStore:
     @classmethod
     def from_environment(cls, storage_dir: Path) -> "QueryHistoryStore":
         """Build a store from the exact documented environment contract."""
-        raw_mode = os.environ.get(
+        raw_mode = env_get(
             "CODE_SEARCH_QUERY_HISTORY",
             _DEFAULT_MODE,
         )
@@ -105,7 +106,7 @@ class QueryHistoryStore:
         else:
             mode = raw_mode  # type: ignore[assignment]
 
-        raw_retention = os.environ.get(
+        raw_retention = env_get(
             "CODE_SEARCH_QUERY_RETENTION_DAYS",
             str(_DEFAULT_RETENTION_DAYS),
         )

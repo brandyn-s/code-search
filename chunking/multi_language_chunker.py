@@ -1,13 +1,13 @@
 """Multi-language chunker that combines AST and tree-sitter approaches."""
 
 import logging
-import os
 from pathlib import Path
 from typing import List, Optional
 
 from chunking.code_chunk import CodeChunk
 from chunking.tree_sitter import TreeSitterChunker, TreeSitterChunk
 from chunking.languages import LANGUAGE_MAP
+from search.env import env_get
 
 # Arc B (2026-05-11): per-option .nix chunking gate.
 # When CODE_SEARCH_NIX_OPTION_CHUNKING=1, files under nix/modules/ are
@@ -19,7 +19,7 @@ _NIX_OPTION_PATH_PREFIX = "nix/modules/"
 
 
 def _nix_option_chunking_enabled() -> bool:
-    return os.environ.get("CODE_SEARCH_NIX_OPTION_CHUNKING", "").strip().lower() in (
+    return env_get("CODE_SEARCH_NIX_OPTION_CHUNKING", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
 

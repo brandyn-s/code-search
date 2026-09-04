@@ -40,7 +40,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from typing import Any
 
@@ -49,6 +48,7 @@ from search.logging_privacy import (
     query_fingerprint,
     query_text_logging_enabled,
 )
+from search.env import env_get
 
 LOG = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ def _effective_threshold(
                 trigger_paths.append((norm, prefix, override))
                 if override > effective:
                     effective = override
-    if effective > base_threshold and os.environ.get(
+    if effective > base_threshold and env_get(
         "SONNET_RERANKER_LOG_OVERRIDE_TRIGGERS"
     ) in ("1", "true", "yes", "on"):
         # One-line JSON record per cohort. Consumers grep for
@@ -381,7 +381,7 @@ def _resolve_per_call_timeout() -> float:
     `messages.create(timeout=...)` accepts a float seconds value; we read the
     env var here so tests can override per-test without touching defaults.
     """
-    raw = os.environ.get("ANTHROPIC_PER_CALL_TIMEOUT_S")
+    raw = env_get("ANTHROPIC_PER_CALL_TIMEOUT_S")
     if raw:
         try:
             v = float(raw)
@@ -394,7 +394,7 @@ def _resolve_per_call_timeout() -> float:
 
 def _resolve_sdk_max_retries() -> int:
     """Resolve SDK max_retries from env, falling back to the default."""
-    raw = os.environ.get("ANTHROPIC_MAX_RETRIES")
+    raw = env_get("ANTHROPIC_MAX_RETRIES")
     if raw:
         try:
             v = int(raw)
@@ -413,7 +413,7 @@ def _resolve_pool_size() -> int:
     Positive int N means: score only the first N candidates; the rest are
     appended in hybrid order at the end.
     """
-    raw = os.environ.get("SONNET_RERANKER_POOL_SIZE")
+    raw = env_get("SONNET_RERANKER_POOL_SIZE")
     if raw:
         try:
             v = int(raw)
@@ -518,7 +518,7 @@ async def _score_one(client: Any, query: str, file_path: str, content: str,
         # changes (pool=15 vs pool=5). The 2026-05-14 Phase B'' analysis
         # hypothesized that pool-size sensitivity explains the harvested
         # corruption signal; this logging surfaces the data to verify.
-        if os.environ.get("SONNET_RERANKER_LOG_PER_CANDIDATE_SCORE"):
+        if env_get("SONNET_RERANKER_LOG_PER_CANDIDATE_SCORE"):
             query_hmac = query_fingerprint(query)[:16]
             LOG.info(
                 f"[SONNET_PER_CANDIDATE_SCORE] query_hmac_sha256={query_hmac} "
@@ -628,7 +628,7 @@ async def _rerank_async(
     # requests. Useful for debugging concurrency-related latency regressions.
     sem: asyncio.Semaphore | None = None
     try:
-        limit_str = os.environ.get("ANTHROPIC_CONCURRENCY_LIMIT")
+        limit_str = env_get("ANTHROPIC_CONCURRENCY_LIMIT")
         if limit_str:
             limit = int(limit_str)
             if limit > 0:
@@ -761,16 +761,16 @@ def rerank_with_sonnet(
 
     if not candidates:
         return _emit([], False, REASON_EMPTY_INPUT)
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not env_get("ANTHROPIC_API_KEY"):
         return _emit(candidates[:top_k], False, REASON_API_KEY_MISSING)
     if timeout is None:
         try:
-            timeout = float(os.environ.get("SONNET_RERANKER_TIMEOUT", DEFAULT_TIMEOUT))
+            timeout = float(env_get("SONNET_RERANKER_TIMEOUT", DEFAULT_TIMEOUT))
         except ValueError:
             timeout = DEFAULT_TIMEOUT
 
     try:
-        threshold = int(os.environ.get(
+        threshold = int(env_get(
             "SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD",
             DEFAULT_HYBRID_PRIOR_THRESHOLD,
         ))
@@ -778,11 +778,11 @@ def rerank_with_sonnet(
         threshold = DEFAULT_HYBRID_PRIOR_THRESHOLD
 
     path_overrides = _parse_path_overrides(
-        os.environ.get("SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES")
+        env_get("SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES")
     )
 
     clause_overrides = _parse_clause_overrides(
-        os.environ.get("SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES")
+        env_get("SONNET_RERANKER_PROMPT_CLAUSE_OVERRIDES")
     )
 
     pool_size = _resolve_pool_size()
