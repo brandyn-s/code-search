@@ -5,7 +5,7 @@ Replaces the pointwise reranker (15 isolated `_rerank_async` calls in
 simultaneously and returns ordered IDs + scores.
 
 Hypothesis (per GPT-5.5-pro session pass 2, D section): listwise closes
-assetman regression (CI [-0.16, -0.01] vs hybrid), mithrandir over-rotation
+billing regression (CI [-0.16, -0.01] vs hybrid), webapp over-rotation
 (CI [+0.02, +0.33]), slowest-of-15 latency tail, and arbitrary-tie behavior
 — in one architectural change. Retires
 `SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES` if it ships.

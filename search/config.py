@@ -181,9 +181,10 @@ RERANKER_AUTO_WITHOUT_KEY = "off"
 # Search mode allowlist (search_code's search_mode arg).
 SEARCH_MODES: Tuple[str, ...] = ("auto", "hybrid", "keyword", "semantic")
 
-# Packaged query-expansion profile selection. "generic" is the default;
-# "corsair" is a domain-specific profile kept for existing deployments.
-SYNONYM_PROFILES: Tuple[str, ...] = ("generic", "corsair", "off")
+# Packaged query-expansion profile selection. "generic" covers common
+# programming and NixOS vocabulary; "off" disables expansion. Deployments add
+# domain terms through CODE_SYNONYMS_PATH.
+SYNONYM_PROFILES: Tuple[str, ...] = ("generic", "off")
 
 
 @dataclass(frozen=True)
@@ -212,7 +213,7 @@ class SearchConfig:
 
     # Behavioral toggles
     synonym_profile: str
-    """Packaged query-expansion profile: corsair (default), generic, or off."""
+    """Packaged query-expansion profile: generic (default) or off."""
 
     query_expansion: bool
     """Domain synonym expansion on BM25 query (default on)."""

@@ -109,7 +109,7 @@ class TypeScriptChunker(LanguageChunker):
         styled components (`const X = styled.div...`), Story-typed
         consts (`const Default: Story = (...) => ...` — the type
         annotation can shadow direct arrow_function detection), and any
-        const-bound non-function expression. Mithrandir TSX inspection
+        const-bound non-function expression. Webapp TSX inspection
         (n=30 sample) showed components covered 24/39 = 62% — every miss
         was a `<no-name>` lexical_declaration.
 

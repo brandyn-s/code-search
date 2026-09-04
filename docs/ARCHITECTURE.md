@@ -205,12 +205,11 @@ diversification are deterministic post-retrieval policies.
 
 - **PPR:** `CODE_SEARCH_PPR_ENABLED` is false by default. When enabled, PPR
   reads a compatible graph sidecar and reports whether it applied.
-- **Reranking:** `RERANKER=sonnet` is the default mode. The result metadata
+- **Reranking:** `RERANKER=auto` is the default: Sonnet when `ANTHROPIC_API_KEY` is set, otherwise off. The result metadata
   distinguishes success, disabled state, missing key, timeout, rate limit, and
   fallback. A reranker exception does not discard the hybrid results.
 - **Query expansion:** BM25 synonym expansion is enabled by default under the
-  configured profile. The `corsair` profile remains the default until a
-  comparative measurement justifies a generic flip.
+  packaged `generic` profile; `CODE_SYNONYMS_PATH` overlays deployment terms.
 
 ### Result Metadata
 

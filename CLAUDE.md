@@ -64,7 +64,7 @@ per-cohort prompt/threshold overrides, latency-diag logging, `LLM_CONTEXT_PATH`,
 | `CONTENT_MODE` | `code` | `code`, `docs`, or `all` — affects search weights and, only when no provider is explicit or stored, selects `voyage-context` for docs and `voyage` for other modes |
 | `CONTEXTUAL_HEADERS` | `on` | Prepend `# From <path>` context headers before embedding |
 | `QUERY_EXPANSION` | `on` | Expand query terms with domain synonyms |
-| `CODE_SYNONYM_PROFILE` | `generic` | Built-in synonym profile: `generic`, `corsair`, or `off`. `corsair` is a domain-specific profile kept for existing deployments. |
+| `CODE_SYNONYM_PROFILE` | `generic` | Built-in synonym profile: `generic` or `off`. Add deployment-specific terms with `CODE_SYNONYMS_PATH`. |
 | `CODE_SYNONYMS_PATH` | `unset` | Optional JSON synonym overlay applied after the selected profile |
 | `CODE_SEARCH_LOG_LEVEL` | `INFO` | Minimum code-search log level |
 | `CODE_SEARCH_LOG_QUERY_TEXT` | `off` | Opt in to raw query text in logs; default off preserves query privacy |
@@ -109,7 +109,7 @@ manifest state):
   `stale_reindex_in_progress`, or `stale_reindex_failed`. The failure state
   means search is serving the last-good committed index after a blocking
   refresh failed.
-- **`manifest.status`** (Plan-2 E2-6, PR #122) — same strings
+- **`manifest.status`** — same strings
   `verify_index_integrity` reports, sourced from
   `search.epoch_manifest.ReadResult.freshness`:
 
@@ -117,7 +117,7 @@ manifest state):
 |--------|---------|
 | `fresh` | `manifest/current.json` exists; recorded artifact SHAs match disk |
 | `stale_using_prior_epoch` | current.json corrupt; fell back to verified prior.json |
-| `missing` | No manifest exists yet (legacy index pre-PR #119) |
+| `missing` | No manifest exists yet (index built before manifests were introduced) |
 | `corrupt` | Both current and prior failed verification |
 
 `epoch_id` is present when a manifest read succeeded. The `manifest` field is

@@ -35,8 +35,10 @@ Desktop, Cursor, Codex CLI, Windsurf, and generic stdio configuration:
 ```
 
 No API keys are required. Without `VOYAGE_API_KEY` the server embeds with a
-local model (downloaded on first index); without `ANTHROPIC_API_KEY` it skips
-LLM reranking. With both set it uses Voyage `voyage-4-large` and Sonnet
+local model (`all-MiniLM-L6-v2`, about 90 MB, downloaded on first index);
+without `ANTHROPIC_API_KEY` it skips LLM reranking. The package depends on
+PyTorch and sentence-transformers unconditionally, so the first install pulls
+roughly 1 GB of wheels even if you only use Voyage. With both set it uses Voyage `voyage-4-large` and Sonnet
 reranking. The server prints one startup line naming the resolved mode.
 
 Then, from the client:
@@ -155,7 +157,7 @@ The complete table is in [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md).
 | `CONTENT_MODE` | `code` | `code`, `docs`, or `all`; controls retrieval weights and boosts |
 | `CONTEXTUAL_HEADERS` | `on` | Add file/type/name context before embedding |
 | `QUERY_EXPANSION` | `on` | Expand BM25 terms with the selected synonym profile |
-| `CODE_SYNONYM_PROFILE` | `generic` | `generic`, `corsair`, or `off` |
+| `CODE_SYNONYM_PROFILE` | `generic` | `generic` or `off`; extend with `CODE_SYNONYMS_PATH` |
 | `CODE_SYNONYMS_PATH` | `unset` | Optional JSON overlay for the selected synonym profile |
 | `QUANTIZATION` | `int8` | FAISS `int8`, `float32`, or `binary` storage |
 | `CODE_SEARCH_STORAGE` | `~/.claude_code_search` | Root for project indexes and local models |

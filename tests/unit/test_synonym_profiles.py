@@ -51,7 +51,7 @@ def test_default_profile_loads_packaged_generic_v1(monkeypatch):
     assert expand_code_query("auth retry") == 'auth retry authentication oauth jwt token credential login entra backoff retryable retry_delay 429 529'
 
 
-def test_generic_profile_removes_corsair_terms_but_keeps_code_terms(monkeypatch):
+def test_generic_profile_selected_explicitly(monkeypatch):
     monkeypatch.setenv("CODE_SYNONYM_PROFILE", "generic")
     monkeypatch.delenv("CODE_SYNONYMS_PATH", raising=False)
 
@@ -297,16 +297,16 @@ def test_invalid_profile_warns_and_falls_back_to_generic(monkeypatch, caplog):
 
 
 def test_profile_selection_is_process_static_until_config_cache_clear(monkeypatch):
-    monkeypatch.setenv("CODE_SYNONYM_PROFILE", "corsair")
+    monkeypatch.setenv("CODE_SYNONYM_PROFILE", "off")
 
     from search.config import get_search_config
     from search.query_expansion import get_active_synonym_profile
 
     get_search_config.cache_clear()
-    assert get_active_synonym_profile().id == "corsair-v1"
+    assert get_active_synonym_profile().id == "off"
 
     monkeypatch.setenv("CODE_SYNONYM_PROFILE", "generic")
-    assert get_active_synonym_profile().id == "corsair-v1"
+    assert get_active_synonym_profile().id == "off"
 
     get_search_config.cache_clear()
     assert get_active_synonym_profile().id == "generic-v1"
@@ -315,16 +315,15 @@ def test_profile_selection_is_process_static_until_config_cache_clear(monkeypatc
 def test_profile_identity_fields_are_immutable():
     from search.query_expansion import CODE_SYNONYMS, load_synonym_profile
 
-    profile = load_synonym_profile("corsair")
+    profile = load_synonym_profile("generic")
 
     with pytest.raises(FrozenInstanceError):
-        profile.id = "corsair-v2"
+        profile.id = "generic-v2"
     with pytest.raises(FrozenInstanceError):
         profile.version = 2
 
-    load_synonym_profile("generic")
     load_synonym_profile("off")
-    assert load_synonym_profile("corsair").synonyms is CODE_SYNONYMS
+    assert load_synonym_profile("generic").synonyms is CODE_SYNONYMS
 
 
 def test_search_response_reports_active_synonym_profile(

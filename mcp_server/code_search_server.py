@@ -1376,7 +1376,7 @@ class CodeSearchServer:
         `switch_project` between every query. Per the 2026-05-02
         per-subproject baseline (`benchmarks/eval_v4/run_psm-full-consensus/REPORT.md`),
         voyage-4-large vs voyage-context-3 split per-subproject —
-        libnet wins +0.171 MRR for voyage-context, nix wins +0.069 for
+        netlib wins +0.171 MRR for voyage-context, nix wins +0.069 for
         voyage-4-large. Per-search provider routing enables querying
         the right provider for the right subproject.
 

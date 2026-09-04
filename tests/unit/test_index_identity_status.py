@@ -694,9 +694,9 @@ def test_background_worker_publishes_ready_identity(
     _configure_deferred_successful_index(server, project_dir, monkeypatch)
     active_profile = {
         "value": {
-            "name": "corsair",
+            "name": "generic",
             "version": 1,
-            "id": "corsair-v1",
+            "id": "generic-v1",
         }
     }
     monkeypatch.setattr(
@@ -800,9 +800,9 @@ def test_identity_incoherent_run_preserves_previous_provenance(
     project_dir.mkdir()
     info_file = project_dir / "project_info.json"
     previous_profile = {
-        "name": "corsair",
+        "name": "generic",
         "version": 1,
-        "id": "corsair-v1",
+        "id": "generic-v1",
     }
     info_file.write_text(
         json.dumps(
@@ -869,9 +869,9 @@ def test_completed_metadata_failure_cannot_publish_ready_identity(
     project_dir.mkdir()
     info_file = project_dir / "project_info.json"
     previous_profile = {
-        "name": "corsair",
+        "name": "generic",
         "version": 1,
-        "id": "corsair-v1",
+        "id": "generic-v1",
     }
     info_file.write_text(
         json.dumps(

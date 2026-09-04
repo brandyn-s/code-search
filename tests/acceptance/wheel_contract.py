@@ -114,7 +114,6 @@ def _assert_wheel_contents(wheel: Path) -> None:
 
     assert "search/integrity_audit.py" in names
     assert "search/index_identity.py" in names
-    assert "search/profiles/corsair-v1.json" in names
     assert "search/profiles/generic-v1.json" in names
     # Wheel METADATA normalizes specifier order (anthropic<1.0.0,>=0.40.0),
     # so match the line and assert both bounds instead of a literal prefix.
@@ -201,7 +200,6 @@ def _assert_fresh_install(
                 "assert normalize_remote_url("
                 "'git@GitHub.COM:Org/Repo.git'"
                 ") == 'https://github.com/Org/Repo'; "
-                "assert load_synonym_profile('corsair').id == 'corsair-v1'; "
                 "assert load_synonym_profile('generic').id == 'generic-v1'; "
                 "assert len(derive_index_generation("
                 "repository_id='a' * 64, "

@@ -14,8 +14,9 @@ First release from the public primary repository `brandyn-s/code-search`.
 - `RERANKER` defaults to `auto`: Sonnet pointwise reranking when
   `ANTHROPIC_API_KEY` is set, otherwise `off`. Previously the default was
   `sonnet`, which degraded silently on installs without a key.
-- `CODE_SYNONYM_PROFILE` defaults to `generic`; the domain-specific `corsair`
-  profile remains available as an opt-in.
+- `CODE_SYNONYM_PROFILE` defaults to `generic`. The deployment-specific
+  `corsair` profile was removed from the public package; use
+  `CODE_SYNONYMS_PATH` to add domain vocabulary.
 - The server prints one startup line naming the resolved embedding provider
   and reranker mode.
 - `mcp` is pinned below 2.0; this code targets the 1.x `FastMCP` API.
@@ -28,6 +29,9 @@ First release from the public primary repository `brandyn-s/code-search`.
   derived from internal codebases.
 
 ### Added
+- `docs/ENV_REFERENCE.md` rewritten as a complete, current reference for every
+  environment variable the server reads.
+- `[tool.ruff]` correctness baseline and a pip Dependabot ecosystem.
 - `LICENSE` (GPL-3.0-only), `CHANGELOG.md`, `CONTRIBUTING.md`, issue and pull
   request templates, and `docs/clients.md` covering Claude Code, Claude
   Desktop, Cursor, Codex CLI, Windsurf, and generic stdio configuration.

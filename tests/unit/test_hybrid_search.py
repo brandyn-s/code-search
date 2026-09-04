@@ -130,11 +130,10 @@ def test_expand_query_stem_strips_whole_suffix_not_char_class():
     .rstrip("tion").rstrip("ed")`. Each rstrip(<chars>) removes a SET of
     trailing chars, not a suffix. So "navigations" stemmed to "naviga"
     (s -> ing-chars -> tion-chars -> ed-chars), never matching the
-    CODE_SYNONYMS key "navigation". This test exercises the stem-equivalence
+    synonym key "service". This test exercises the stem-equivalence
     path that the existing tests don't (they pass the key directly).
     """
     from search.searcher import expand_code_query, _query_stem
-    _use_profile("corsair")
 
     # Direct stemmer assertions
     assert _query_stem("navigations") == "navigation"
@@ -142,9 +141,9 @@ def test_expand_query_stem_strips_whole_suffix_not_char_class():
     assert _query_stem("logging") == "logg"  # strips "ing" suffix cleanly
     assert _query_stem("powered") == "power"
     assert _query_stem("xy") == "xy"  # too short to stem
-    # Stem-via-expansion: "sensors" should hit the "sensor" key and expand
-    expanded = expand_code_query("sensors data")
-    assert "internal-svc-62" in expanded.lower() or "internal-svc-51" in expanded.lower() or "internal-svc-28" in expanded.lower(), expanded
+    # Stem-via-expansion: "services" should hit the "service" key and expand
+    expanded = expand_code_query("services list")
+    assert "systemd" in expanded.lower(), expanded
 
 
 def _use_profile(name):
@@ -156,9 +155,6 @@ def _use_profile(name):
     os.environ["CODE_SYNONYM_PROFILE"] = name
     get_search_config.cache_clear()
     clear_synonym_cache()
-
-
-import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -184,23 +180,6 @@ def test_expand_query_nix_domain():
     expanded2 = expand_code_query("service daemon")
     assert "systemd" in expanded2.lower()
 
-
-def test_expand_query_corsair_services():
-    """Corsair service synonyms should expand domain queries to daemon names."""
-    from search.searcher import expand_code_query
-    _use_profile("corsair")
-
-    expanded = expand_code_query("sensor navigation GPS")
-    assert "internal-svc-62" in expanded.lower() or "internal-svc-51" in expanded.lower()
-
-    expanded2 = expand_code_query("motor propulsion engine")
-    assert "internal-svc-12" in expanded2.lower()
-
-    expanded3 = expand_code_query("camera video perception")
-    assert "internal-svc-26" in expanded3.lower() or "internal-svc-27" in expanded3.lower()
-
-    expanded4 = expand_code_query("communication radio mesh")
-    assert "internal-svc-44" in expanded4.lower() or "internal-svc-41" in expanded4.lower()
 
 
 def test_expand_query_case_insensitive():

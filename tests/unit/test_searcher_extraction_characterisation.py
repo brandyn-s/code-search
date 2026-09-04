@@ -125,7 +125,7 @@ def test_characterises_legacy_searcher_exports():
     assert callable(searcher_module._query_stem)
     assert callable(searcher_module._active_synonyms)
     assert callable(searcher_module.expand_code_query)
-    assert searcher_module.CODE_SYNONYMS["navigation"][0] == "internal-svc-62"
+    assert searcher_module.CODE_SYNONYMS["service"][0] == "systemd"
     assert searcher_module.SearchResult.__name__ == "SearchResult"
 
 

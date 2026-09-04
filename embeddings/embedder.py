@@ -421,7 +421,7 @@ def _factory_voyage_code3(model_name: str, cache_dir: str, device: str) -> Any:
 
     A/B vs voyage-4-large (PSM-full, n=102 golden + 183 harvested, rerank=off,
     2026-05-15): aggregate CI includes zero; per-subproject CI excludes zero on
-    mithrandir TypeScript (+0.119 MRR) and nix declarative config (-0.091 MRR).
+    webapp TypeScript (+0.119 MRR) and nix declarative config (-0.091 MRR).
     Production default stays voyage-4-large. Enable with
     EMBEDDING_PROVIDER=voyage-code-3 for TypeScript-heavy corpora.
     See internal eval finding (2026-05-15).
@@ -759,7 +759,7 @@ class CodeEmbedder:
             # parent-component link. When an interface chunk's name ends
             # in "Props", append "(props for X)" to the contextual header
             # where X is the inferred parent component name. The signal
-            # is that mithrandir TSX has 153 such interfaces, all sibling-
+            # is that webapp TSX has 153 such interfaces, all sibling-
             # paired with a same-file component declaration.
             #
             # Implementation note: the suffix-strip heuristic is approximate

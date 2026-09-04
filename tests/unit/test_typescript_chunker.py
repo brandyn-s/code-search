@@ -155,7 +155,7 @@ class TestTypeScriptChunkerPhaseE:
     Pre-Phase-E: `_extract_arrow_binding_name` returned "" when the value
     was not an arrow_function/function. That left styled components,
     Story-typed consts, type-asserted arrows, and any const-bound
-    expression as `<no-name>` chunks. Mithrandir TSX (n=30 sample)
+    expression as `<no-name>` chunks. Webapp TSX (n=30 sample)
     showed component coverage of 24/39 = 62% — every miss was a
     `<no-name>` lexical_declaration.
 

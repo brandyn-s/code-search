@@ -761,7 +761,7 @@ def test_score_one_passes_per_call_timeout_to_sdk(monkeypatch):
 # ─── Per-path hybrid-prior threshold overrides (D3, 2026-05-09) ───
 # Tests for SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES env var.
 # Bootstrap CI on 2026-05-09 PSM eval data showed sonnet rerank effect splits
-# by subproject (assetman: -0.0695 hurts, mithrandir: +0.173 helps; both CIs
+# by subproject (billing: -0.0695 hurts, webapp: +0.173 helps; both CIs
 # excluded zero). Per-path override lets the threshold tune by domain.
 
 
@@ -775,16 +775,16 @@ def test_parse_path_overrides_empty():
 def test_parse_path_overrides_valid():
     from search.sonnet_reranker import _parse_path_overrides
 
-    result = _parse_path_overrides('{"assetman/": 11, "mithrandir/": 4}')
-    assert result == {"assetman/": 11, "mithrandir/": 4}
+    result = _parse_path_overrides('{"billing/": 11, "webapp/": 4}')
+    assert result == {"billing/": 11, "webapp/": 4}
 
 
 def test_parse_path_overrides_normalizes_separators():
     from search.sonnet_reranker import _parse_path_overrides
 
     # Windows-style path prefix gets normalized to forward-slash
-    result = _parse_path_overrides('{"assetman\\\\src/": 9}')
-    assert result == {"assetman/src/": 9}
+    result = _parse_path_overrides('{"billing\\\\src/": 9}')
+    assert result == {"billing/src/": 9}
 
 
 def test_parse_path_overrides_malformed_json_returns_empty():
@@ -806,7 +806,7 @@ def test_parse_path_overrides_skips_invalid_entries():
 def test_effective_threshold_no_overrides_returns_base():
     from search.sonnet_reranker import _effective_threshold
 
-    candidates = [{"file_path": "assetman/src/foo.rs"}]
+    candidates = [{"file_path": "billing/src/foo.rs"}]
     assert _effective_threshold(candidates, base_threshold=6, path_overrides={}) == 6
 
 
@@ -814,15 +814,15 @@ def test_effective_threshold_no_match_returns_base():
     from search.sonnet_reranker import _effective_threshold
 
     candidates = [{"file_path": "nix/modules/foo.nix"}]
-    overrides = {"assetman/": 11}
+    overrides = {"billing/": 11}
     assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 6
 
 
 def test_effective_threshold_match_raises_above_base():
     from search.sonnet_reranker import _effective_threshold
 
-    candidates = [{"file_path": "assetman/src/foo.rs"}]
-    overrides = {"assetman/": 11}
+    candidates = [{"file_path": "billing/src/foo.rs"}]
+    overrides = {"billing/": 11}
     assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
 
 
@@ -831,11 +831,11 @@ def test_effective_threshold_takes_max_across_matches():
     from search.sonnet_reranker import _effective_threshold
 
     candidates = [
-        {"file_path": "assetman/src/foo.rs"},      # → 11
-        {"file_path": "mithrandir/src/page.tsx"},  # → 4
+        {"file_path": "billing/src/foo.rs"},      # → 11
+        {"file_path": "webapp/src/page.tsx"},  # → 4
     ]
-    overrides = {"assetman/": 11, "mithrandir/": 4}
-    # Conservative: pick the higher (sonnet hurts assetman; better to fall back)
+    overrides = {"billing/": 11, "webapp/": 4}
+    # Conservative: pick the higher (sonnet hurts billing; better to fall back)
     assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
 
 
@@ -843,8 +843,8 @@ def test_effective_threshold_below_base_does_not_lower():
     """Override BELOW base never lowers the cohort threshold."""
     from search.sonnet_reranker import _effective_threshold
 
-    candidates = [{"file_path": "mithrandir/src/page.tsx"}]
-    overrides = {"mithrandir/": 4}  # below base
+    candidates = [{"file_path": "webapp/src/page.tsx"}]
+    overrides = {"webapp/": 4}  # below base
     # Lowering thresholds via overrides isn't yet supported (would need a
     # different design — the current rule uses MAX). Cohort stays at base.
     assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 6
@@ -855,10 +855,10 @@ def test_effective_threshold_falls_back_to_alt_path_keys():
     from search.sonnet_reranker import _effective_threshold
 
     candidates = [
-        {"file": "assetman/src/foo.rs"},          # no file_path key
-        {"relative_path": "assetman/src/bar.rs"},  # no file or file_path key
+        {"file": "billing/src/foo.rs"},          # no file_path key
+        {"relative_path": "billing/src/bar.rs"},  # no file or file_path key
     ]
-    overrides = {"assetman/": 11}
+    overrides = {"billing/": 11}
     assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
 
 
@@ -866,8 +866,8 @@ def test_effective_threshold_handles_windows_separators_in_paths():
     """Candidate paths may use Windows backslashes; normalize before matching."""
     from search.sonnet_reranker import _effective_threshold
 
-    candidates = [{"file_path": "assetman\\src\\foo.rs"}]
-    overrides = {"assetman/": 11}
+    candidates = [{"file_path": "billing\\src\\foo.rs"}]
+    overrides = {"billing/": 11}
     assert _effective_threshold(candidates, base_threshold=6, path_overrides=overrides) == 11
 
 
@@ -1118,9 +1118,9 @@ def test_parse_clause_overrides_unset_returns_empty():
 
 def test_parse_clause_overrides_valid_json():
     from search.sonnet_reranker import _parse_clause_overrides
-    raw = '{"mithrandir/": "- TS clause", "assetman/": "- Rust clause"}'
+    raw = '{"webapp/": "- TS clause", "billing/": "- Rust clause"}'
     out = _parse_clause_overrides(raw)
-    assert out == {"mithrandir/": "- TS clause", "assetman/": "- Rust clause"}
+    assert out == {"webapp/": "- TS clause", "billing/": "- Rust clause"}
 
 
 def test_parse_clause_overrides_malformed_json_returns_empty():
@@ -1133,9 +1133,9 @@ def test_parse_clause_overrides_malformed_json_returns_empty():
 def test_parse_clause_overrides_non_string_values_skipped():
     """Entries with non-string values are skipped (warn-not-raise)."""
     from search.sonnet_reranker import _parse_clause_overrides
-    raw = '{"mithrandir/": "- TS clause", "bad/": 42}'
+    raw = '{"webapp/": "- TS clause", "bad/": 42}'
     out = _parse_clause_overrides(raw)
-    assert out == {"mithrandir/": "- TS clause"}
+    assert out == {"webapp/": "- TS clause"}
 
 
 def test_parse_clause_overrides_backslash_normalized():
@@ -1149,17 +1149,17 @@ def test_parse_clause_overrides_backslash_normalized():
 
 def test_matching_clauses_no_overrides_returns_empty():
     from search.sonnet_reranker import _matching_clauses
-    assert _matching_clauses("mithrandir/app.tsx", {}) == []
-    assert _matching_clauses("", {"mithrandir/": "- TS"}) == []
+    assert _matching_clauses("webapp/app.tsx", {}) == []
+    assert _matching_clauses("", {"webapp/": "- TS"}) == []
 
 
 def test_matching_clauses_single_prefix_match():
     from search.sonnet_reranker import _matching_clauses
-    overrides = {"mithrandir/": "- TS clause", "assetman/": "- Rust clause"}
+    overrides = {"webapp/": "- TS clause", "billing/": "- Rust clause"}
     # TS candidate gets ONLY the TS clause
-    assert _matching_clauses("mithrandir/app.tsx", overrides) == ["- TS clause"]
+    assert _matching_clauses("webapp/app.tsx", overrides) == ["- TS clause"]
     # Rust candidate gets ONLY the Rust clause
-    assert _matching_clauses("assetman/src/main.rs", overrides) == ["- Rust clause"]
+    assert _matching_clauses("billing/src/main.rs", overrides) == ["- Rust clause"]
     # Nix candidate gets nothing (cross-cohort isolation)
     assert _matching_clauses("nix/modules/foo.nix", overrides) == []
 
@@ -1180,22 +1180,22 @@ def test_matching_clauses_deterministic_alphabetical_order():
 def test_matching_clauses_windows_path_normalized():
     """Windows-style file_path (backslashes) matches forward-slash prefix."""
     from search.sonnet_reranker import _matching_clauses
-    overrides = {"mithrandir/": "- TS clause"}
-    assert _matching_clauses(r"mithrandir\app.tsx", overrides) == ["- TS clause"]
+    overrides = {"webapp/": "- TS clause"}
+    assert _matching_clauses(r"webapp\app.tsx", overrides) == ["- TS clause"]
 
 
 @pytest.mark.asyncio
 async def test_clause_override_cross_cohort_isolation(monkeypatch):
-    """LOAD-BEARING: a clause keyed on 'mithrandir/' must NOT appear in the
-    prompt scoring a 'libnet/' candidate. This is the structural guarantee
+    """LOAD-BEARING: a clause keyed on 'webapp/' must NOT appear in the
+    prompt scoring a 'netlib/' candidate. This is the structural guarantee
     that per-cohort dispatch eliminates cross-cohort interference.
     """
     from search.sonnet_reranker import _rerank_async
 
     # Mixed cohort: 1 TypeScript + 1 Rust candidate.
     candidates = [
-        {"chunk_id": "ts1", "file_path": "mithrandir/app.tsx", "full_content": "TS code"},
-        {"chunk_id": "rust1", "file_path": "libnet/src/tailscale.rs", "full_content": "Rust code"},
+        {"chunk_id": "ts1", "file_path": "webapp/app.tsx", "full_content": "TS code"},
+        {"chunk_id": "rust1", "file_path": "netlib/src/tailscale.rs", "full_content": "Rust code"},
     ]
 
     # Capture extra_clauses passed to _score_one per candidate.
@@ -1207,20 +1207,20 @@ async def test_clause_override_cross_cohort_isolation(monkeypatch):
     monkeypatch.setattr("search.sonnet_reranker._score_one", capture_score)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
-    overrides = {"mithrandir/": "- TS-only clause; must not leak to Rust scoring"}
+    overrides = {"webapp/": "- TS-only clause; must not leak to Rust scoring"}
     await _rerank_async(
         "q", candidates, top_k=2, timeout=8.0, hybrid_prior_threshold=7,
         clause_overrides=overrides,
     )
 
     # TS candidate's prompt contains the TS-only clause.
-    ts_extra = next(extra for fp, extra in captured if fp == "mithrandir/app.tsx")
+    ts_extra = next(extra for fp, extra in captured if fp == "webapp/app.tsx")
     assert "TS-only clause" in ts_extra
 
     # Rust candidate's prompt has NO TS-only clause. Cross-cohort isolation.
-    rust_extra = next(extra for fp, extra in captured if fp == "libnet/src/tailscale.rs")
+    rust_extra = next(extra for fp, extra in captured if fp == "netlib/src/tailscale.rs")
     assert "TS-only clause" not in rust_extra
-    assert rust_extra == ""  # No overrides match libnet/, so empty extra_clauses
+    assert rust_extra == ""  # No overrides match netlib/, so empty extra_clauses
 
 
 @pytest.mark.asyncio
@@ -1232,7 +1232,7 @@ async def test_clause_override_empty_when_no_overrides(monkeypatch):
     from search.sonnet_reranker import _rerank_async
 
     candidates = [
-        {"chunk_id": "c1", "file_path": "mithrandir/app.tsx", "full_content": "x"},
+        {"chunk_id": "c1", "file_path": "webapp/app.tsx", "full_content": "x"},
     ]
     captured = []
     async def capture_score(client, query, file_path, content, extra_clauses=""):

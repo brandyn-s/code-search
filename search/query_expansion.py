@@ -23,7 +23,6 @@ class SynonymProfile:
 
 
 _PROFILE_FILES = {
-    "corsair": "corsair-v1.json",
     "generic": "generic-v1.json",
 }
 
@@ -98,9 +97,10 @@ def get_active_synonym_profile_metadata() -> Dict[str, object]:
     return metadata
 
 
-# Backward-compatible constant: it remains the exact Corsair v1 mapping even
-# when another profile is active for query expansion.
-CODE_SYNONYMS = load_synonym_profile("corsair").synonyms
+# Backward-compatible constant: the packaged generic-v1 mapping. Query
+# expansion reads the active profile (see get_active_synonym_profile), not
+# this constant.
+CODE_SYNONYMS = load_synonym_profile("generic").synonyms
 
 
 # Order matters: longest suffix first so "navigations" -> strip "s" (not "tion").

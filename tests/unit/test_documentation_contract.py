@@ -111,7 +111,7 @@ def test_process_static_environment_contracts_and_defaults_are_documented() -> N
         assert "`off`, `metadata`, or `full`" in document
 
     for document in (README, CLAUDE, ENV_REFERENCE):
-        assert "`generic`, `corsair`, or `off`" in document
+        assert "`generic` or `off`" in document
 
 
 def test_custom_remote_embedding_dimension_contract_is_documented() -> None:

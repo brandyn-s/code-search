@@ -44,19 +44,19 @@ def test_overlay_extends_and_overrides(tmp_path, monkeypatch):
 
 
 def test_null_disables_builtin_key(tmp_path, monkeypatch):
-    """A non-Corsair deployment can switch off the daemon expansions."""
+    """A deployment can switch off built-in keys it does not want expanded."""
     overlay = tmp_path / "synonyms.json"
-    overlay.write_text(json.dumps({"power": None, "camera": None}))
+    overlay.write_text(json.dumps({"service": None, "firewall": None}))
     monkeypatch.setenv("CODE_SYNONYMS_PATH", str(overlay))
     _reset_overlay_cache()
 
     merged = _active_synonyms()
-    assert "power" not in merged
-    assert "camera" not in merged
+    assert "service" not in merged
+    assert "firewall" not in merged
 
-    expanded = expand_code_query("power management")
-    assert "internal-svc-18" not in expanded.split(), (
-        "disabled key still expanded with Corsair daemon names"
+    expanded = expand_code_query("service daemon")
+    assert "systemd" not in expanded.split(), (
+        "disabled key still expanded"
     )
     _reset_overlay_cache()
 

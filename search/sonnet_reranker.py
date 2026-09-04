@@ -105,8 +105,8 @@ def _parse_path_overrides(raw: str | None) -> dict[str, int]:
     Accepts a JSON object mapping path-prefix -> threshold int.
     Returns {} on missing, empty, or malformed input (never raises).
 
-    Example: '{"assetman/": 11, "mithrandir/": 4}' produces
-    {"assetman/": 11, "mithrandir/": 4}.
+    Example: '{"billing/": 11, "webapp/": 4}' produces
+    {"billing/": 11, "webapp/": 4}.
     """
     if not raw:
         return {}
@@ -149,9 +149,9 @@ def _effective_threshold(
     base_threshold and every matching override.
 
     Rationale: if we lower the threshold for a domain where Sonnet helps
-    (mithrandir +0.173 MRR, bootstrap CI excludes 0), we want sonnet to
+    (webapp +0.173 MRR, bootstrap CI excludes 0), we want sonnet to
     fire more often. If we raise the threshold for a domain where Sonnet
-    hurts (assetman -0.0695 MRR, bootstrap CI excludes 0), we want sonnet
+    hurts (billing -0.0695 MRR, bootstrap CI excludes 0), we want sonnet
     to fall back to hybrid more often. Mixed cohorts (queries returning
     candidates from BOTH domains) take the higher (more conservative)
     threshold so the harmful domain's behavior dominates.
@@ -265,8 +265,8 @@ def _parse_clause_overrides(raw: str | None) -> dict[str, str]:
     Accepts a JSON object mapping path-prefix -> clause text (str).
     Returns {} on missing, empty, or malformed input (never raises).
 
-    Example: '{"mithrandir/": "- For TypeScript React component queries..."}'
-    produces {"mithrandir/": "- For TypeScript React component queries..."}.
+    Example: '{"webapp/": "- For TypeScript React component queries..."}'
+    produces {"webapp/": "- For TypeScript React component queries..."}.
 
     Path-prefix keys are normalized to forward-slash for cross-platform
     matching, mirroring _parse_path_overrides. Clause-text values are
@@ -310,7 +310,7 @@ def _matching_clauses(file_path: str, clause_overrides: dict[str, str]) -> list[
     Per-candidate (per-call) dispatch: each Sonnet scoring call sees ONLY
     the clauses that match its candidate's file_path. Cross-cohort
     interference is physically impossible — a clause keyed on
-    "mithrandir/" never appears in a prompt scoring a "libnet/" candidate.
+    "webapp/" never appears in a prompt scoring a "netlib/" candidate.
 
     Returns [] when clause_overrides is empty or no prefix matches.
     """
@@ -642,8 +642,8 @@ async def _rerank_async(
         # Per-cohort clause dispatch (Phase 2, 2026-05-24): for each candidate,
         # look up its file_path against clause_overrides; matching clauses are
         # injected into THAT candidate's prompt only. Cross-cohort interference
-        # is physically impossible — a clause keyed on "mithrandir/" never
-        # appears in a prompt scoring a "libnet/" candidate.
+        # is physically impossible — a clause keyed on "webapp/" never
+        # appears in a prompt scoring a "netlib/" candidate.
         tasks = []
         for c in pool:
             full = c.get("full_content") or c.get("content") or c.get("content_preview") or ""
@@ -685,7 +685,7 @@ async def _rerank_async(
         # Per-path overrides (2026-05-09 D3): when SONNET_RERANKER_HYBRID_PRIOR_THRESHOLD_PATH_OVERRIDES
         # is set, the cohort threshold is raised above base whenever any
         # candidate path matches an override prefix. Used to suppress sonnet
-        # rerank on domains where it empirically regresses (e.g. assetman per
+        # rerank on domains where it empirically regresses (e.g. billing per
         # bootstrap CI 2026-05-09).
         # Phase A: threshold check uses the FULL candidate set (so per-path
         # overrides on tail candidates still apply) — this is correct because
