@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+import re
 import tomllib
 from pathlib import Path
 
@@ -312,6 +313,9 @@ def test_readme_installs_the_verified_versioned_release() -> None:
         (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
     version = project["project"]["version"]
+    # Rehearsal pre-releases (X.Y.ZrcN) keep the README on the base version;
+    # the docs describe the release users will install, not the rehearsal.
+    version = re.sub(r"rc\d+$", "", version)
 
     assert f'Install the verified v{version} release' in readme
     assert f'TAG="v{version}"' in readme

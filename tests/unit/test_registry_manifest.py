@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -16,6 +17,9 @@ def _manifest() -> dict:
 def test_manifest_names_the_pypi_package_and_matches_pyproject_version() -> None:
     manifest = _manifest()
     project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    # The registry manifest tracks released versions; rehearsal pre-releases
+    # (X.Y.ZrcN) in pyproject compare on their base version.
+    project = {**project, "version": re.sub(r"rc\d+$", "", project["version"])}
     assert manifest["name"] == "io.github.brandyn-s/code-search"
     assert manifest["$schema"].startswith("https://static.modelcontextprotocol.io/schemas/")
     assert manifest["version"] == project["version"]
