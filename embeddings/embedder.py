@@ -9,6 +9,7 @@ import numpy as np
 from chunking.code_chunk import CodeChunk
 from common_utils import get_storage_dir
 from search.env import env_get
+from embeddings.local_extra import require_local_extra, local_extra_available  # noqa: F401 - re-exported
 
 
 @dataclass
@@ -456,6 +457,7 @@ def _factory_jina(
     *,
     output_dimension: Optional[int] = None,
 ) -> Any:
+    require_local_extra()
     from embeddings.jina_code_embedder import JinaCodeEmbedder
     model_name = model_name or env_get(
         "LOCAL_EMBEDDING_MODEL", "jinaai/jina-code-embeddings-0.5b"
@@ -474,6 +476,7 @@ def _factory_jina(
 
 @register_provider("local")
 def _factory_local(model_name: str, cache_dir: str, device: str) -> Any:
+    require_local_extra()
     from embeddings.sentence_transformer import SentenceTransformerModel
     model_name = model_name or env_get(
         "LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
@@ -485,6 +488,7 @@ def _factory_local(model_name: str, cache_dir: str, device: str) -> Any:
 
 @register_provider("gemma")
 def _factory_gemma(model_name: str, cache_dir: str, device: str) -> Any:
+    require_local_extra()
     from embeddings.gemma import GemmaEmbeddingModel
     # Gemma constructor doesn't accept model_name; keep the original
     # behavior of ignoring it.

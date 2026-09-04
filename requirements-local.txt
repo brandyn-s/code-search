@@ -1,0 +1,3 @@
+# Optional: local (offline) embeddings and the cross-encoder reranker.
+# Equivalent to: pip install 'code-search-mcp[local]'
+sentence-transformers>=5.1.0

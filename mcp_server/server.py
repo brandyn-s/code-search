@@ -99,6 +99,11 @@ def _log_startup_mode() -> None:
         hint = ""
         if reranker == "off" and not env_get("ANTHROPIC_API_KEY") and not env_get("RERANKER"):
             hint = " (set ANTHROPIC_API_KEY to enable LLM reranking)"
+        from embeddings.local_extra import LOCAL_EXTRA_HINT, local_extra_available
+        from embeddings.embedder import _LOCAL_MODEL_PROVIDERS
+
+        if emb.provider in _LOCAL_MODEL_PROVIDERS and not local_extra_available():
+            hint += f" [{LOCAL_EXTRA_HINT}]"
         print(f"code-search: embeddings={embeddings} reranker={reranker}{hint}", file=sys.stderr, flush=True)
     except Exception:  # pragma: no cover - informational only
         logger.debug("startup mode summary failed", exc_info=True)

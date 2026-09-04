@@ -6,10 +6,9 @@ from functools import cached_property
 import os
 import logging
 import numpy as np
-from sentence_transformers import SentenceTransformer
-import torch
 
 from embeddings.embedding_model import EmbeddingModel
+from embeddings.local_extra import require_local_extra
 
 
 class SentenceTransformerModel(EmbeddingModel):
@@ -52,6 +51,7 @@ class SentenceTransformerModel(EmbeddingModel):
         except Exception as e:
             self._logger.debug(f"Offline mode detection skipped: {e}")
 
+        SentenceTransformer = require_local_extra().SentenceTransformer
         try:
             model_source = str(local_model_dir) if local_model_dir else self.model_name
             model = SentenceTransformer(
@@ -116,6 +116,8 @@ class SentenceTransformerModel(EmbeddingModel):
             return
 
         try:
+            import torch
+
             model = self.model
             model.to('cpu')
 

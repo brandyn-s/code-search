@@ -6,16 +6,19 @@ it. The examples below start the published package with `uvx`; substitute
 script, if you prefer.
 
 Both API keys are optional. Without `VOYAGE_API_KEY` the server embeds with a
-local model; without `ANTHROPIC_API_KEY` it skips LLM reranking. The server
-prints one line at startup saying which mode it resolved to.
+local model, which requires the `[local]` extra (`uvx --from
+'code-search-mcp[local]' code-search-mcp`; adds PyTorch, about 1 GB). Without
+`ANTHROPIC_API_KEY` it skips LLM reranking. The server prints one line at
+startup saying which mode it resolved to.
 
 ## Claude Code
 
 ```bash
-claude mcp add code-search --scope user -- uvx code-search-mcp
-# with cloud providers:
+# cloud embeddings
 claude mcp add code-search --scope user \
   -e VOYAGE_API_KEY=... -e ANTHROPIC_API_KEY=... -- uvx code-search-mcp
+# fully offline
+claude mcp add code-search --scope user -- uvx --from 'code-search-mcp[local]' code-search-mcp
 ```
 
 Or install the [code-intelligence plugin](https://github.com/brandyn-s/codebase-search-plugin),

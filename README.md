@@ -12,11 +12,15 @@ emit evidence when the index no longer matches the checkout.
 
 ## Quick Start
 
-Install and run with [uv](https://docs.astral.sh/uv/) (or `pipx run
-code-search-mcp`, or `pip install code-search-mcp`):
+Install and run with [uv](https://docs.astral.sh/uv/) (or `pipx`, or `pip
+install code-search-mcp`):
 
 ```bash
-claude mcp add code-search --scope user -- uvx code-search-mcp
+# cloud embeddings (Voyage): ~150 MB install
+claude mcp add code-search --scope user -e VOYAGE_API_KEY=... -- uvx code-search-mcp
+
+# fully offline: adds the local model stack (PyTorch, ~1 GB)
+claude mcp add code-search --scope user -- uvx --from 'code-search-mcp[local]' code-search-mcp
 ```
 
 Any MCP client works; see [docs/clients.md](docs/clients.md) for Claude
@@ -35,11 +39,11 @@ Desktop, Cursor, Codex CLI, Windsurf, and generic stdio configuration:
 ```
 
 No API keys are required. Without `VOYAGE_API_KEY` the server embeds with a
-local model (`all-MiniLM-L6-v2`, about 90 MB, downloaded on first index);
-without `ANTHROPIC_API_KEY` it skips LLM reranking. The package depends on
-PyTorch and sentence-transformers unconditionally, so the first install pulls
-roughly 1 GB of wheels even if you only use Voyage. With both set it uses Voyage `voyage-4-large` and Sonnet
-reranking. The server prints one startup line naming the resolved mode.
+local model (`all-MiniLM-L6-v2`, about 90 MB, downloaded on first index),
+which needs the `[local]` extra; without `ANTHROPIC_API_KEY` it skips LLM
+reranking. With both keys set it uses Voyage `voyage-4-large` and Sonnet
+reranking. The server prints one startup line naming the resolved mode, and
+tells you exactly what to install if the local stack is missing.
 
 Then, from the client:
 

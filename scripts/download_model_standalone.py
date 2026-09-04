@@ -9,7 +9,7 @@ from pathlib import Path
 try:
     from sentence_transformers import SentenceTransformer
 except ImportError:
-    print("sentence-transformers not installed. Install with: uv add sentence-transformers")
+    print("sentence-transformers not installed. Install with: pip install 'code-search-mcp[local]'")
     sys.exit(1)
 
 
