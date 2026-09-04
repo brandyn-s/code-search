@@ -456,90 +456,12 @@ class TestFullSearchFlow:
     def test_project_manager_operations(self, test_project_path, mock_storage_dir):
         """Test project management functionality."""
         return  # ProjectManager not yet implemented
-        
-        # Test creating a new project
-        project_name = "test_project"
-        project_info = manager.create_project(
-            project_name,
-            str(test_project_path),
-            description="Test project for integration tests"
-        )
-        
-        assert project_info['name'] == project_name
-        assert project_info['path'] == str(test_project_path)
-        assert 'created_at' in project_info
-        
-        # Test listing projects
-        projects = manager.list_projects()
-        assert len(projects) == 1
-        assert projects[0]['name'] == project_name
-        
-        # Test getting project info
-        info = manager.get_project(project_name)
-        assert info is not None
-        assert info['name'] == project_name
-        
-        # Test switching projects
-        success = manager.switch_project(project_name)
-        assert success
-        assert manager.get_current_project() == project_name
-        
-        # Test updating project info
-        updated = manager.update_project(
-            project_name,
-            description="Updated description",
-            tags=["python", "test"]
-        )
-        assert updated
-        
-        info = manager.get_project(project_name)
-        assert info['description'] == "Updated description"
-        assert info['tags'] == ["python", "test"]
-        
-        # Test project statistics
-        stats = manager.get_project_stats(project_name)
-        assert stats is not None
-        # Stats might be empty if index doesn't exist yet
-        
-        # Test deleting project
-        deleted = manager.delete_project(project_name)
-        assert deleted
-        
-        projects = manager.list_projects()
-        assert len(projects) == 0
-    
+
     @pytest.mark.skip(reason="ProjectManager not yet implemented")
     def test_multi_project_indexing(self, test_project_path, mock_storage_dir):
         """Test managing multiple indexed projects."""
         return  # ProjectManager not yet implemented
-        
-        # Create multiple projects
-        projects_data = [
-            ("project1", str(test_project_path), "First project"),
-            ("project2", str(test_project_path), "Second project"),
-            ("project3", str(test_project_path), "Third project")
-        ]
-        
-        for name, path, desc in projects_data:
-            manager.create_project(name, path, description=desc)
-        
-        # Test listing all projects
-        all_projects = manager.list_projects()
-        assert len(all_projects) == 3
-        
-        project_names = {p['name'] for p in all_projects}
-        assert project_names == {"project1", "project2", "project3"}
-        
-        # Test switching between projects
-        for name, _, _ in projects_data:
-            success = manager.switch_project(name)
-            assert success
-            assert manager.get_current_project() == name
-            
-            # Each project should maintain its own index
-            project_storage = Path(mock_storage_dir) / "projects" / name
-            assert project_storage.exists()
-    
+
     def test_search_with_context(self, test_project_path, mock_storage_dir):
         """Test enhanced search with context and relationships."""
         chunker = MultiLanguageChunker(str(test_project_path))
@@ -653,7 +575,7 @@ class TestFullSearchFlow:
         try:
             _ = new_manager.index
             loaded = True
-        except:
+        except Exception:
             loaded = False
         
         # Should handle corruption gracefully

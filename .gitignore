@@ -1,15 +1,5 @@
-# .claude/ direct children are ignored EXCEPT the operator-facing
-# skill / hook / lib artifacts below. Per-session state, transcripts,
-# caches, worktrees, etc. created under .claude/ stay ignored because
-# the patterns below don't list them.
-.claude/*
-!.claude/README.md
-!.claude/skills/
-!.claude/hooks/
-!.claude/lib/
-# NOTE: explicit re-include of .claude/lib/*.py lives at the bottom of
-# this file because gitignore is last-match-wins, and a bare `lib/`
-# pattern further down re-excludes it.
+# Claude Code session state
+.claude/
 
 ignore/
 # Byte-compiled / optimized / DLL files
@@ -228,29 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
-# Benchmark eval outputs (test artifacts, not source)
-benchmarks/eval_*/
-benchmarks/_query_batch.json
-benchmarks/_transforms.json
-benchmarks/_grow_run_*/
-benchmarks/_harvested_search_cache.json
-benchmarks/_harvested_label_cache.json
-benchmarks/golden_harvested_labeled.json.backup
-benchmarks/_exp2_work/
-benchmarks/_exp3_symbol_data/
-benchmarks/_a1_work/
-benchmarks/_a1b_work/
-benchmarks/_d4b_work/
-benchmarks/_inspect_gold.py
-benchmarks/_inspect_codegraph.py
-
-# Phase C / listwise eval outputs (regenerable artifacts)
-bench/research/listwise_2026-*/
-
-# Re-include .claude/lib/*.py (overrides the bare lib/ pattern above)
-!.claude/lib/
-!.claude/lib/*.py
 
 # Linux test venv (CLAUDE.md documents .venv on Windows; .gitignore line 167 covers it —
 # this covers the Linux-suffixed variant used by CI/sandbox test runs)
