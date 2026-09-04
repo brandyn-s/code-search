@@ -49,7 +49,7 @@ def rerank_results(
     scores = model.predict(pairs)
 
     # Attach scores and sort
-    for result, score in zip(results, scores):
+    for result, score in zip(results, scores, strict=False):
         result["rerank_score"] = float(score)
 
     reranked = sorted(results, key=lambda r: r["rerank_score"], reverse=True)

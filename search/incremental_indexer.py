@@ -514,7 +514,7 @@ class IncrementalIndexer:
                     batch_emb.close()
 
                     if embeddings_array is not None and len(embeddings_array) == len(all_chunks):
-                        for chunk, emb_vec in zip(all_chunks, embeddings_array):
+                        for chunk, emb_vec in zip(all_chunks, embeddings_array, strict=False):
                             embedding_result = _make_embedding_result(chunk, emb_vec)
                             embedding_result.metadata["project_name"] = project_name
                             all_embedding_results.append(embedding_result)
@@ -534,7 +534,7 @@ class IncrementalIndexer:
                         batch_results = self.embedder.embed_chunks_grouped(
                             batch, batch_size=len(batch)
                         )
-                        for chunk, embedding_result in zip(batch, batch_results):
+                        for chunk, embedding_result in zip(batch, batch_results, strict=False):
                             embedding_result.metadata["project_name"] = project_name
                         all_embedding_results.extend(batch_results)
                         self._progress_fn(
@@ -801,7 +801,7 @@ class IncrementalIndexer:
             # duplicated the full chunk body in every metadata row, doubling
             # metadata.db size for no consumer benefit.)
             for chunk, embedding_result in zip(
-                chunks_to_embed, all_embedding_results
+                chunks_to_embed, all_embedding_results, strict=False
             ):
                 embedding_result.metadata["project_name"] = project_name
             self._progress_fn(

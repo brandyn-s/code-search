@@ -1,7 +1,6 @@
 """Tests for FTS5 BM25 index in CodeIndexManager."""
 import tempfile
 import numpy as np
-import pytest
 from search.indexer import CodeIndexManager
 from embeddings.embedder import EmbeddingResult
 

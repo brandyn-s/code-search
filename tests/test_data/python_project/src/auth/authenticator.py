@@ -2,8 +2,8 @@
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from datetime import datetime
+from typing import Optional
 
 
 class AuthenticationError(Exception):

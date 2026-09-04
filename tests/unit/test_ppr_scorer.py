@@ -21,12 +21,9 @@ end-to-end.
 """
 from __future__ import annotations
 
-import os
 import sqlite3
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -35,7 +32,6 @@ from search.ppr_scorer import (
     blend_ppr_into_candidates,
     get_env_config,
     _normalize_relpath,
-    _project_repo_path_for_file,
 )
 
 

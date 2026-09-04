@@ -11,7 +11,6 @@ Run: python3 -m pytest tests/integration/test_local_e2e_battery.py -v
 """
 from __future__ import annotations
 
-import os
 import shutil
 from pathlib import Path
 
@@ -107,7 +106,7 @@ def test_known_item_hits_and_quantization_parity(env, corpus):
     # a large gap here is the QT_8bit_direct regression signature.
     jaccards = [
         len(a & b) / len(a | b)
-        for a, b in zip(top10["int8"], top10["float32"])
+        for a, b in zip(top10["int8"], top10["float32"], strict=False)
     ]
     assert sum(jaccards) / len(jaccards) >= 0.7, (
         f"int8 vs float32 top-10 Jaccard {jaccards} — quantizer may be "

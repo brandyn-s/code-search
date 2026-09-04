@@ -19,7 +19,6 @@ Latency budget: target < 200ms p99 for 15-candidate cohort. SQLite WAL read is l
 """
 from __future__ import annotations
 import logging
-import os
 import sqlite3
 import time
 from pathlib import Path

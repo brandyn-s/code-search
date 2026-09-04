@@ -206,7 +206,7 @@ def _get_api_key() -> Optional[str]:
             with open(key_file, "r", encoding="utf-8") as f:
                 return f.read().strip()
         except Exception:
-            pass
+            logger.debug("could not read %s", key_file, exc_info=True)
 
     return None
 

@@ -13,4 +13,4 @@ if __name__ == "__main__":
     )
 
 from search.integrity_audit import *  # noqa: F401,F403,E402 - legacy imports
-from search.integrity_audit import main  # noqa: E402
+from search.integrity_audit import main  # noqa: E402,F401 - script entry point

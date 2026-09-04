@@ -6,12 +6,9 @@ strict schema validation that prevents the reranker from emitting
 ill-formed output.
 """
 import json
-import os
-import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 
 from search.listwise_sonnet_reranker import (
     REASON_API_KEY_MISSING,

@@ -93,4 +93,4 @@ extend-exclude = ["bench/eval/fixtures"]
 
 [tool.ruff.lint]
 # Correctness-only baseline; the codebase predates ruff and is not formatted with it.
-select = ["E9", "E722", "F63", "F7", "F82", "F811", "B006", "B008"]
+select = ["E9", "E722", "F63", "F7", "F82", "F401", "F811", "B006", "B008", "B905"]

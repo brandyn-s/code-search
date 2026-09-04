@@ -146,7 +146,7 @@ def test_second_index_run_serves_all_from_cache(isolated_caches, flat_provider, 
     assert model2.encode_calls == 0, (
         "unchanged content re-hit the model on the second run"
     )
-    for r1, r2 in zip(out1, out2):
+    for r1, r2 in zip(out1, out2, strict=False):
         assert np.allclose(r1.embedding, r2.embedding), (
             "cached vector differs from freshly encoded vector"
         )

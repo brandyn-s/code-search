@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Tuple
 
-from merkle.merkle_dag import MerkleDAG, MerkleNode
+from merkle.merkle_dag import MerkleDAG
 from merkle.snapshot_manager import SnapshotManager
 
 

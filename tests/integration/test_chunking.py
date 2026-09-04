@@ -2,8 +2,6 @@
 
 import tempfile
 import os
-import shutil
-from pathlib import Path
 
 import pytest
 

@@ -15,7 +15,6 @@ Contract pinned here:
 from __future__ import annotations
 
 import shutil
-import tempfile
 from pathlib import Path
 
 import numpy as np

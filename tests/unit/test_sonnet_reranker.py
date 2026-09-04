@@ -3,7 +3,6 @@
 The reranker MUST NEVER raise. On any failure (no API key, timeout, network
 error, parse failure), it returns the input candidates unchanged.
 """
-import os
 import sys
 from pathlib import Path
 
@@ -488,7 +487,6 @@ async def test_concurrency_limit_unset_is_unbounded(monkeypatch):
 @pytest.mark.asyncio
 async def test_concurrency_limit_invalid_value_falls_back_to_unbounded(monkeypatch):
     """ANTHROPIC_CONCURRENCY_LIMIT=garbage doesn't break the reranker."""
-    import asyncio as _asyncio
     from search.sonnet_reranker import _rerank_async
 
     candidates = [

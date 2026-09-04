@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -26,7 +25,6 @@ from search import query_rewriter
 from search.query_rewriter import (
     DEFAULT_HAIKU_MODEL,
     rewrite_query_for_bm25,
-    _call_haiku,
 )
 
 

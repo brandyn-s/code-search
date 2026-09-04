@@ -4,7 +4,7 @@ import re
 import os
 import json
 import logging
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 
 

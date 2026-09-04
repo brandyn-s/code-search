@@ -6,19 +6,17 @@ and proof.
 
 ## State of Record
 
-| Dimension | State reviewed 2026-08-13 |
+| Dimension | Current |
 |---|---|
-| Implementation baseline | `cbdb9bd` |
-| Published release | `v0.3.6` |
-| Source/release relationship | Exact: the tag and reviewed implementation commit match |
-| Runtime assertion | None; inspect the installed MCP process separately |
+| Distribution | `code-search-mcp` on PyPI; releases tagged `vX.Y.Z` with attested wheels |
 | Server surface | 16 MCP tools |
 | Registered chunking surface | 17 language modes, 21 file extensions |
+| Default embeddings | Voyage `voyage-4-large` when `VOYAGE_API_KEY` is set, otherwise a local sentence-transformer |
+| Default reranker | `RERANKER=auto`: Sonnet pointwise when `ANTHROPIC_API_KEY` is set, otherwise off |
+| Default synonym profile | `generic` |
 
-The repository contains older experiments and dated findings. They remain
-useful evidence but are not automatically statements about the current
-runtime. The source modules below and the release tag are the architecture of
-record.
+The source modules listed in the Source Map below are the architecture of
+record; this document describes behaviour, not a pinned commit.
 
 ## Design Intent
 

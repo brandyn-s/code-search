@@ -1,6 +1,4 @@
 """Tests for blended agentic reranking."""
-import pytest
-from unittest.mock import MagicMock, patch
 
 
 def test_agentic_rerank_blends_rankings():

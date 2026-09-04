@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from chunking.chunk_merging import merge_file_chunks, nws_count
+from chunking.chunk_merging import merge_file_chunks
 from chunking.code_chunk import CodeChunk
 from chunking.multi_language_chunker import MultiLanguageChunker
 

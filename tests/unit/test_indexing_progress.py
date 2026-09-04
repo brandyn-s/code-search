@@ -2,7 +2,6 @@
 import json
 import os
 import tempfile
-import time
 import numpy as np
 from unittest.mock import MagicMock
 from search.indexer import CodeIndexManager

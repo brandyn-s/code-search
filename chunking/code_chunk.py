@@ -1,9 +1,7 @@
 """Python AST-based intelligent code chunking."""
 
-import ast
-import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Optional
 from dataclasses import dataclass
 
 

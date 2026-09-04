@@ -10,7 +10,7 @@ import pytest
 from merkle.merkle_dag import MerkleDAG
 from merkle.snapshot_manager import SnapshotManager
 from merkle.change_detector import ChangeDetector
-from search.incremental_indexer import IncrementalIndexer, IncrementalIndexResult
+from search.incremental_indexer import IncrementalIndexer
 from search.indexer import CodeIndexManager as Indexer
 from embeddings.embedder import CodeEmbedder
 from chunking.multi_language_chunker import MultiLanguageChunker

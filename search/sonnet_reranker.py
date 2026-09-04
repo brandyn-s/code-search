@@ -715,7 +715,7 @@ async def _rerank_async(
             is_failure = not isinstance(score, int)
             return (is_failure, -(score if isinstance(score, int) else -1), idx)
 
-        indexed = list(enumerate(zip(scores, pool)))
+        indexed = list(enumerate(zip(scores, pool, strict=False)))
         indexed.sort(key=_sort_key)
         # Phase A: combine reranked pool + hybrid-order tail, then truncate.
         reranked_pool = [c for _, (_, c) in indexed]

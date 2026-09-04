@@ -228,7 +228,7 @@ def run_hybrid_pipeline(
         ]
         reranked = rerank_results(query, rerank_input, top_k=k)
         candidates = [item["result"] for item in reranked]
-        for item, candidate in zip(reranked, candidates):
+        for item, candidate in zip(reranked, candidates, strict=False):
             candidate.similarity_score = item.get(
                 "rerank_score",
                 candidate.similarity_score,

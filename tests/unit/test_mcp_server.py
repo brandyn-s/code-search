@@ -7,8 +7,8 @@ class TestMCPServerImport:
     def test_mcp_server_can_import(self):
         """Test that MCP server module can be imported without errors."""
         try:
-            import mcp_server.code_search_server
-            import mcp_server.code_search_mcp 
+            import mcp_server.code_search_server  # noqa: F401 - import smoke test
+            import mcp_server.code_search_mcp  # noqa: F401 - import smoke test
             assert True  # If we get here, import succeeded
         except ImportError as e:
             pytest.fail(f"Failed to import MCP server: {e}")

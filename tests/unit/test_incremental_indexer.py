@@ -14,7 +14,6 @@ covers end-to-end flow; these tests pin the new contract surfaces.
 from __future__ import annotations
 
 import tempfile
-from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock
 
@@ -32,7 +31,6 @@ from search.epoch_manifest import ManifestConsistencyError
 from search.incremental_indexer import (
     ChunkingDiagnostics,
     IncrementalIndexer,
-    IncrementalIndexResult,
 )
 from search.indexer import CodeIndexManager
 

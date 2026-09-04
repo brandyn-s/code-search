@@ -7,6 +7,7 @@ due to how SWIG generates type information. See:
 https://github.com/tree-sitter/py-tree-sitter/issues/
 """
 
+import logging
 import os
 import sys
 
@@ -343,4 +344,4 @@ def embedder_with_cleanup(mock_storage_dir):
     try:
         embedder.cleanup()
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("embedder cleanup failed", exc_info=True)

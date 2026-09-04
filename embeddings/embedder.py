@@ -978,7 +978,7 @@ class CodeEmbedder:
         miss_shas: List[str] = []
         miss_contents: List[str] = []
         seen_miss = set()
-        for sha, content in zip(shas, contents):
+        for sha, content in zip(shas, contents, strict=False):
             if sha not in by_sha and sha not in seen_miss:
                 seen_miss.add(sha)
                 miss_shas.append(sha)
@@ -990,7 +990,7 @@ class CodeEmbedder:
                 fresh,
                 operation="document",
             )
-            for sha, vec in zip(miss_shas, fresh):
+            for sha, vec in zip(miss_shas, fresh, strict=False):
                 by_sha[sha] = np.asarray(vec, dtype=np.float32)
             try:
                 db.executemany(
@@ -1076,7 +1076,7 @@ class CodeEmbedder:
             batch_embeddings = self._embed_documents_cached(batch_contents)
 
             # Create results — R12 dedup
-            for chunk, embedding in zip(batch, batch_embeddings):
+            for chunk, embedding in zip(batch, batch_embeddings, strict=False):
                 results.append(_make_embedding_result(chunk, embedding))
 
             if i + batch_size < len(chunks):
@@ -1148,7 +1148,7 @@ class CodeEmbedder:
                 )
 
             # Create results — R12 dedup
-            for chunk, embedding in zip(batch_chunks, batch_embeddings):
+            for chunk, embedding in zip(batch_chunks, batch_embeddings, strict=False):
                 results.append(_make_embedding_result(chunk, embedding))
 
             if batch_start + batch_size < len(file_items):

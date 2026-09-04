@@ -32,9 +32,7 @@ def _body_content(content: bytes) -> bytes:
             # body — it's part of the content separator, not frontmatter.
             return text[end + 4:].encode()
     return content
-import json
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple

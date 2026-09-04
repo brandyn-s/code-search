@@ -1,7 +1,7 @@
 """HTTP API request handlers."""
 
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from datetime import datetime
 
 

@@ -13,7 +13,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))

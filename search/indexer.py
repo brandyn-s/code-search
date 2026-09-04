@@ -1141,7 +1141,7 @@ class CodeIndexManager:
                 try:
                     self._fts_conn.close()
                 except Exception:
-                    pass
+                    self._logger.debug("FTS connection close failed during reset", exc_info=True)
                 self._fts_conn = None
                 if attempt == 2:
                     self._logger.error(
@@ -1693,7 +1693,7 @@ class CodeIndexManager:
         
         results = []
         seen = set()
-        for i, (similarity, index_id) in enumerate(zip(similarities[0], indices[0])):
+        for i, (similarity, index_id) in enumerate(zip(similarities[0], indices[0], strict=False)):
             if index_id == -1:  # No more results
                 break
 
@@ -1999,7 +1999,7 @@ class CodeIndexManager:
         try:
             self.metadata_db.commit()
         except Exception:
-            pass
+            self._logger.debug("metadata commit after chunk removal failed", exc_info=True)
         return len(chunks_to_remove)
     
     def _snapshot_sqlite(self, source: Path, destination: Path) -> None:

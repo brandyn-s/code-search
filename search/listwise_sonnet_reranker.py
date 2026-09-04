@@ -32,7 +32,7 @@ import logging
 import os
 import random
 import time
-from typing import Any, Sequence
+from typing import Sequence
 
 from search.logging_privacy import (
     format_query_exception_for_log,

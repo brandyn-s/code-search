@@ -15,10 +15,9 @@ Scope (B2.1): activates for path-prefix `nix/modules/` only — other .nix files
 existing NixChunker so we don't disturb the index for non-module nix files.
 """
 from __future__ import annotations
-import re
 from typing import Any, Dict, List, Optional
 
-from chunking.base_chunker import LanguageChunker, TreeSitterChunk
+from chunking.base_chunker import TreeSitterChunk
 from chunking.languages.nix_chunker import NixChunker, _NIXOS_OPTION_FUNCS
 
 

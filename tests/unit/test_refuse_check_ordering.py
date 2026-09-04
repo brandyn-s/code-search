@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from search.path_validation import refuse_as_project_root_reason
 
@@ -96,7 +95,7 @@ def test_auto_reindex_accepts_legitimate_path(tmp_path, monkeypatch):
     """SAFETY: U2 must not break the happy path. A real project path
     should proceed to the normal stale/fresh check, not get refused."""
     from unittest.mock import MagicMock
-    from search.incremental_indexer import IncrementalIndexer, IncrementalIndexResult
+    from search.incremental_indexer import IncrementalIndexer
 
     repo = tmp_path / "real-repo"
     repo.mkdir()

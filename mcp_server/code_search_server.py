@@ -1339,7 +1339,7 @@ class CodeSearchServer:
                         try:
                             self._searcher.clear_cache()
                         except Exception:
-                            pass
+                            logger.debug("searcher cache clear failed after reindex", exc_info=True)
                     self._searcher = None
             except Exception as e:
                 logger.warning(f"[F2-bg] background reindex failed: {e}")
@@ -1789,7 +1789,7 @@ class CodeSearchServer:
                         if warning:
                             response["staleness_warning"] = warning
                 except Exception:
-                    pass
+                    logger.debug("staleness advisory unavailable", exc_info=True)
 
             # Log query for offline analysis
             latency_ms = (time.time() - t_start) * 1000
@@ -2210,7 +2210,7 @@ class CodeSearchServer:
                             )
                             effective_incremental = False
                     except Exception:
-                        pass
+                        logger.debug("pipeline version check skipped", exc_info=True)
 
                 # Empty-index guard: SnapshotManager keys snapshots on
                 # MD5(path) only — not provider. When voyage runs first and
@@ -3180,7 +3180,8 @@ class CodeSearchServer:
                                 totals["projects_needing_compaction"] += 1
                             totals["total_stale_vectors"] += stale
                 except Exception:
-                    pass  # stale accounting is advisory; never fail the scan
+                    # stale accounting is advisory; never fail the scan
+                    logger.debug("stale-vector accounting skipped", exc_info=True)
                 # Surface samples only when inconsistent — gives the operator
                 # something concrete to grep without bloating the output.
                 if anything_off:
@@ -3777,7 +3778,7 @@ class CodeSearchServer:
                             info = json.load(f)
                         target_project_path = info.get("project_path")
                     except Exception:
-                        pass
+                        logger.debug("project_info.json unreadable for %s", target_dir, exc_info=True)
 
             # Reset server state if deleting the current project
             if self._current_project and target_project_path:

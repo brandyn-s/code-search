@@ -13,16 +13,11 @@ validated dataclass. These tests pin the contract:
 from __future__ import annotations
 
 import logging
-from unittest.mock import patch
 
 import pytest
 
 from search.config import (
     CONTENT_MODE_WEIGHTS,
-    CONTENT_MODES,
-    RERANKER_MODES,
-    SEARCH_MODES,
-    SearchConfig,
     get_search_config,
     parse_env_bool,
     parse_env_enum,

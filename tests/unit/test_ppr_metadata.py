@@ -21,8 +21,7 @@ Reason vocabulary tested here:
 from __future__ import annotations
 
 import tempfile
-from typing import Optional
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -157,7 +156,6 @@ class TestPPRReasonVocabulary:
 
         monkeypatch.setattr(ppr_scorer, "PPRScorer", BoomScorer)
         # Also replace it in the searcher module's local import path.
-        from search import searcher as searcher_mod
         # The function does `from search.ppr_scorer import PPRScorer` inside
         # _hybrid_search, so patching ppr_scorer.PPRScorer is enough.
 

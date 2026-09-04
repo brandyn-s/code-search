@@ -439,7 +439,7 @@ class QueryHistoryStore:
                 try:
                     connection.rollback()
                 except Exception:
-                    pass
+                    logger.debug("query history rollback failed", exc_info=True)
                 logger.warning("Query history write failed: %s", exc)
                 return False
 
@@ -450,7 +450,7 @@ class QueryHistoryStore:
             try:
                 connection.close()
             except Exception:
-                pass
+                logger.debug("query history close failed", exc_info=True)
 
     def close(self) -> None:
         """Checkpoint and close the store."""

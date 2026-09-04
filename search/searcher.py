@@ -9,7 +9,7 @@ from search.indexer import CodeIndexManager
 from embeddings.embedder import CodeEmbedder
 from search.fusion import CHUNK_TYPE_BOOSTS, reciprocal_rank_fusion
 from search.logging_privacy import format_query_for_log
-from search.query_expansion import (
+from search.query_expansion import (  # noqa: F401 - re-exported for compatibility
     CODE_SYNONYMS,
     _active_synonyms,
     _query_stem,
@@ -22,7 +22,7 @@ from search.result_models import SearchResult
 # search.config so all callers go through the same validation contract.
 # Re-exported here for backwards compatibility with tests/external code that
 # imported the R3 helpers directly from this module.
-from search.config import (
+from search.config import (  # noqa: F401 - re-exported for compatibility
     parse_env_int as _parse_env_int,
     parse_env_float as _parse_env_float,
 )
@@ -31,7 +31,7 @@ from search.config import (
 # (CONTENT_MODE_WEIGHTS values: code=(0.65, 0.35) tuned 2026-05-03,
 # vw=0.65 wins over vw=0.5 by MRR +0.016 on n=99 multi-target gold,
 # B2 per-arm sweep PR #90). Source-of-truth lives in search.config now.
-from search.config import CONTENT_MODE_WEIGHTS  # noqa: E402
+from search.config import CONTENT_MODE_WEIGHTS  # noqa: E402,F401 - re-exported
 
 class IntelligentSearcher:
     """Intelligent code search with query optimization and context awareness."""
