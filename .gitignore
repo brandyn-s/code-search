@@ -225,3 +225,7 @@ __marimo__/
 
 # public eval outputs (bench/eval/public)
 results/
+
+# Test fixtures are committed even where their names collide with build-artifact patterns above.
+!tests/fixtures/**/manifest/
+!tests/fixtures/**/manifest/current.json

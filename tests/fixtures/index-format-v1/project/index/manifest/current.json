@@ -1,0 +1,47 @@
+{
+  "artifacts": {
+    "chunk_ids.pkl": {
+      "bytes": 614,
+      "count": 10,
+      "path": ".generations/4db667eace7e2d58600892be/chunk_ids.pkl",
+      "sha256": "a7e81ba8ec1878745605ac2b4216059ec9e1c2231f6c61fd0a5473117d874491"
+    },
+    "code.index": {
+      "bytes": 225,
+      "count": 10,
+      "path": ".generations/4db667eace7e2d58600892be/code.index",
+      "sha256": "f2d8bdbfb1e9b72a9ab4b7e7298e94dfae3d099ded7eb0c0c7f94ac6c13b5052"
+    },
+    "fts5.db": {
+      "bytes": 32768,
+      "count": null,
+      "path": ".generations/4db667eace7e2d58600892be/fts5.db",
+      "sha256": "f7c27ec29cea768ce20ebb5e05e13ad3c15296881c7fec3ee540a946cda1b349"
+    },
+    "metadata.db": {
+      "bytes": 24576,
+      "count": null,
+      "path": ".generations/4db667eace7e2d58600892be/metadata.db",
+      "sha256": "2632f0970f5a3a596abf46598448bf877635a826129a411a4ccdb93d8b15b5dc"
+    },
+    "stats.json": {
+      "bytes": 485,
+      "count": null,
+      "path": ".generations/4db667eace7e2d58600892be/stats.json",
+      "sha256": "016a24bf83bee5ee92b285e21225921dab91930d6c5b46866b3358d839ead040"
+    }
+  },
+  "consistency": {
+    "all_artifacts_share_count": true,
+    "expected_count": 10
+  },
+  "created_at": "2026-09-04T04:03:07.791330+00:00",
+  "epoch_id": "2026-09-04T04-03-07-6ede1de8",
+  "input_type_enabled": false,
+  "model": "mock-embedder",
+  "pipeline_version": "95705d176b3cc446",
+  "provider": "test",
+  "quantization": "int8",
+  "vector_dim": 8,
+  "version": 1
+}

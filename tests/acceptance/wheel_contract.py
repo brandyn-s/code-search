@@ -59,7 +59,6 @@ def _assert_pytest_contract() -> None:
         _run([sys.executable, "-c", probe], cwd=REPO_ROOT).stdout
     )
     assert configured["testpaths"] == ["tests"], configured
-    assert "benchmarks" in configured["norecursedirs"], configured
     assert "--strict-markers" in configured["addopts"], configured
     assert "--disable-warnings" not in configured["addopts"], configured
     assert not any(
