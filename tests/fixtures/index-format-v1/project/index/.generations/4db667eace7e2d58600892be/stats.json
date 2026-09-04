@@ -1,0 +1,28 @@
+{
+  "total_chunks": 10,
+  "index_size": 10,
+  "embedding_dimension": 8,
+  "index_type": "IndexScalarQuantizer",
+  "quantization": "int8",
+  "live_chunks": 10,
+  "stale_vectors": 0,
+  "files_indexed": 10,
+  "top_folders": {
+    "auth": 1,
+    "billing": 1,
+    "cache": 1,
+    "config": 1,
+    "network": 1,
+    "parser": 1,
+    "reports": 1,
+    "scheduler": 1,
+    "storage": 1,
+    "telemetry": 1
+  },
+  "chunk_types": {
+    "function": 10
+  },
+  "top_tags": {
+    "python": 10
+  }
+}

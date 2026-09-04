@@ -33,7 +33,7 @@ from search.index_identity import (
 )
 from search.indexer import CodeIndexManager
 from search.index_jobs import BackgroundReindexGuard, IndexingJobState
-from search import identity_checks
+from search import identity_checks, index_format
 from search.logging_privacy import (
     format_query_exception_for_log,
     format_query_for_log,
@@ -1992,6 +1992,20 @@ class CodeSearchServer:
                 )
                 info_file = project_dir / "project_info.json"
                 if info_file.exists():
+                    # Index format gate: never modify an index written by a
+                    # newer code-search; force a rebuild for unsupported ones.
+                    try:
+                        with open(info_file, "r", encoding="utf-8") as f:
+                            format_info = json.load(f)
+                    except (OSError, ValueError):
+                        format_info = {}
+                    incompatible_format = index_format.format_incompatibility(format_info)
+                    if incompatible_format is not None:
+                        if incompatible_format[0] == index_format.STATUS_NEWER:
+                            raise RuntimeError(incompatible_format[1])
+                        if effective_incremental:
+                            logger.warning("%s; forcing full reindex", incompatible_format[1])
+                            effective_incremental = False
                     try:
                         with open(info_file, "r", encoding="utf-8") as f:
                             info = json.load(f)
@@ -2417,6 +2431,13 @@ class CodeSearchServer:
             )
             return json.dumps(response, indent=2)
 
+        incompatible = index_format.format_incompatibility(project_info)
+        if incompatible is not None:
+            response["provider"] = provider_hint
+            response["index_identity_status"], response["index_identity_error"] = incompatible
+            response["index_format_version"] = project_info.get(index_format.FIELD, 1)
+            return json.dumps(response, indent=2)
+
         provider = (
             project_info.get("embedding_provider")
             or provider_hint
@@ -2600,6 +2621,11 @@ class CodeSearchServer:
                 try:
                     with open(info_file, encoding="utf-8") as handle:
                         project_info = json.load(handle)
+                    incompatible = index_format.format_incompatibility(project_info)
+                    if incompatible is not None:
+                        response["index_identity_status"], response["index_identity_error"] = incompatible
+                        response["index_format_version"] = project_info.get(index_format.FIELD, 1)
+                        return json.dumps(response, indent=2)
                     stored_provider = project_info.get("embedding_provider")
                     if isinstance(stored_provider, str) and stored_provider:
                         response["model_information"] = _model_information(

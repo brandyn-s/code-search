@@ -1,0 +1,28 @@
+{
+  "project_name": "corpus",
+  "project_path": "/private/tmp/repo-audit/fmt-fixture/corpus",
+  "project_hash": "859c8dc0",
+  "created_at": "2026-09-03T23:03:07.698470",
+  "embedding_provider": "test",
+  "embedding_model": "mock-embedder",
+  "embedding_dimension": 8,
+  "embedding_input_type_enabled": false,
+  "content_mode": "code",
+  "index_format_version": 1,
+  "pipeline_version": "95705d176b3cc446",
+  "synonym_profile": {
+    "name": "generic",
+    "version": 1,
+    "id": "generic-v1"
+  },
+  "index_identity_status": "ready",
+  "index_identity": {
+    "schema_version": 1,
+    "repository_id": "3b67501b2327d162aa65ce6b1f8192252808de12d0b9db2691d71491f8d35bc8",
+    "checkout_id": "3b67501b2327d162aa65ce6b1f8192252808de12d0b9db2691d71491f8d35bc8",
+    "source_revision": "cec0385267915398efdcce71f6ff11b3f543b100",
+    "dirty_fingerprint": "clean",
+    "index_generation": "cdf1e453a2443bd457f8bcefadaa3b64bfaf4be21368b2ca0d78d42416394940",
+    "captured_at": "2026-09-04T04:03:07.854573Z"
+  }
+}

@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from search import index_format
 from search.index_identity import (
     IdentityCaptureError,
     IndexIdentity,
@@ -62,6 +63,7 @@ def completed_index_metadata(
 ) -> Dict[str, Any]:
     """Provenance published alongside a coherent completed identity."""
     return {
+        index_format.FIELD: index_format.INDEX_FORMAT_VERSION,
         "pipeline_version": pipeline_version,
         "synonym_profile": synonym_profile,
         "embedding_provider": configuration.provider,
