@@ -372,5 +372,5 @@ def test_get_index_status_mcp_schema_exposes_optional_project_path() -> None:
     assert "project_path" in tool.parameters["properties"]
     assert "project_path" not in tool.parameters.get("required", [])
     assert "project_path" in tool.description
-    assert tool.annotations.readOnlyHint is True
-    assert tool.annotations.idempotentHint is True
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.idempotent_hint is True

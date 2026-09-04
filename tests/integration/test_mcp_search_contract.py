@@ -11,8 +11,11 @@ from mcp_server.code_search_mcp import CodeSearchMCP
 from mcp_server.code_search_server import CodeSearchServer
 
 
-def _payload(tool_result: tuple) -> dict:
-    content, _structured = tool_result
+def _payload(tool_result) -> dict:
+    # mcp 2.x returns a CallToolResult; 1.x returned (content, structured).
+    content = getattr(tool_result, "content", None)
+    if content is None:
+        content, _structured = tool_result
     return json.loads(content[0].text)
 
 

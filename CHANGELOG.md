@@ -19,7 +19,11 @@ First release from the public primary repository `brandyn-s/code-search`.
   `CODE_SYNONYMS_PATH` to add domain vocabulary.
 - The server prints one startup line naming the resolved embedding provider
   and reranker mode.
-- `mcp` is pinned below 2.0; this code targets the 1.x `FastMCP` API.
+- Migrated to the `mcp` 2.x SDK (`MCPServer`); `fastmcp` is no longer a
+  dependency. Tool names, schemas, descriptions, and annotations are
+  unchanged. `serverInfo` now reports `code-search` and the package version.
+  `--transport streamable-http` is accepted alongside `stdio`, `sse`, and
+  the `http` alias.
 - Release workflow publishes the attested wheel to PyPI via trusted publishing.
 
 ### Removed

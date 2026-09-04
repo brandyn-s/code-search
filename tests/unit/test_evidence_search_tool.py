@@ -284,4 +284,4 @@ def test_mcp_registers_evidence_search_with_description(
     tool = mcp._tool_manager._tools["search_code_evidence"]
     assert "retrieval context only" in tool.description
     assert "evidence_ref.id" in tool.description
-    assert tool.annotations.readOnlyHint is True
+    assert tool.annotations.read_only_hint is True

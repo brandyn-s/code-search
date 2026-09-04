@@ -34,10 +34,9 @@ dependencies = [
     "click>=8.2.1",
     "faiss-cpu>=1.12.0",
     "httpx>=0.27.0",
-    "fastmcp>=2.12.2",
     "huggingface-hub>=0.34.4",
-    # mcp 2.x renamed FastMCP to MCPServer; this code targets the 1.x API.
-    "mcp>=1.13.1,<2",
+    # mcp 2.x API (MCPServer). 3.x is a future breaking major.
+    "mcp>=2,<3",
     "numpy",
     "PyYAML>=6.0",
     "rich>=14.1.0",

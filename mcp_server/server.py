@@ -1,4 +1,4 @@
-"""FastMCP server for Claude Code integration - main entry point."""
+"""code-search MCP server entry point (stdio by default)."""
 import json
 import sys
 import threading
@@ -119,9 +119,9 @@ def main():
     parser = argparse.ArgumentParser(description="Code Search MCP Server")
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse", "http"],
+        choices=["stdio", "sse", "http", "streamable-http"],
         default="stdio",
-        help="Transport protocol to use (default: stdio)"
+        help="Transport protocol to use (default: stdio; http is an alias for sse)"
     )
     parser.add_argument(
         "--host",

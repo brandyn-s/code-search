@@ -227,7 +227,7 @@ MRR aggregates reciprocal rank across queries; it does not by itself determine t
 | Evidence is absent | Index identity or generation is stale | Reindex the unchanged checkout; evidence fails closed until identity is current. |
 | Reranker is unavailable | `_metadata.reranker.reason` and the startup line | Results keep the hybrid order; set `ANTHROPIC_API_KEY` or `RERANKER=off`. |
 | Changed environment is ignored | Server was already running | Restart the MCP process; configuration is process-static. |
-| `ModuleNotFoundError: mcp.server.fastmcp` | `mcp` 2.x installed | Install `code-search-mcp` in its own environment; it pins `mcp<2`. |
+| `ImportError` from `mcp.*` at startup | `mcp` 1.x installed alongside | Install `code-search-mcp` in its own environment (`uvx` does this); it requires `mcp` 2.x. |
 
 ## Verified Install
 

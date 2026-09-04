@@ -1,11 +1,12 @@
-"""Code Search MCP - FastMCP server for tool registration and management."""
+"""Code Search MCP - MCPServer (mcp 2.x) tool registration and management."""
 
 import json
 import logging
+from importlib import metadata
 from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 import yaml
 from mcp_server.code_search_server import CodeSearchServer
@@ -14,29 +15,43 @@ from mcp_server.evidence_tools import search_code_evidence as enrich_search_code
 # Configure logging
 logger = logging.getLogger(__name__)
 
+SERVER_NAME = "code-search"
+DISTRIBUTION_NAME = "code-search-mcp"
+# Fallback when the package metadata is unavailable (source checkout without
+# an install). Keep in sync with pyproject.toml.
+FALLBACK_VERSION = "0.4.0"
+
+
+def package_version() -> str:
+    """Version reported in serverInfo: installed distribution, else the fallback."""
+    try:
+        return metadata.version(DISTRIBUTION_NAME)
+    except metadata.PackageNotFoundError:
+        return FALLBACK_VERSION
+
 # Tool annotations for read/write/destructive classification
 TOOL_ANNOTATIONS = {
-    "search_code": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "search_code_evidence": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "index_directory": ToolAnnotations(readOnlyHint=False),
-    "get_indexing_progress": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "find_similar_code": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "get_index_status": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "list_projects": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "search_all_projects": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "switch_project": ToolAnnotations(readOnlyHint=False),
-    "index_test_project": ToolAnnotations(readOnlyHint=False),
-    "clear_index": ToolAnnotations(readOnlyHint=False, destructiveHint=True),
-    "delete_project": ToolAnnotations(destructiveHint=True, idempotentHint=False),
-    "cancel_indexing": ToolAnnotations(destructiveHint=True, idempotentHint=True),
-    "verify_index_integrity": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "get_file_context": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
-    "code_localize": ToolAnnotations(readOnlyHint=True, idempotentHint=True),
+    "search_code": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "search_code_evidence": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "index_directory": ToolAnnotations(read_only_hint=False),
+    "get_indexing_progress": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "find_similar_code": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "get_index_status": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "list_projects": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "search_all_projects": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "switch_project": ToolAnnotations(read_only_hint=False),
+    "index_test_project": ToolAnnotations(read_only_hint=False),
+    "clear_index": ToolAnnotations(read_only_hint=False, destructive_hint=True),
+    "delete_project": ToolAnnotations(destructive_hint=True, idempotent_hint=False),
+    "cancel_indexing": ToolAnnotations(destructive_hint=True, idempotent_hint=True),
+    "verify_index_integrity": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "get_file_context": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
+    "code_localize": ToolAnnotations(read_only_hint=True, idempotent_hint=True),
 }
 
 
-class CodeSearchMCP(FastMCP):
-    """MCP server that manages FastMCP instance and tool registration."""
+class CodeSearchMCP(MCPServer):
+    """MCP server that owns tool, resource, and prompt registration."""
 
     def __init__(
         self,
@@ -45,9 +60,15 @@ class CodeSearchMCP(FastMCP):
         host: str = "127.0.0.1",
         port: int = 8000,
     ):
-        """Initialize the MCP server with a code search server instance."""
-        super().__init__("Code Search", host=host, port=port)
+        """Initialize the MCP server with a code search server instance.
+
+        ``host`` and ``port`` apply to the network transports only; mcp 2.x
+        takes them at ``run()`` time, so they are stored here and forwarded.
+        """
+        super().__init__(SERVER_NAME, version=package_version())
         self.server = server
+        self.host = host
+        self.port = port
         self._strings = self._load_strings()
         self._setup()
 
@@ -130,14 +151,16 @@ class CodeSearchMCP(FastMCP):
         )
 
     def run(self, transport: str = "stdio"):
-        """Run the MCP server with specified transport."""
+        """Run the MCP server with the specified transport.
+
+        ``http`` remains an alias for ``sse`` so existing client configs keep
+        working; ``streamable-http`` is available for clients that prefer it.
+        Network transports carry no authentication and bind to ``host`` only.
+        """
         if transport == "http":
             transport = "sse"
 
-        if transport in ["sse", "streamable-http"]:
-            logger.info(
-                "Starting HTTP server on %s:%s",
-                self.settings.host,
-                self.settings.port,
-            )
-        return super().run(transport=transport)
+        if transport in ("sse", "streamable-http"):
+            logger.info("Starting HTTP server on %s:%s", self.host, self.port)
+            return super().run(transport=transport, host=self.host, port=self.port)
+        return super().run(transport="stdio")

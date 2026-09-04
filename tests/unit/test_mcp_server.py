@@ -15,5 +15,5 @@ class TestMCPServerImport:
 
 
 # Note: Most MCP server functionality is tested in integration tests
-# where the actual decorators and FastMCP framework are working properly.
+# where the actual decorators and the MCPServer framework are working properly.
 # Unit tests here would just be testing mocks, not real functionality.
