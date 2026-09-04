@@ -49,6 +49,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Tuple
 
+from search.reranker_registry import registered_rerankers
+
 _module_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -167,9 +169,10 @@ def parse_env_enum(
 CONTENT_MODES: Tuple[str, ...] = ("code", "docs", "all")
 
 # Reranker mode allowlist. The dispatcher in searcher.py routes by this string.
-RERANKER_MODES: Tuple[str, ...] = (
-    "auto", "sonnet", "listwise", "cross-encoder", "off",
-)
+# "auto" plus every mode registered in search.reranker_registry (sonnet,
+# listwise, cross-encoder, off). Registering a reranker makes it a valid
+# RERANKER value without editing this module.
+RERANKER_MODES: Tuple[str, ...] = ("auto", *registered_rerankers())
 
 # Modes RERANKER=auto can resolve to. "auto" picks the Sonnet pointwise
 # reranker when ANTHROPIC_API_KEY is present and "off" otherwise, so a fresh
