@@ -13,6 +13,9 @@ from `main` via `workflow_dispatch`.
    publishes the same wheel to PyPI.
 3. Confirm `uvx code-search-mcp@<v> --help` works from a clean machine.
 
+Rehearse the whole pipeline once with a pre-release before the first real tag:
+see [RELEASE_REHEARSAL.md](RELEASE_REHEARSAL.md).
+
 ## One-time PyPI setup
 
 PyPI publishing uses trusted publishing (OIDC); no token is stored.
