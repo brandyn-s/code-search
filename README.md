@@ -297,5 +297,5 @@ are localhost-only) and how to report a vulnerability privately.
 
 GPL-3.0-only. See [LICENSE](LICENSE). This project is derived from
 [FarhanAliRaza/claude-context-local](https://github.com/FarhanAliRaza/claude-context-local)
-(GPL-3.0); modifications are copyright 2026 redacted Security and are released
+(GPL-3.0); modifications are copyright 2026 The code-search contributors and are released
 under the same license.

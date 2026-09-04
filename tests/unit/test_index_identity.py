@@ -56,13 +56,13 @@ def test_clean_capture_matches_the_shared_identity_envelope(tmp_path: Path) -> N
         "remote",
         "add",
         "origin",
-        "git@GitHub.COM:redacted-org/code-search.git",
+        "git@GitHub.COM:Example-Org-Dev/code-search.git",
     )
     captured_at = datetime(2026, 7, 26, 18, 0, tzinfo=timezone.utc)
 
     identity = capture_index_identity(root, captured_at=captured_at).to_dict()
 
-    normalized = "https://github.com/redacted-org/code-search"
+    normalized = "https://github.com/Example-Org-Dev/code-search"
     repository_id = hashlib.sha256(
         f"remote:{normalized}".encode("utf-8")
     ).hexdigest()

@@ -9,7 +9,9 @@ All notable changes to this project are documented here. The format follows
 First release from the public primary repository `brandyn-s/code-search`.
 
 ### Changed
-- Package renamed from `redacted-code-search` to `code-search-mcp`; the console
+- Removed all references to the originating organization; author metadata now
+  names the project contributors.
+- Package renamed from its pre-public internal package name to `code-search-mcp`; the console
   script is `code-search-mcp`, so `uvx code-search-mcp` starts the server.
 - `RERANKER` defaults to `auto`: Sonnet pointwise reranking when
   `ANTHROPIC_API_KEY` is set, otherwise `off`. Previously the default was

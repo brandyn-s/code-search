@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "GPL-3.0-only" }
 requires-python = ">=3.12"
 authors = [
-    { name = "redacted Security" }
+    { name = "The code-search contributors" }
 ]
 keywords = [
     "semantic-search",

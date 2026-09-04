@@ -297,8 +297,8 @@ def test_active_project_metadata_has_no_retired_organization_references() -> Non
         path.read_text(encoding="utf-8") for path in active_paths
     )
 
-    assert "redacted-org" not in active_text
-    assert "redacted-org/.github" not in active_text
+    assert "-Internal-Apps" not in active_text
+    assert "-Security/.github" not in active_text
     assert "github.com/brandyn-s/code-search" in active_text
     assert "github.com/brandyn-s/code-graph" in active_text
     assert (
