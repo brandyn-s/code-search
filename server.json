@@ -1,0 +1,50 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.brandyn-s/code-search",
+  "title": "code-search",
+  "description": "Hybrid semantic + lexical code search with per-project indexes and checkout-bound evidence.",
+  "repository": {
+    "url": "https://github.com/brandyn-s/code-search",
+    "source": "github"
+  },
+  "version": "0.4.0",
+  "websiteUrl": "https://github.com/brandyn-s/code-search",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "code-search-mcp",
+      "version": "0.4.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "VOYAGE_API_KEY",
+          "description": "Optional. Use Voyage AI embeddings (voyage-4-large) instead of the local model.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Optional. Enables Sonnet reranking of the top hybrid candidates.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "CODE_SEARCH_STORAGE",
+          "description": "Optional. Directory for indexes and local models (default ~/.claude_code_search).",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "RERANKER",
+          "description": "Optional. auto (default), sonnet, listwise, cross-encoder, or off.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

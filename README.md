@@ -1,5 +1,7 @@
 # code-search
 
+<!-- mcp-name: io.github.brandyn-s/code-search -->
+
 Hybrid semantic and lexical code search as an MCP server, with persistent
 per-project indexes and source-backed evidence for every claim an agent makes.
 
@@ -201,6 +203,11 @@ Cloud providers receive query text and chunk text; use the local provider and
 
 ## Measured Evidence
 
+Reproducible offline baseline on public corpora (Flask 3.1.1 and Requests
+v2.32.4, local embeddings, no reranker): see
+[bench/eval/public/RESULTS.md](bench/eval/public/RESULTS.md) for the numbers,
+the exact commands, and how to compare a change against them.
+
 On a frozen balanced public LocBench n=80 endpoint, release `v0.3.5` measured
 Acc@1 `0.375`, Acc@3 `0.613`, Acc@10 `0.788`, and MRR@10 `0.503`; a
 Sourcegraph public endpoint measured `0.150/0.175/0.188/0.165` on the same
@@ -227,6 +234,7 @@ MRR aggregates reciprocal rank across queries; it does not by itself determine t
 | Evidence is absent | Index identity or generation is stale | Reindex the unchanged checkout; evidence fails closed until identity is current. |
 | Reranker is unavailable | `_metadata.reranker.reason` and the startup line | Results keep the hybrid order; set `ANTHROPIC_API_KEY` or `RERANKER=off`. |
 | Changed environment is ignored | Server was already running | Restart the MCP process; configuration is process-static. |
+| Anything else | `code-search-mcp doctor` | Prints resolved config (secrets redacted), storage, indexed projects, provider reachability, grammars, and versions; add `--json` when filing an issue. |
 | `ImportError` from `mcp.*` at startup | `mcp` 1.x installed alongside | Install `code-search-mcp` in its own environment (`uvx` does this); it requires `mcp` 2.x. |
 
 ## Verified Install

@@ -39,6 +39,18 @@ First release from the public primary repository `brandyn-s/code-search`.
   derived from internal codebases.
 
 ### Added
+- `code-search-mcp doctor [--json]`: resolved configuration with secrets
+  redacted, storage and project inventory with generation and format version,
+  provider reachability, grammar list, and versions.
+- Index format versioning (`index_format_version` in `project_info.json`):
+  indexes from a newer code-search are refused with upgrade guidance, older
+  unsupported ones ask for a reindex; see `docs/index-format.md`.
+- `SECURITY.md` with the reporting process and threat model.
+- Public evaluation results and runbook (`bench/eval/public/RESULTS.md`).
+- Release rehearsals: `X.Y.ZrcN` versions publish as GitHub and PyPI
+  pre-releases (`docs/RELEASE_REHEARSAL.md`).
+- `server.json` for the MCP registry (`docs/registry.md`).
+- Concurrency, incremental-vs-full property, and index-format tests.
 - `docs/ENV_REFERENCE.md` rewritten as a complete, current reference for every
   environment variable the server reads.
 - `[tool.ruff]` correctness baseline and a pip Dependabot ecosystem.
