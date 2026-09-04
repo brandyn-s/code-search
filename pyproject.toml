@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "code-search-mcp"
-version = "0.4.0rc1"
+version = "0.4.0"
 description = "Hybrid semantic + keyword code search MCP server. FAISS vector + FTS5 BM25 with Voyage AI, Jina, or local embeddings."
 readme = "README.md"
 license = { text = "GPL-3.0-only" }
