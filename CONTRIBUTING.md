@@ -24,6 +24,27 @@ Retrieval-quality claims need measurement, not just green tests. If a change
 is meant to improve ranking, include the eval you ran and its numbers in the
 pull request description.
 
+## Measuring a ranking change
+
+Retrieval-quality claims need numbers on a corpus anyone can fetch. The public
+evaluation set under [`bench/eval/public/`](bench/eval/public/README.md) has
+30 queries each over pinned checkouts of Flask and Requests.
+
+```bash
+git clone --depth 1 --branch 3.1.1 https://github.com/pallets/flask /tmp/flask
+python bench/eval/public/run_public_eval.py --corpus /tmp/flask \
+  --gold bench/eval/public/golden_flask.json --output results/flask-before.json
+# ... make your change ...
+python bench/eval/public/run_public_eval.py --corpus /tmp/flask \
+  --gold bench/eval/public/golden_flask.json --output results/flask-after.json
+python bench/eval/public/compare.py results/flask-before.json results/flask-after.json
+```
+
+`compare.py` prints MRR, HR@1, Recall@10 and a paired bootstrap 95% CI on the
+per-query delta. Put that output in the pull request. Only compare runs with
+the same corpus commit, provider, model and reranker; the runner records all
+four in the result file. Never commit `results/` or index artifacts.
+
 ## Documentation contracts
 
 `tests/unit/test_documentation_contract.py` pins README, CLAUDE.md, and

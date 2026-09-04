@@ -222,3 +222,6 @@ __marimo__/
 # Linux test venv (CLAUDE.md documents .venv on Windows; .gitignore line 167 covers it —
 # this covers the Linux-suffixed variant used by CI/sandbox test runs)
 .venv-linux/
+
+# public eval outputs (bench/eval/public)
+results/
