@@ -388,6 +388,20 @@ class IncrementalIndexer:
                 chunking_diagnostics=self._last_chunking_diag,
             )
 
+        except InterruptedError:
+            # Cancellation (progress checkpoint or Merkle walk) is not a
+            # failure: restore the last-good index and let the caller record
+            # the job as cancelled.
+            logger.info("Incremental indexing cancelled; restoring last-good index")
+            try:
+                self.indexer.rollback_unpublished_changes()
+            except Exception as rollback_error:
+                logger.error(
+                    "Failed to restore the last-good index after incremental "
+                    "indexing was cancelled: %s",
+                    rollback_error,
+                )
+            raise
         except Exception as e:
             logger.error(f"Incremental indexing failed: {e}")
             try:
@@ -688,6 +702,20 @@ class IncrementalIndexer:
                 chunking_diagnostics=self._last_chunking_diag,
             )
 
+        except InterruptedError:
+            # Cancellation (progress checkpoint or Merkle walk) is not a
+            # failure: restore the last-good index and let the caller record
+            # the job as cancelled.
+            logger.info("Full indexing cancelled; restoring last-good index")
+            try:
+                self.indexer.rollback_unpublished_changes()
+            except Exception as rollback_error:
+                logger.error(
+                    "Failed to restore the last-good index after full "
+                    "indexing was cancelled: %s",
+                    rollback_error,
+                )
+            raise
         except Exception as e:
             logger.error(f"Full indexing failed: {e}")
             try:

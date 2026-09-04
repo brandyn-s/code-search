@@ -314,13 +314,15 @@ def test_full_reindex_cancel_preserves_last_good(
         progress_fn=cancel_during_chunking,
     )
 
-    result = ii.incremental_index(
-        str(project_dir),
-        project_name="proj",
-        force_full=True,
-    )
+    # Cancellation propagates as InterruptedError (the server records the job
+    # as cancelled); the last-good index must already be restored.
+    with pytest.raises(InterruptedError):
+        ii.incremental_index(
+            str(project_dir),
+            project_name="proj",
+            force_full=True,
+        )
 
-    assert result.success is False
     _assert_last_good_restored(indexer, expected_epoch)
     _close_manager(indexer)
 
@@ -357,12 +359,12 @@ def test_incremental_cancel_after_removal_rolls_back_same_process(
         progress_fn=cancel_after_removal,
     )
 
-    result = interrupted.incremental_index(
-        str(project_dir),
-        project_name="proj",
-    )
+    with pytest.raises(InterruptedError):
+        interrupted.incremental_index(
+            str(project_dir),
+            project_name="proj",
+        )
 
-    assert result.success is False
     publication = read_with_fallback(indexer.storage_dir)
     assert publication.freshness == "fresh"
     assert publication.manifest["epoch_id"] == expected_epoch

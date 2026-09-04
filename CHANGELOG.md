@@ -26,6 +26,12 @@ First release from the public primary repository `brandyn-s/code-search`.
   the `http` alias.
 - Release workflow publishes the attested wheel to PyPI via trusted publishing.
 
+### Fixed
+- Cancelling an indexing job during the Merkle walk or a progress
+  checkpoint now ends the job as `cancelled` and restores the last-good
+  index. Previously the indexer swallowed the cancellation and the job was
+  reported as `failed`.
+
 ### Removed
 - The research harness (`bench/research/`, `benchmarks/`), internal evaluation
   findings, plan documents, and internal process tooling were removed from the
